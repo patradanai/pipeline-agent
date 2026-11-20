@@ -1,0 +1,16 @@
+{
+  "name": "forge-suite",
+  "version": "6.0.7",
+  "private": true,
+  "type": "module",
+  "description": "Forge multi-agent SDLC orchestrator: shared core + OMP extension adapter + Claude Code plugin adapter",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test:core": "node --test core-tests/*.test.mjs",
+    "test:examples": "node --test examples/*.test.mjs",
+    "test:omp": "node --experimental-strip-types --test dist/omp/*/tests/*.test.mjs && bash dist/omp/*/smoke-install.sh",
+    "test:cc": "node --test adapters/claude-code/tests/*.test.mjs",
+    "test": "npm run build && npm run test:core && npm run test:examples && npm run test:omp && npm run test:cc"
+  },
+  "engines": { "node": ">=22" }
+}

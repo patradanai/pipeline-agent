@@ -1,0 +1,49 @@
+/**
+ * Platform wording for Forge instructions.
+ *
+ * core.mjs renders instructions in OMP wording (the original platform), which
+ * keeps the OMP adapter byte-for-byte stable. Other adapters translate the few
+ * platform-specific sentences here. tests/platform.test.mjs renders every
+ * gate and fails if any OMP-only concept leaks into another platform's text.
+ */
+
+const CC_PLAN_SUBMIT = 'Claude Code submission: make sure the session is in plan mode (call EnterPlanMode, or ask the user to press Shift+Tab until plan mode is shown). Write the COMPLETE plan to the plan file Claude Code assigns in plan mode (or pass it as the `plan` argument), then call ExitPlanMode. The plan must include a visible \'Cooking & Gap Analysis\' section. Forge checks the plan contract before Claude Code shows the approval prompt; if Forge denies the call, fix the listed issues and call ExitPlanMode again. Do not implement or self-approve.';
+
+const CLAUDE_CODE_RULES = [
+  [/\[OMP FORGE/g, '[FORGE'],
+  [/Submit the plan for approval after writing a real local:\/\/ plan file\.[^\n]*?requires human approval\./g,
+    'Submit the plan for human approval only through Claude Code\'s native plan approval: call ExitPlanMode with the complete plan text while in plan mode. Forge validates the plan contract before the approval prompt opens.'],
+  [/then the orchestrator composes the canonical local:\/\/ plan file/g, 'then the orchestrator composes the complete plan'],
+  [/Write the complete proposed plan into OMP's plan-mode sandbox[\s\S]*?Do not implement or self-approve\./g, CC_PLAN_SUBMIT],
+  [/\[GATE 3\/6: NATIVE OMP PLAN APPROVAL\][\s\S]*?Do not finish with just a textual 'ready' response\./g,
+    `[GATE 3/6: NATIVE PLAN APPROVAL]\n${CC_PLAN_SUBMIT}`],
+  [/You are back in native OMP PLAN MODE\./g, 'Switch back to plan mode (call EnterPlanMode, or ask the user to press Shift+Tab).'],
+  [/Modify only the OMP local:\/\/ plan, producing/g, 'Revise only the plan text, producing'],
+  [/Use the SAME canonical plan file[\s\S]*?Do NOT auto-approve or implement\./g,
+    'Submit the revised plan with ExitPlanMode (complete text, not a diff). Forge rejects a revision identical to the previously approved plan. Do NOT auto-approve or implement.'],
+  [/local:\/\/[A-Za-z0-9._-]+-plan\.md/g, 'the approved plan'],
+  [/via native task/g, 'via the Agent tool'],
+  [/through native task/g, 'through the Agent tool'],
+  [/through the native task tool/g, 'through the Agent tool'],
+  [/the native task tool/g, 'the Agent tool'],
+  [/native task/g, 'Agent tool'],
+  [/native OMP Plan Approval/g, 'native Claude Code plan approval'],
+  [/native OMP/g, 'native Claude Code'],
+  [/Native OMP/g, 'Native Claude Code'],
+  [/OMP's /g, 'Claude Code\'s '],
+  [/\bOMP\b/g, 'Claude Code'],
+];
+
+export const PLATFORMS = Object.freeze(['omp', 'claude-code']);
+
+/** Translate an instruction rendered in OMP wording to the target platform. */
+export function adaptInstruction(text, platform = 'omp') {
+  if (platform === 'omp' || text == null) return text;
+  if (platform !== 'claude-code') throw new Error(`Unknown Forge platform: ${platform}`);
+  let out = String(text);
+  for (const [pattern, replacement] of CLAUDE_CODE_RULES) out = out.replace(pattern, replacement);
+  return out;
+}
+
+/** OMP-only concepts that must never appear in another platform's instructions. */
+export const OMP_ONLY_PATTERN = /local:\/\/|xd:\/\/|\bOMP\b|native task/;

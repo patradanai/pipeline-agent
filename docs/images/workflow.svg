@@ -1,0 +1,96 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1250 560" width="1250" height="560" font-family="-apple-system, 'Sukhumvit Set', 'Noto Sans Thai', 'Segoe UI', sans-serif">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#475569"/></marker>
+    <marker id="r" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#dc2626"/></marker>
+  </defs>
+  <rect width="1250" height="560" rx="18" fill="#ffffff"/>
+  <text x="625" y="34" text-anchor="middle" font-size="22" font-weight="700" fill="#0f172a">Forge workflow — 6 Gates, 9 agents</text>
+
+  <!-- read-only bracket over gates 1-3 -->
+  <path d="M24 66 V58 H612 V66" fill="none" stroke="#64748b" stroke-width="1.5"/>
+  <text x="318" y="52" text-anchor="middle" font-size="13" fill="#475569">🔒 ก่อนอนุมัติ: อ่านอย่างเดียว — ห้ามแก้ไฟล์ ห้ามรันคำสั่งที่เปลี่ยนแปลงระบบ</text>
+
+  <!-- gates -->
+  <g font-size="12">
+    <rect x="20"   y="78" width="180" height="128" rx="12" fill="#eff6ff" stroke="#3b82f6" stroke-width="2"/>
+    <text x="110" y="100" text-anchor="middle" fill="#1d4ed8" font-weight="700">GATE 1</text>
+    <text x="110" y="124" text-anchor="middle" font-size="17" font-weight="700" fill="#0f172a">Requirement</text>
+    <text x="110" y="144" text-anchor="middle" fill="#334155">วิเคราะห์ความต้องการ</text>
+    <text x="110" y="170" text-anchor="middle" fill="#1d4ed8">discovery → cooking</text>
+    <text x="110" y="187" text-anchor="middle" fill="#1d4ed8">→ challenge</text>
+
+    <rect x="226" y="78" width="180" height="128" rx="12" fill="#eff6ff" stroke="#3b82f6" stroke-width="2"/>
+    <text x="316" y="100" text-anchor="middle" fill="#1d4ed8" font-weight="700">GATE 2</text>
+    <text x="316" y="124" text-anchor="middle" font-size="17" font-weight="700" fill="#0f172a">Planning</text>
+    <text x="316" y="144" text-anchor="middle" fill="#334155">วางแผน + plan contract</text>
+    <text x="316" y="170" text-anchor="middle" fill="#1d4ed8">BIZ · REQ · TC · QG</text>
+    <text x="316" y="187" text-anchor="middle" fill="#1d4ed8">ตรวจรูปแบบก่อนส่งอนุมัติ</text>
+
+    <rect x="432" y="78" width="180" height="128" rx="12" fill="#fffbeb" stroke="#f59e0b" stroke-width="2.5"/>
+    <text x="522" y="100" text-anchor="middle" fill="#b45309" font-weight="700">GATE 3</text>
+    <text x="522" y="124" text-anchor="middle" font-size="17" font-weight="700" fill="#0f172a">Approval</text>
+    <text x="522" y="144" text-anchor="middle" fill="#334155">คุณอนุมัติแผนเอง</text>
+    <text x="522" y="170" text-anchor="middle" fill="#b45309">native plan approval</text>
+    <text x="522" y="187" text-anchor="middle" fill="#b45309">AI อนุมัติแทนไม่ได้</text>
+
+    <rect x="638" y="78" width="180" height="128" rx="12" fill="#f0fdf4" stroke="#22c55e" stroke-width="2"/>
+    <text x="728" y="100" text-anchor="middle" fill="#15803d" font-weight="700">GATE 4</text>
+    <text x="728" y="124" text-anchor="middle" font-size="17" font-weight="700" fill="#0f172a">Execute</text>
+    <text x="728" y="144" text-anchor="middle" fill="#334155">ลงมือทำตามแผน</text>
+    <text x="728" y="170" text-anchor="middle" fill="#15803d">แก้ไฟล์ได้ตามแผนเท่านั้น</text>
+    <text x="728" y="187" text-anchor="middle" fill="#15803d">main รัน test ที่ปลอดภัย</text>
+
+    <rect x="844" y="78" width="180" height="128" rx="12" fill="#faf5ff" stroke="#a855f7" stroke-width="2"/>
+    <text x="934" y="100" text-anchor="middle" fill="#7e22ce" font-weight="700">GATE 5</text>
+    <text x="934" y="124" text-anchor="middle" font-size="17" font-weight="700" fill="#0f172a">QA</text>
+    <text x="934" y="144" text-anchor="middle" fill="#334155">ตรวจอิสระ อ่านอย่างเดียว</text>
+    <text x="934" y="170" text-anchor="middle" fill="#7e22ce">ทุก TC ต้องมีหลักฐาน</text>
+    <text x="934" y="187" text-anchor="middle" fill="#7e22ce">PASS · FAIL · BLOCKED</text>
+
+    <rect x="1050" y="78" width="180" height="128" rx="12" fill="#f0fdfa" stroke="#14b8a6" stroke-width="2"/>
+    <text x="1140" y="100" text-anchor="middle" fill="#0f766e" font-weight="700">GATE 6</text>
+    <text x="1140" y="124" text-anchor="middle" font-size="17" font-weight="700" fill="#0f172a">Delivery</text>
+    <text x="1140" y="144" text-anchor="middle" fill="#334155">สรุปงาน + commit message</text>
+    <text x="1140" y="170" text-anchor="middle" fill="#0f766e">คุณ commit เอง</text>
+    <text x="1140" y="187" text-anchor="middle" fill="#0f766e">Forge ไม่แตะ Git</text>
+  </g>
+
+  <!-- arrows between gates -->
+  <g stroke="#475569" stroke-width="2" marker-end="url(#a)">
+    <line x1="201" y1="142" x2="224" y2="142"/>
+    <line x1="407" y1="142" x2="430" y2="142"/>
+    <line x1="613" y1="142" x2="636" y2="142"/>
+    <line x1="819" y1="142" x2="842" y2="142"/>
+    <line x1="1025" y1="142" x2="1048" y2="142"/>
+  </g>
+
+  <!-- agents per gate -->
+  <g font-size="13" font-family="ui-monospace, Menlo, monospace">
+    <rect x="26" y="226" width="168" height="28" rx="14" fill="#dbeafe"/><text x="110" y="245" text-anchor="middle" fill="#1e3a8a">forge-requirement</text>
+    <rect x="26" y="260" width="168" height="28" rx="14" fill="#dbeafe"/><text x="110" y="279" text-anchor="middle" fill="#1e3a8a">forge-critic</text>
+    <rect x="26" y="294" width="168" height="28" rx="14" fill="#dbeafe"/><text x="110" y="313" text-anchor="middle" fill="#1e3a8a">forge-architect</text>
+    <rect x="26" y="328" width="168" height="28" rx="14" fill="#dbeafe"/><text x="110" y="347" text-anchor="middle" fill="#1e3a8a">forge-qa-strategist</text>
+
+    <rect x="232" y="226" width="168" height="28" rx="14" fill="#dbeafe"/><text x="316" y="245" text-anchor="middle" fill="#1e3a8a">forge-planner</text>
+
+    <rect x="438" y="226" width="168" height="28" rx="14" fill="#fde68a"/><text x="522" y="245" text-anchor="middle" fill="#78350f" font-family="-apple-system, 'Sukhumvit Set', sans-serif">👤 คุณ (มนุษย์)</text>
+
+    <rect x="644" y="226" width="168" height="28" rx="14" fill="#bbf7d0"/><text x="728" y="245" text-anchor="middle" fill="#14532d">forge-executor</text>
+
+    <rect x="850" y="226" width="168" height="28" rx="14" fill="#e9d5ff"/><text x="934" y="245" text-anchor="middle" fill="#581c87">forge-qa</text>
+    <rect x="850" y="260" width="168" height="28" rx="14" fill="#e9d5ff"/><text x="934" y="279" text-anchor="middle" fill="#581c87">forge-code-reviewer</text>
+
+    <rect x="1056" y="226" width="168" height="28" rx="14" fill="#99f6e4"/><text x="1140" y="245" text-anchor="middle" fill="#134e4a">forge-delivery</text>
+  </g>
+
+  <!-- QA fail loop -->
+  <path d="M934 290 V410 H316 V258" fill="none" stroke="#dc2626" stroke-width="2" stroke-dasharray="7 5" marker-end="url(#r)"/>
+  <rect x="470" y="396" width="310" height="28" rx="8" fill="#fef2f2"/>
+  <text x="625" y="415" text-anchor="middle" font-size="13" fill="#b91c1c">QA FAIL → แผนแก้ไข (rework) → ต้องอนุมัติใหม่</text>
+
+  <!-- footer -->
+  <rect x="20" y="452" width="1210" height="86" rx="12" fill="#f8fafc" stroke="#e2e8f0"/>
+  <text x="40" y="480" font-size="14" font-weight="700" fill="#0f172a">กฎที่ใช้ทุก Gate</text>
+  <text x="40" y="504" font-size="13" fill="#334155">• agent ห้ามรัน git add/commit/push/tag/merge และห้าม publish repo   • specialist ทุกตัวอ่านอย่างเดียว มีแค่ forge-executor ที่แก้ไฟล์ได้ (และไม่มี shell)</text>
+  <text x="40" y="526" font-size="13" fill="#334155">• Gate จะไปต่อเมื่อ agent ที่กำหนดส่งรายงานครบเท่านั้น   • ห้ามสร้างหลักฐานเอง: test ที่ไม่ได้รันจริงต้องเป็น NOT_RUN</text>
+</svg>
