@@ -1,11 +1,11 @@
-# OMP Forge v5.26 — Requirement รอบคอบเป็นหลัก
+# OMP Forge v6.1 — Requirement รอบเดียว agent เดียว
 
-## ติดตั้งทับ v5.25 / v5.24
+## ติดตั้งทับเวอร์ชันเดิม
 
 ```bash
 cd ~/Downloads
-unzip omp-forge-global-v5.26.zip
-cd omp-forge-global-v5.26
+unzip omp-forge-global-v6.1.0.zip
+cd omp-forge-global-v6.1.0
 bash ./install.sh
 ```
 
@@ -19,25 +19,19 @@ bash ./install.sh
 /forge status
 ```
 
-Forge ยังคงใช้ Native OMP Approval, Gate Skills, 9 Agents และไม่ทำ git commit/push เอง.
+Forge ยังคงใช้ Native OMP Approval, Gate Skills, 6 Agents และไม่ทำ git commit/push เอง.
 
 ---
 
-## v5.26: โหมด Requirement (รอบคอบเป็นค่าเริ่มต้น)
+## v6.1: Requirement รอบเดียว agent เดียว
 
-| โหมด | Subagent | ความรอบคอบ |
-|---|---|---|
-| `thorough` (ค่าเริ่มต้น) | 7 ครบทุกตัว | เต็ม — DISCOVERY → COOKING 4 ตัวพร้อมกัน → CHALLENGE 2 ตัวพร้อมกัน |
-| `fast` (`/forge --fast …`) | 6 | ครบทุกมุมมอง + Challenge ทุกครั้ง แต่ Main ทำ intake แทน discovery agent |
-| `quick` (`/forge quick …`) | 2 | **ต่ำ** — มีคำเตือน ใช้กับงานเล็กมากเท่านั้น |
+Gate 1 เหลือ `forge-requirement` รันครั้งเดียว (เดิม 4 agent 3 รอบ รวม 7 ครั้ง) แล้ว Main ตรวจรายงานซ้ำและส่ง `forge_requirement_summary` เพื่อเข้า Planning
 
-ความเร็วที่ได้ใน thorough มาจาก 2 อย่างที่ไม่ลดความรอบคอบ:
-- critic กับ architect ใน Challenge รันพร้อมกัน แต่ยังเป็นอิสระต่อกัน (ไม่เห็นรายงานของอีกฝ่าย)
-- ทุก specialist ได้ baseline และรายชื่อไฟล์ชุดเดียวกันจาก Discovery เป็นจุดเริ่ม ไม่ต้องสำรวจใหม่ แต่ยังอ่านเพิ่มได้ตามจำเป็น
-
-ใน fast/quick ถ้า specialist รายงาน CRITICAL/HIGH แต่สรุปไม่มี Forge จะปฏิเสธสรุปนั้น
-
-ถ้าเคยตั้ง `/forge mode fast` ใน v5.25 ไว้ ค่านั้นยังอยู่ ใช้ `/forge mode thorough` เพื่อกลับเป็นค่าเริ่มต้น
+- agent ตัวเดียวครอบคลุม 6 มุม: intake, ช่องว่าง, critique, สถาปัตยกรรม, กลยุทธ์ทดสอบ และท้าทายร่างของตัวเอง
+- Main อ่านรายงานซ้ำแบบผู้อ่านอิสระ เพิ่ม finding ที่ agent พลาด และ Forge ปฏิเสธสรุปที่ตัด CRITICAL/HIGH ของรายงานทิ้ง
+- `/forge mode`, `/forge quick …`, `/forge --fast …`, `/forge thorough …` ถูกเอาออก (พิมพ์ `/forge quick …` ตอนนี้คือ requirement ธรรมดา)
+- `install.sh` ย้าย `forge-critic`, `forge-architect`, `forge-qa-strategist` ที่ติดตั้งไว้ไปไว้ใน `forge-backups/` (OMP `/agents` จะไม่แสดงอีก)
+- install.sh ไม่เขียนทับ `forge-requirement.md` ที่มีอยู่ ถ้าขึ้น `NOTE: forge-requirement now runs the whole Requirement gate…` ให้เทียบกับไฟล์ใหม่ หรือรัน `FORGE_REINSTALL_AGENTS=1 bash install.sh` (มี backup)
 
 ## v5.24: "Approve and execute" แล้ว Forge ไม่หาย
 

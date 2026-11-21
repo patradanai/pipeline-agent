@@ -67,10 +67,6 @@ const SUBCOMMANDS = [
   ['delivery', 'Show or resume delivery (commit message for manual commit)', ''],
   ['report', 'Show the last QA report path', ''],
   ['agents', 'List the Forge specialist agents', ''],
-  ['mode', 'Show or set the default requirement mode', '[thorough|fast|quick]'],
-  ['quick', 'Start a LOW-RIGOR workflow (2 specialists) for trivial changes', '<requirement>'],
-  ['fast', 'Start a workflow with orchestrator intake; challenge always runs', '<requirement>'],
-  ['thorough', 'Start a workflow with the full 3-step requirement gate', '<requirement>'],
   ['off', 'Cancel the Forge workflow (no files or Git state changed)', ''],
   ['trace', 'Log hook events for the live end-to-end coverage report', '[on|off]'],
 ];

@@ -1,20 +1,20 @@
-# Forge Suite 6.0 — shared core + adapters
+# Forge Suite 6.1 — shared core + adapters
 
 Forge is a gated multi-agent SDLC orchestrator:
 
 `REQUIREMENT → PLANNING → native human plan approval → EXECUTING → independent QA → DELIVERY`
 
-Nine named specialists, a parseable plan contract (BIZ/REQ/TC/QG), evidence-based
+Six named specialists (the Requirement gate is one `forge-requirement` pass), a parseable plan contract (BIZ/REQ/TC/QG), evidence-based
 QA, and **no agent-run git writes** — on two hosts:
 
 | Adapter | Host | Package after build |
 |---|---|---|
-| `adapters/omp` | Oh My Pi (OMP) extension | `dist/omp/omp-forge-global-v6.0.0/` |
+| `adapters/omp` | Oh My Pi (OMP) extension | `dist/omp/omp-forge-global-v6.1.0/` |
 | `adapters/claude-code` | Claude Code plugin (hooks + agents + command + MCP tools) | `dist/claude-code/forge-marketplace/` |
 
 ```
 core/                     platform-neutral Forge (pure logic + read-only git inspection)
-  core.mjs                gates, agents, requirement modes, plan contract, QA evaluation,
+  core.mjs                gates, agents, requirement gate, plan contract, QA evaluation,
                           reports, command parsing, git-write detection, instructions
   transitions.mjs         shared state transitions (approval, QA, delivery, rework, summary)
   state-recovery.mjs      safety checks for inconsistent state
@@ -23,7 +23,7 @@ core/                     platform-neutral Forge (pure logic + read-only git ins
   workspace.mjs           read-only git snapshot + QA scope
   platform.mjs            instruction wording per host (OMP text → Claude Code text)
   engine.mjs              event-driven controller: normalized events → decisions
-agents/                   canonical prompts for the 9 specialists (+ roles.json models)
+agents/                   canonical prompts for the 6 specialists (+ roles.json models)
 adapters/omp/             OMP extension (index.ts), session discovery, installer, tests
 adapters/claude-code/     plugin template (hooks.json, forge-hook.mjs, forge-mcp.mjs, /forge)
 scripts/build.mjs         vendors core + renders agents into self-contained packages
@@ -42,7 +42,7 @@ Node 22+. No npm dependencies.
 
 **OMP**
 ```bash
-cd dist/omp/omp-forge-global-v6.0.0 && bash ./install.sh   # restart OMP
+cd dist/omp/omp-forge-global-v6.1.0 && bash ./install.sh   # restart OMP
 ```
 
 **Claude Code** — see [adapters/claude-code/README.md](../adapters/claude-code/README.md)

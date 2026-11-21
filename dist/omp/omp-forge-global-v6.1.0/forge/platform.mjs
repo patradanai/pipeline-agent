@@ -7,7 +7,7 @@
  * gate and fails if any OMP-only concept leaks into another platform's text.
  */
 
-const CC_PLAN_SUBMIT = 'Claude Code submission: make sure the session is in plan mode (call EnterPlanMode, or ask the user to press Shift+Tab until plan mode is shown). Write the COMPLETE plan to the plan file Claude Code assigns in plan mode (or pass it as the `plan` argument), then call ExitPlanMode. The plan must include a visible \'Cooking & Gap Analysis\' section. Forge checks the plan contract before Claude Code shows the approval prompt; if Forge denies the call, fix the listed issues and call ExitPlanMode again. Do not implement or self-approve.';
+const CC_PLAN_SUBMIT = 'Claude Code submission: make sure the session is in plan mode (call EnterPlanMode, or ask the user to press Shift+Tab until plan mode is shown). Write the COMPLETE plan to the plan file Claude Code assigns in plan mode (or pass it as the `plan` argument), then call ExitPlanMode. The plan must include a visible \'Requirement & Gap Analysis\' section. Forge checks the plan contract before Claude Code shows the approval prompt; if Forge denies the call, fix the listed issues and call ExitPlanMode again. Do not implement or self-approve.';
 
 const CLAUDE_CODE_RULES = [
   [/\[OMP FORGE/g, '[FORGE'],

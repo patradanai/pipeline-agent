@@ -6,12 +6,12 @@ import {
   agentNameFor, routeAgentNames,
 } from '../forge/core.mjs';
 
-test('default Forge agents remain separate for each internal requirement and QA step', () => {
+test('default Forge agents: one requirement analyst, separate QA specialists', () => {
   const s=initialState('Build a scheduling service','forge-roles');
   assert.deepEqual(requiredAgentsFor(s),['forge-requirement']);
-  assert.deepEqual(requiredAgentsFor({...s,requirementStep:'COOKING'}),[
-    'forge-requirement','forge-critic','forge-architect','forge-qa-strategist']);
-  assert.deepEqual(requiredAgentsFor({...s,requirementStep:'CHALLENGE'}),['forge-critic','forge-architect']);
+  // Legacy v6.0 states may still carry requirementStep; it no longer widens the gate.
+  assert.deepEqual(requiredAgentsFor({...s,requirementStep:'COOKING'}),['forge-requirement']);
+  assert.deepEqual(requiredAgentsFor({...s,requirementStep:'CHALLENGE'}),['forge-requirement']);
   assert.deepEqual(requiredAgentsFor({...s,phase:'QA_REVIEW'}),['forge-qa','forge-code-reviewer']);
   assert.deepEqual(requiredAgentsFor({...s,phase:'DELIVERY_PREP'}),['forge-delivery']);
   assert.match(phaseInstruction({...s,phase:'PLANNING'}),/forge-planner/);

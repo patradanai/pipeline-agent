@@ -50,8 +50,8 @@ export function responseText(value, depth = 0) {
   return '';
 }
 
-const SUBCOMMAND_PREFIX = { quick: 'quick ', fast: '--fast ', thorough: 'thorough ', mode: 'mode ', resume: 'resume ', trace: 'trace ' };
-/** "/forge <args>", "/forge-status", "/forge:forge-mode fast" → engine command text. Null for other commands. */
+const SUBCOMMAND_PREFIX = { resume: 'resume ', trace: 'trace ' };
+/** "/forge <args>", "/forge-status", "/forge:forge-resume 2" → engine command text. Null for other commands. */
 export function commandText(commandName, commandArgs) {
   const m = String(commandName ?? '').match(/^(?:forge:)?forge(?:-([a-z]+))?$/);
   if (!m) return null;
@@ -172,8 +172,8 @@ function traceEvent(hookEvent, input, event, before, after, out) {
       command: input.command_name ?? null, args: input.command_name ? String(input.command_args ?? '').slice(0, 40) : null,
       reportChars: typeof input.last_assistant_message === 'string' ? input.last_assistant_message.length : null,
       responseKeys: input.tool_response && typeof input.tool_response === 'object' ? Object.keys(input.tool_response).slice(0, 8) : null,
-      phaseBefore: before?.phase ?? null, stepBefore: before?.requirementStep ?? null,
-      phaseAfter: after?.phase ?? null, stepAfter: after?.requirementStep ?? null, mode: after?.requirementMode ?? before?.requirementMode ?? null,
+      phaseBefore: before?.phase ?? null, phaseAfter: after?.phase ?? null,
+      summaryRequested: after?.requirementSummaryRequested ? true : null,
       approvedAfter: after?.approved ?? null, qaStatus: after?.qaStatus ?? null,
       decision: out?.decision ?? (out?.continueReason ? 'continue' : null), reason: out?.reason ? String(out.reason).slice(0, 160) : null,
       context: Boolean(out?.context || out?.continueReason), carried: after?.carriedFromSession ? true : null, adopted: after?.adoptedFromSession ? true : null,

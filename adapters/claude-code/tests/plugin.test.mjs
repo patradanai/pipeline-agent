@@ -14,6 +14,7 @@ const PLUGIN = join(ROOT, 'dist', 'claude-code', 'forge-marketplace', 'plugins',
 const HOOK = join(PLUGIN, 'bin', 'forge-hook.mjs');
 const MCP = join(PLUGIN, 'bin', 'forge-mcp.mjs');
 const P = 'mcp__plugin_forge_forge__';
+const SUMMARY = { baseline: 'Goal: bookings with approvals. Scope: create + approve. Acceptance: both flows work.', findings: [{ severity: 'LOW', title: 'naming' }] };
 assert.ok(existsSync(HOOK), 'run `npm run build` first');
 
 const TEMP_DIRS = [];
@@ -41,7 +42,12 @@ function env() {
     run('SubagentStop', { agent_id: `ag-${++n}`, agent_type: `forge:${name}`, last_assistant_message: report, stop_hook_active: false });
     return post('Agent', input, { content: [{ type: 'text', text: report }] });
   };
-  return { data, cwd, sid, run, pre, post, forge, state, agent };
+  const summary = (input = SUMMARY) => {
+    const p = pre(`${P}forge_requirement_summary`, input);
+    assert.notEqual(p.hookSpecificOutput?.permissionDecision, 'deny', JSON.stringify(p));
+    return post(`${P}forge_requirement_summary`, input, { content: [{ type: 'text', text: 'Forge received forge_requirement_summary' }] });
+  };
+  return { data, cwd, sid, run, pre, post, forge, state, agent, summary };
 }
 const ctx = out => out.hookSpecificOutput?.additionalContext ?? '';
 const denied = out => out.hookSpecificOutput?.permissionDecision === 'deny';
@@ -56,19 +62,21 @@ test('sessions without Forge are untouched (no state file, no decisions)', () =>
 test('full workflow through real hook processes: /forge → specialists → ExitPlanMode → QA → delivery', () => {
   const x = env();
   const start = x.forge('Build a booking system');
-  assert.match(ctx(start), /Forge started \(thorough\)/);
+  assert.match(ctx(start), /Forge started\. Gates: requirement \(one forge-requirement pass\)/);
+  assert.match(ctx(start), /GATE 1\/6: REQUIREMENT — single-pass analysis/);
   assert.match(ctx(start), /forge:forge-requirement/); // footer mapping
   assert.equal(x.state().phase, 'REQUIREMENT');
   // pre-approval guards
   assert.ok(denied(x.pre('Write', { file_path: join(x.cwd, 'a.ts'), content: 'x' })));
   assert.ok(denied(x.pre('Bash', { command: 'git commit -am wip' })));
   assert.deepEqual(x.pre('Read', { file_path: 'a' }), {});
-  // requirement steps
-  x.agent('forge-requirement');
-  for (const a of ['forge-requirement', 'forge-critic', 'forge-architect', 'forge-qa-strategist']) x.agent(a);
-  x.agent('forge-critic');
-  const toPlan = x.agent('forge-architect');
-  assert.match(ctx(toPlan), /GATE 2\/6: PLANNING[\s\S]*ExitPlanMode/);
+  // requirement: one forge-requirement pass, then the orchestrator's summary
+  assert.ok(denied(x.pre(`${P}forge_requirement_summary`, SUMMARY))); // report missing
+  assert.match(ctx(x.agent('forge-requirement')), /FORGE REQUIREMENT — report received/);
+  assert.ok(denied(x.pre('Agent', { subagent_type: 'forge:forge-requirement', prompt: 'again' }))); // one counted pass
+  assert.equal(x.state().phase, 'REQUIREMENT');
+  const toPlan = x.summary();
+  assert.match(ctx(toPlan), /requirement summary recorded[\s\S]*GATE 2\/6: PLANNING[\s\S]*Use this requirement synthesis[\s\S]*ExitPlanMode/);
   assert.equal(x.state().phase, 'PLANNING');
   x.agent('forge-planner');
   // ExitPlanMode outside plan mode / invalid / valid
@@ -101,8 +109,11 @@ test('full workflow through real hook processes: /forge → specialists → Exit
 
 test('parallel Agent hooks do not lose updates (state lock)', async () => {
   const x = env();
-  x.forge('--fast Build CRM'); // COOKING: 4 specialists in one batch
-  const names = ['forge-requirement', 'forge-critic', 'forge-architect', 'forge-qa-strategist'];
+  toApproved(x, x.sid);
+  x.agent('forge-executor', 'Implemented booking.ts');
+  x.run('Stop', { stop_hook_active: false, last_assistant_message: 'done' });
+  assert.equal(x.state().phase, 'QA_REVIEW'); // QA: 2 independent specialists in one batch
+  const names = ['forge-qa', 'forge-code-reviewer'];
   const runAsync = (event, payload) => new Promise((resolve, reject) => {
     const child = spawn('node', [HOOK, event], { env: { ...process.env, FORGE_DATA_DIR: x.data } });
     let out = ''; child.stdout.on('data', d => { out += d; });
@@ -110,29 +121,29 @@ test('parallel Agent hooks do not lose updates (state lock)', async () => {
     child.stdin.end(JSON.stringify({ session_id: x.sid, cwd: x.cwd, hook_event_name: event, permission_mode: 'plan', ...payload }));
   });
   await Promise.all(names.map((n, i) => runAsync('PreToolUse', { tool_name: 'Agent', tool_input: { subagent_type: `forge:${n}` }, tool_use_id: `p${i}` })));
-  assert.deepEqual([...x.state().gateAgentsSpawned['REQUIREMENT:COOKING']].sort(), [...names].sort());
+  assert.deepEqual([...x.state().gateAgentsSpawned.QA_REVIEW].sort(), [...names].sort());
   await Promise.all(names.map((n, i) => runAsync('SubagentStop', { agent_id: `bg${i}`, agent_type: `forge:${n}`, last_assistant_message: 'ok report' })));
-  assert.deepEqual([...x.state().gateAgents['REQUIREMENT:COOKING']].sort(), [...names].sort());
+  assert.deepEqual([...x.state().gateAgents.QA_REVIEW].sort(), [...names].sort());
 });
 
 test('specialist subagents are read-only; executor has no shell', () => {
   const x = env();
   x.forge('Build a booking system');
-  const critic = { agent_id: 'a1', agent_type: 'forge:forge-critic' };
-  assert.ok(denied(x.pre('Write', { file_path: 'a.ts' }, critic)));
-  assert.ok(denied(x.pre('Bash', { command: 'npm test' }, critic)));
-  assert.deepEqual(x.pre('Read', { file_path: 'a.ts' }, critic), {});
+  const analyst = { agent_id: 'a1', agent_type: 'forge:forge-requirement' };
+  assert.ok(denied(x.pre('Write', { file_path: 'a.ts' }, analyst)));
+  assert.ok(denied(x.pre('Bash', { command: 'npm test' }, analyst)));
+  assert.deepEqual(x.pre('Read', { file_path: 'a.ts' }, analyst), {});
   const exec = { agent_id: 'a2', agent_type: 'forge:forge-executor' };
   assert.ok(denied(x.pre('Bash', { command: 'ls' }, exec)));
 });
 
-test('/forge status, mode and off', () => {
+test('/forge status and off', () => {
   const x = env();
   assert.match(ctx(x.forge('status')), /Forge: inactive/);
-  assert.match(ctx(x.forge('mode fast')), /default requirement mode: fast/);
-  assert.equal(JSON.parse(readFileSync(join(x.data, 'config.json'), 'utf8')).requirementMode, 'fast');
   x.forge('Build CRM');
-  assert.equal(x.state().requirementMode, 'fast');
+  const status = ctx(x.forge('status'));
+  assert.match(status, /Forge: REQUIREMENT \| requirement: Build CRM/);
+  assert.doesNotMatch(status, /internal:|mode:/);
   x.forge('off');
   assert.equal(x.state().active, false);
   assert.deepEqual(x.pre('Write', { file_path: 'a.ts' }), {});
@@ -142,22 +153,22 @@ test('per-subcommand commands (autocomplete) map to the same engine commands', (
   const x = env();
   const cmd = (name, args = '') => x.run('UserPromptExpansion', { expansion_type: 'slash_command', command_name: name, command_args: args, command_source: 'plugin' });
   assert.match(ctx(cmd('forge-status')), /Forge: inactive/);
-  assert.match(ctx(cmd('forge:forge-mode', 'fast')), /default requirement mode: fast/);
-  cmd('forge-quick', 'Rename a label');
-  assert.equal(x.state().requirementMode, 'quick'); assert.equal(x.state().requirement, 'Rename a label');
+  cmd('forge:forge', 'quick Rename a label'); // former mode word is plain requirement text
+  assert.equal(x.state().phase, 'REQUIREMENT'); assert.equal(x.state().requirement, 'quick Rename a label');
   assert.match(ctx(cmd('forge-approve')), /Nothing to approve/);
   cmd('forge-off');
   assert.equal(x.state().active, false);
-  cmd('forge-thorough', 'Build CRM');
-  assert.equal(x.state().requirementMode, 'thorough');
+  cmd('forge', 'Build CRM');
+  assert.equal(x.state().active, true);
   assert.deepEqual(cmd('forge-unknownthing'), { hookSpecificOutput: { hookEventName: 'UserPromptExpansion', additionalContext: ctx(cmd('forge-unknownthing')) } });
 });
 
 test('every generated command is human-only and has a description', () => {
   const dir = join(PLUGIN, 'commands');
   const files = readdirSync(dir);
-  for (const n of ['forge', 'forge-status', 'forge-resume', 'forge-trace', 'forge-approve', 'forge-plan', 'forge-qa', 'forge-rework', 'forge-delivery', 'forge-report', 'forge-agents', 'forge-mode', 'forge-quick', 'forge-fast', 'forge-thorough', 'forge-off']) {
-    assert.ok(files.includes(`${n}.md`), n);
+  const expected = ['forge', 'forge-status', 'forge-resume', 'forge-trace', 'forge-approve', 'forge-plan', 'forge-qa', 'forge-rework', 'forge-delivery', 'forge-report', 'forge-agents', 'forge-off'];
+  assert.deepEqual([...files].sort(), expected.map(n => `${n}.md`).sort());
+  for (const n of expected) {
     const body = readFileSync(join(dir, `${n}.md`), 'utf8');
     assert.match(body, /disable-model-invocation: true/); assert.match(body, /^---\ndescription: Forge/);
   }
@@ -172,7 +183,10 @@ function toApproved(x, session) {
     run('PostToolUse', { tool_name: 'Agent', tool_input: input, tool_response: { status: 'async_launched' } });
   };
   run('UserPromptExpansion', { command_name: 'forge', command_args: 'Build a booking system' });
-  for (const a of ['forge-requirement', 'forge-requirement', 'forge-critic', 'forge-architect', 'forge-qa-strategist', 'forge-critic', 'forge-architect', 'forge-planner']) agent(a);
+  agent('forge-requirement');
+  run('PreToolUse', { tool_name: `${P}forge_requirement_summary`, tool_input: SUMMARY });
+  run('PostToolUse', { tool_name: `${P}forge_requirement_summary`, tool_input: SUMMARY, tool_response: {} });
+  agent('forge-planner');
   run('PreToolUse', { tool_name: 'ExitPlanMode', tool_input: { plan: PLAN } });
   run('PostToolUse', { tool_name: 'ExitPlanMode', tool_input: { plan: PLAN }, tool_response: {} });
 }
@@ -220,6 +234,7 @@ test('trace + coverage report reflect a real run', () => {
   const r = spawnSync('node', [join(PLUGIN, 'bin', 'forge-coverage.mjs'), '--data', x.data, '--json'], { encoding: 'utf8' });
   const report = JSON.parse(r.stdout);
   const ok = Object.fromEntries(report.checks.map(c => [c[0], c[3]]));
+  assert.deepEqual(report.checks.map(c => c[0]), Array.from({ length: 19 }, (_, i) => `C${String(i + 1).padStart(2, '0')}`));
   for (const id of ['C01', 'C02', 'C03', 'C06', 'C07', 'C09', 'C15']) assert.equal(ok[id], true, id);
   assert.equal(ok.C13, false);
   const a = Object.fromEntries(report.assumptions.map(x => [x[0], x[2]]));
@@ -227,6 +242,9 @@ test('trace + coverage report reflect a real run', () => {
   const text = spawnSync('node', [join(PLUGIN, 'bin', 'forge-coverage.mjs'), '--data', x.data], { encoding: 'utf8' }).stdout;
   assert.match(text, /✔ C07 Native approval/); assert.match(text, /· C13 .*→ run S2/);
   const log = readFileSync(join(x.data, 'trace', 'events.jsonl'), 'utf8');
+  const events = log.trim().split('\n').map(l => JSON.parse(l));
+  assert.ok(events.some(e => e.hook === 'SubagentStop' && e.summaryRequested === true));
+  assert.ok(events.every(e => !('stepBefore' in e) && !('stepAfter' in e) && !('mode' in e)));
   assert.doesNotMatch(log, /BIZ-001/); // never logs plan/file contents
 });
 
@@ -242,15 +260,15 @@ test('background agent run (the bug seen live): no false "no report", handback a
   assert.deepEqual(x.pre('SubagentHandback', { report: 'Baseline: age calculator; [MEDIUM][assumption] Gregorian dates' }, sub), {});
   assert.deepEqual(x.pre('SendMessage', { to: 'bg-1', message: 'status?' }), {});
   x.run('SubagentStop', { ...sub, last_assistant_message: 'Handed back.', stop_hook_active: false });
-  assert.equal(x.state().requirementStep, 'COOKING');
+  assert.deepEqual(x.state().gateAgents.REQUIREMENT, ['forge-requirement']);
   const next = x.run('UserPromptSubmit', { prompt: 'Agent "Requirement intake" finished' });
-  assert.match(ctx(next), /cooking step 2\/3/);
+  assert.match(ctx(next), /FORGE REQUIREMENT — report received/);
 });
 
 test('plan mode plan file: writing it is allowed, project files stay blocked, ExitPlanMode reads it', () => {
   const x = env();
   x.forge('Build a booking system');
-  for (const a of ['forge-requirement', 'forge-requirement', 'forge-critic', 'forge-architect', 'forge-qa-strategist', 'forge-critic', 'forge-architect', 'forge-planner']) x.agent(a);
+  x.agent('forge-requirement'); x.summary(); x.agent('forge-planner');
   const planFile = join(x.data, 'claude-config', 'plans', 'quiet-forest.md');
   spawnSync('node', ['-e', `const fs=require('fs');fs.mkdirSync(${JSON.stringify(dirname(planFile))},{recursive:true});fs.writeFileSync(${JSON.stringify(planFile)}, ${JSON.stringify(PLAN)})`]);
   const envCfg = { CLAUDE_CONFIG_DIR: join(x.data, 'claude-config') };
@@ -285,7 +303,7 @@ test('long instructions are written to a file instead of being truncated', () =>
 test('plan approved with "clear context": a new session inherits EXECUTING within 2 minutes', () => {
   const x = env();
   x.forge('Build a booking system');
-  for (const a of ['forge-requirement', 'forge-requirement', 'forge-critic', 'forge-architect', 'forge-qa-strategist', 'forge-critic', 'forge-architect', 'forge-planner']) x.agent(a);
+  x.agent('forge-requirement'); x.summary(); x.agent('forge-planner');
   x.pre('ExitPlanMode', { plan: PLAN });
   x.post('ExitPlanMode', { plan: PLAN }, {});
   const fresh = 'sess-after-clear';
@@ -336,7 +354,7 @@ test('plugin layout: manifest, hooks, command, agents with Claude Code frontmatt
   for (const e of ['SessionStart', 'UserPromptExpansion', 'PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'Stop']) assert.ok(hooks[e], e);
   assert.match(readFileSync(join(PLUGIN, 'commands', 'forge.md'), 'utf8'), /disable-model-invocation: true/);
   const agents = readdirSync(join(PLUGIN, 'agents'));
-  assert.equal(agents.length, 9);
+  assert.deepEqual([...agents].sort(), ['forge-code-reviewer', 'forge-delivery', 'forge-executor', 'forge-planner', 'forge-qa', 'forge-requirement'].map(a => `${a}.md`));
   const exec = readFileSync(join(PLUGIN, 'agents', 'forge-executor.md'), 'utf8');
   assert.match(exec, /tools: Read, Grep, Glob, Edit, Write/);
   // models follow the profile the plugin was built with (FORGE_MODELS, default rigor)

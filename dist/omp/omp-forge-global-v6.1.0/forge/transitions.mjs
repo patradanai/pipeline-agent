@@ -1,5 +1,5 @@
 /** Platform-neutral, pure Forge state transitions shared by every adapter. */
-import { requiredAgentsFor, gateKey, missingGateAgentsFor } from './core.mjs';
+import { requiredAgentsFor, missingGateAgentsFor, normalizeRequirementSummary } from './core.mjs';
 
 export function hasGateAgents(state, phase = state?.phase) {
   if (!state) return false;
@@ -9,7 +9,7 @@ export function hasGateAgents(state, phase = state?.phase) {
 /** Record that a required specialist of the CURRENT gate reported. Returns the same object if not required. */
 export function markGateAgent(state, agentName) {
   if (!state?.active || !requiredAgentsFor(state).includes(agentName)) return state;
-  const key = gateKey(state);
+  const key = state.phase;
   const seen = new Set(state.gateAgents?.[key] ?? []);
   seen.add(agentName);
   return { ...state, gateAgents: { ...(state.gateAgents ?? {}), [key]: [...seen] } };
@@ -77,37 +77,29 @@ export function deliveryTransition(state, { deliveryPath, commitMessagePath, com
 export function reworkTransition(state) {
   const previousHash = state.approvedPlanHash ?? state.reworkBaseHash ?? null;
   return { ...state, active: true, approved: false, qaEvidencePending: false, phase: 'REWORK_PLANNING', planWritten: false, planValid: false, approvedPlanHash: null,
-    reworkBaseHash: previousHash, reworkBasePlanPath: state.planPath, planPath: null,
+    reworkBaseHash: previousHash, reworkBasePlanPath: state.reworkBasePlanPath ?? state.planPath, planPath: null,
+
     reworkCycles: (state.reworkCycles ?? 0) + (state.phase === 'QA_EVIDENCE_PENDING' ? 1 : 0),
     gateAgents: { ...(state.gateAgents ?? {}), REWORK_PLANNING: [] }, agentRetries: { ...(state.agentRetries ?? {}), REWORK_PLANNING: 0 } };
 }
 
-import { requirementModeOf, normalizeRequirementSummary, afterRequirementStep } from './core.mjs';
-
-/** Validate and apply forge_requirement_summary. Throws an actionable Error when rejected.
- * Returns { state, next: 'CHALLENGE' | 'PLANNING', summarizedHigh }. */
+/** Validate and apply forge_requirement_summary: the requirement gate then opens PLANNING.
+ * Throws an actionable Error when rejected. Returns { state, summarizedHigh, summary }. */
 export function applyRequirementSummary(state, params) {
   if (!state?.active || state.phase !== 'REQUIREMENT') throw new Error('no Forge REQUIREMENT gate is active.');
-  if (requirementModeOf(state) === 'thorough') throw new Error('this workflow uses thorough mode; it advances on specialist results.');
-  if (state.requirementStep !== 'COOKING') throw new Error(`summary belongs to the cooking batch, current step is ${state.requirementStep}.`);
-  if (state.requirementSummary) throw new Error('a summary was already recorded for this workflow.');
   const missing = missingGateAgentsFor(state);
-  if (missing.length) throw new Error(`specialist reports missing: ${missing.join(', ')}. Run them in one parallel task batch first.`);
+  if (missing.length) throw new Error(`requirement report missing: run ${missing.join(', ')} once and await its report first.`);
   const summary = normalizeRequirementSummary(params);
-  // Cross-check: the specialists' OWN severity labels for this cooking batch.
+  // Cross-check: the requirement agent's OWN severity labels for this gate.
   // A summary may merge duplicates but must not make CRITICAL/HIGH vanish.
-  const cookingKey = gateKey(state);
-  const reported = (state.agentCompletions ?? []).filter(c => c.gate === cookingKey)
+  const reported = (state.agentCompletions ?? []).filter(c => c.gate === 'REQUIREMENT')
     .reduce((acc, c) => ({ critical: acc.critical + (c.reportedSeverities?.critical ?? 0), high: acc.high + (c.reportedSeverities?.high ?? 0) }), { critical: 0, high: 0 });
   const summarizedHigh = summary.findings.filter(f => ['CRITICAL','HIGH'].includes(f.severity)).length;
   if (reported.critical + reported.high > 0 && summarizedHigh === 0) {
-    throw new Error(`specialist reports contain ${reported.critical} CRITICAL and ${reported.high} HIGH label(s), but the summary lists no CRITICAL/HIGH finding. Keep each specialist's original severity (merge duplicates only) and resubmit.`);
+    throw new Error(`the requirement report contains ${reported.critical} CRITICAL and ${reported.high} HIGH label(s), but the summary lists no CRITICAL/HIGH finding. Keep the report's original severity (merge duplicates only) and resubmit.`);
   }
-  let next = { ...state, requirementSummary: { ...summary, specialistSeverities: reported } };
-  const step = afterRequirementStep(next);
-  if (step?.step) {
-    next = { ...next, requirementStep: step.step, gateAgents: { ...(next.gateAgents ?? {}), [`REQUIREMENT:${step.step}`]: [] } };
-    return { state: next, next: 'CHALLENGE', summarizedHigh, summary };
-  }
-  return { state: { ...next, phase: 'PLANNING', planWritten: false }, next: 'PLANNING', summarizedHigh, summary };
+  return {
+    state: { ...state, phase: 'PLANNING', planWritten: false, requirementSummary: { ...summary, specialistSeverities: reported } },
+    summarizedHigh, summary,
+  };
 }

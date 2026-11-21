@@ -31,11 +31,10 @@
  *   message         → text for the human
  */
 import {
-  parseCommand, initialState, phaseInstruction, executionInstruction, qaInstruction, reworkInstruction,
-  deliveryInstruction, requiredAgentsFor, missingGateAgentsFor, gateKey, afterRequirementStep,
-  requirementModeOf, validatePlanContract, evaluateQaReport, renderQaReport, buildCommitMessage,
-  renderDeliveryReport, isProhibitedGitCommand, isAllowedDiscoveryCommand, isAllowedQaCommand,
-  countReportedSeverities, REQUIREMENT_MODES, DEFAULT_REQUIREMENT_MODE, GATE_AGENTS,
+  parseCommand, initialState, phaseInstruction, requirementSummaryInstruction, executionInstruction, qaInstruction,
+  reworkInstruction, deliveryInstruction, requiredAgentsFor, missingGateAgentsFor, validatePlanContract,
+  evaluateQaReport, renderQaReport, buildCommitMessage, renderDeliveryReport, isProhibitedGitCommand,
+  isAllowedDiscoveryCommand, isAllowedQaCommand, countReportedSeverities, GATE_AGENTS,
 } from './core.mjs';
 import { recoveryProposal } from './state-recovery.mjs';
 import {
@@ -69,7 +68,6 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
       .replace(/`(forge-[a-z-]+)`/g, (m, name) => (FORGE_AGENTS.has(name) ? `\`${agentRef(name)}\`` : m));
     return profile.footer ? `${body}\n\n${profile.footer}` : body;
   };
-  const requirementMode = () => (REQUIREMENT_MODES.includes(config.requirementMode) ? config.requirementMode : DEFAULT_REQUIREMENT_MODE);
   const deny = (state, reason) => ({ state, out: { decision: 'deny', reason } });
   const keep = (state, out = {}) => ({ state, out });
 
@@ -96,10 +94,6 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
         const cancelledSlug = state?.slug;
         return keep({ active: false, version: 9, ...(cancelledSlug ? { cancelledSlug } : {}) }, { message: 'Forge workflow cancelled. No files or Git state were changed.' });
       }
-      case 'mode':
-        if (!command.mode) return keep(state, { message: `Forge requirement mode: ${requirementMode()}. thorough (default) = all 3 steps, all specialists, parallel batches; fast = orchestrator intake replaces the discovery agent, challenge always runs; quick = LOW RIGOR, trivial changes only. Set: /forge mode thorough|fast|quick.` });
-        return keep(state, { configUpdate: { requirementMode: command.mode }, message: `Forge default requirement mode: ${command.mode}. Applies to new workflows.` });
-      case 'modeInvalid': return keep(state, { message: command.message });
       case 'qa': {
         if (!state?.approved || !state.planValid || !['EXECUTING', 'QA_REVIEW', 'QA_FAILED', 'QA_EVIDENCE_PENDING'].includes(state.phase)) {
           return keep(state, { message: 'No approved execution is available for QA.' });
@@ -123,7 +117,7 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
       case 'report': return keep(state, { message: state?.qaReportPath ? `Last QA report: ${state.qaReportPath}` : 'No Forge QA report in this session yet.' });
       case 'agents': return keep(state, { message: `Forge agents (manage models/prompts with /agents):\n${[...FORGE_AGENTS].map(a => `  ${agentRef(a)}`).join('\n')}` });
       default:
-        return keep(state, { message: `"/forge ${raw.split(/\s+/)[0]}" is not available in the ${platform} adapter. Available: <requirement>, quick|thorough|--fast <requirement>, status, resume [n], trace [on|off], approve, plan, qa, rework, delivery, report, mode, agents, off.` });
+        return keep(state, { message: `"/forge ${raw.split(/\s+/)[0]}" is not available in the ${platform} adapter. Available: <requirement>, status, resume [n], trace [on|off], approve, plan, qa, rework, delivery, report, agents, off.` });
     }
   }
 
@@ -131,12 +125,8 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
     if (state?.active) return keep(state, { message: `A Forge workflow is active (${state.phase}). Steer it, or use /forge off.` });
     const requirement = String(command.requirement ?? '').trim();
     if (!requirement) return keep(state, { message: 'Usage: /forge <requirement>' });
-    const mode = REQUIREMENT_MODES.includes(command.mode) ? command.mode : requirementMode();
-    const next = initialState(requirement, undefined, null, null, {}, mode);
-    const banner = mode === 'quick'
-      ? 'Forge started — quick mode is LOW RIGOR (analyst + QA strategist only). Use only for trivial changes.'
-      : `Forge started (${mode}). Gates: requirement → plan → native approval → execute → QA → delivery. Forge never runs git writes.`;
-    return keep(next, { context: say(phaseInstruction(next)), message: banner });
+    const next = initialState(requirement);
+    return keep(next, { context: say(phaseInstruction(next)), message: 'Forge started. Gates: requirement (one forge-requirement pass) → plan → native approval → execute → QA → delivery. Forge never runs git writes.' });
   }
 
   /** List Forge workflows saved by other sessions of this project, or adopt one.
@@ -170,8 +160,7 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
 
   function statusLine(state) {
     if (!state?.phase) return 'Forge: inactive';
-    const step = state.phase === 'REQUIREMENT' ? ` (internal: ${state.requirementStep}, mode: ${requirementModeOf(state)})` : '';
-    return `Forge: ${state.phase}${step} | requirement: ${String(state.requirement ?? '').replace(/[\r\n]/g, ' ').slice(0, 80) || '(none)'} | slug: ${state.slug ?? '-'} | approved: ${state.approved === true ? 'yes' : 'no'} | QA: ${state.qaStatus ?? 'pending'} | rework: ${state.reworkCycles ?? 0} | waiting agents: ${missingGateAgentsFor(state).map(agentRef).join(',') || 'none'}${Object.keys(state.agentsRunning ?? {}).length ? ` | running: ${Object.keys(state.agentsRunning).map(k => agentRef(k.split('|')[1])).join(',')}` : ''}`;
+    return `Forge: ${state.phase} | requirement: ${String(state.requirement ?? '').replace(/[\r\n]/g, ' ').slice(0, 80) || '(none)'} | slug: ${state.slug ?? '-'} | approved: ${state.approved === true ? 'yes' : 'no'} | QA: ${state.qaStatus ?? 'pending'} | rework: ${state.reworkCycles ?? 0} | waiting agents: ${missingGateAgentsFor(state).map(agentRef).join(',') || 'none'}${Object.keys(state.agentsRunning ?? {}).length ? ` | running: ${Object.keys(state.agentsRunning).map(k => agentRef(k.split('|')[1])).join(',')}` : ''}`;
   }
 
   /** Deliver a queued gate instruction on a main-agent event that can carry context. */
@@ -274,7 +263,7 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
       return deny(s, `Forge ${s.phase} permits only safe read-only inspection commands before approval.`);
     }
     if (tool === 'write' || tool === 'edit') {
-      const pending = s.phase === 'REQUIREMENT' ? ` Finish specialist tasks for ${s.requirementStep}: ${missingGateAgentsFor(s).map(agentRef).join(', ') || 'waiting for stage transition'}.` : '';
+      const pending = s.phase === 'REQUIREMENT' ? ` Finish the requirement analysis: ${missingGateAgentsFor(s).map(agentRef).join(', ') || `call ${toolRef('forge_requirement_summary')}`}.` : '';
       return deny(s, `Forge ${s.phase} is read-only: implementation writes require explicit native plan approval.${pending}`);
     }
     return deny(s, `Forge ${s.phase}: ${tool === 'other' ? 'this tool' : tool} cannot run before native approval. Use Read/Grep/Glob, the Agent tool and AskUserQuestion.`);
@@ -284,13 +273,13 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
     const name = normalizeAgentName(input.subagent_type ?? input.agent ?? input.agentType);
     const required = requiredAgentsFor(s);
     if (required.length && FORGE_AGENTS.has(name) && !required.includes(name)) {
-      return deny(s, `Forge ${gateKey(s)} requires ${required.map(agentRef).join(', ')}; ${agentRef(name)} is not part of this gate.`);
+      return deny(s, `Forge ${s.phase} requires ${required.map(agentRef).join(', ')}; ${agentRef(name)} is not part of this gate.`);
     }
     if (!required.length && FORGE_AGENTS.has(name)) {
       return deny(s, `Forge ${s.phase} does not run specialists.${s.phase === 'AWAITING_APPROVAL' ? ' Wait for native plan approval.' : ''}`);
     }
     if (required.includes(name)) {
-      const key = gateKey(s);
+      const key = s.phase;
       // Token guard without cutting rigor: one counted report per specialist per gate.
       if ((s.gateAgents?.[key] ?? []).includes(name)) {
         return deny(s, `Forge: ${agentRef(name)} already reported for ${key}. Use its report; a duplicate run adds cost, not coverage.`);
@@ -352,9 +341,7 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
       let applied;
       try { applied = applyRequirementSummary(state, input); } catch (err) { return keep(state, { context: `Forge requirement summary rejected: ${err.message}` }); }
       const next = applied.state;
-      const head = applied.next === 'CHALLENGE'
-        ? `Forge: summary recorded (${applied.summarizedHigh} CRITICAL/HIGH, ${applied.summary.blockers.length} blocker(s)) → challenge.`
-        : 'Forge (quick mode): no CRITICAL/HIGH findings or blockers → challenge skipped.';
+      const head = `Forge: requirement summary recorded (${applied.summarizedHigh} CRITICAL/HIGH, ${applied.summary.blockers.length} open blocker(s)) → PLANNING.`;
       return keep(next, { context: `${head}\n\n${say(phaseInstruction(next))}` });
     }
     if (tool === 'forge.qa_scope') {
@@ -377,7 +364,7 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
   function onAgentStop(state, ev) {
     if (!state?.active) return keep(state);
     const name = normalizeAgentName(ev.agent);
-    const key = gateKey(state);
+    const key = state.phase;
     if (!(state.gateAgentsSpawned?.[key] ?? []).includes(name)) return keep(state);
     if ((state.gateAgents?.[key] ?? []).includes(name)) return keep(state); // already counted (duplicate run)
     const stillRunning = state; // a nudged subagent keeps working, so it stays marked as running
@@ -405,11 +392,7 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
   /** All required specialists of the current gate reported: advance or instruct. */
   function gateTransitionAfterAgents(s) {
     if (s.phase === 'REQUIREMENT') {
-      const next = afterRequirementStep(s);
-      if (!next) return { state: s };
-      if (next.summary) return { state: { ...s, requirementSummaryRequested: true }, context: requirementSummaryPrompt() };
-      const advanced = next.step ? { ...s, requirementStep: next.step } : { ...s, phase: 'PLANNING', planWritten: false };
-      return { state: advanced, context: say(phaseInstruction(advanced)) };
+      return { state: { ...s, requirementSummaryRequested: true }, context: say(requirementSummaryInstruction(s)) };
     }
     if (s.phase === 'PLANNING' || s.phase === 'REWORK_PLANNING') {
       return { state: s, context: say('[FORGE PLANNER REPORT RECEIVED]\nCompose the complete plan now (all mandatory contract sections) and submit it with ExitPlanMode while in plan mode. Do not implement.') };
@@ -417,10 +400,6 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
     if (s.phase === 'QA_REVIEW') return { state: s, context: `Forge: both independent QA reports arrived. Run safe checks, then call ${toolRef('forge_qa_submit')} exactly once with evidence-backed results.` };
     if (s.phase === 'DELIVERY_PREP') return { state: s, context: `Forge: delivery report arrived. Call ${toolRef('forge_delivery_submit')} once, then print the commit message for the user.` };
     return { state: s };
-  }
-
-  function requirementSummaryPrompt() {
-    return `[FORGE REQUIREMENT — specialists done]\nAll required specialist reports arrived. Deduplicate them WITHOUT dropping or downgrading any finding and call ${toolRef('forge_requirement_summary')} exactly once (baseline, findings with original severity, open blockers, assumptions, relevant files). Do not write the plan yet.`;
   }
 
   /** Plan text from the ExitPlanMode argument, else from the host's plan file. */
@@ -483,8 +462,7 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
   function onTurnEnd(state) {
     if (!state?.active) return keep(state);
     if (state.pendingContext) return keep({ ...state, pendingContext: null }, { continueReason: state.pendingContext });
-    const key = gateKey(state);
-    const running = Object.entries(state.agentsRunning ?? {}).filter(([k, at]) => k.startsWith(`${key}|`) && Date.now() - Date.parse(at) < RUNNING_TTL_MS);
+    const running = Object.entries(state.agentsRunning ?? {}).filter(([k, at]) => k.startsWith(`${state.phase}|`) && Date.now() - Date.parse(at) < RUNNING_TTL_MS);
     if (running.length) return keep(state); // specialists still working (e.g. background): wait, never re-run
     const nudge = (key, reason) => {
       const retries = state.agentRetries?.[key] ?? 0;
@@ -496,11 +474,9 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
       const next = { ...state, phase: 'QA_REVIEW', qaRetries: 0, gateAgents: { ...(state.gateAgents ?? {}), QA_REVIEW: [] } };
       return keep(next, { continueReason: say(qaInstruction(next)), message: 'Forge: execution settled → independent QA 4/5.' });
     }
-    if (state.phase === 'REQUIREMENT' && afterRequirementStep(state)?.summary && hasGateAgents(state)) {
-      return nudge(`${gateKey(state)}:summary`, requirementSummaryPrompt());
-    }
-    if (state.phase === 'REQUIREMENT' && !hasGateAgents(state)) {
-      return nudge(`${gateKey(state)}:stop`, say(`Forge REQUIREMENT ${state.requirementStep}: required specialists have not reported: ${missingGateAgentsFor(state).map(agentRef).join(', ')}. Invoke them through the Agent tool (one parallel batch) or report the gate BLOCKED. Ask the user only for genuine business decisions.`));
+    if (state.phase === 'REQUIREMENT' && hasGateAgents(state)) return nudge('REQUIREMENT:summary', say(requirementSummaryInstruction(state)));
+    if (state.phase === 'REQUIREMENT') {
+      return nudge('REQUIREMENT:stop', say(`Forge REQUIREMENT: ${missingGateAgentsFor(state).map(agentRef).join(', ')} has not reported. Invoke it once through the Agent tool and await its report, or report the gate BLOCKED. Ask the user only for genuine business decisions.`));
     }
     if (state.phase === 'QA_REVIEW') return nudge('QA_REVIEW:stop', `Forge QA is incomplete: call ${toolRef('forge_qa_submit')} with evidence-backed results. If checks cannot run, submit BLOCKED/NOT_RUN; never fabricate PASS.`);
     if (state.phase === 'DELIVERY_PREP') return nudge('DELIVERY_PREP:stop', `Forge delivery is incomplete: run ${agentRef('forge-delivery')} if it has not reported, then call ${toolRef('forge_delivery_submit')}.`);

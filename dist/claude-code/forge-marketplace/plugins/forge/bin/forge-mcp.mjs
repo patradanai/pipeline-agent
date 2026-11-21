@@ -15,13 +15,13 @@ const strList = { type: 'array', items: str };
 export const TOOLS = [
   {
     name: 'forge_requirement_summary',
-    description: 'Fast/quick requirement mode only: submit the deduplicated requirement synthesis (all findings with their ORIGINAL severity) after the specialist batch. Changes no project files.',
+    description: 'Submit the requirement synthesis after the forge-requirement report: baseline, ALL findings with their ORIGINAL severity, open blockers, assumptions and relevant files. Forge cross-checks the report\'s own CRITICAL/HIGH labels, then opens Planning. Changes no project files.',
     inputSchema: {
       type: 'object', additionalProperties: false, required: ['baseline', 'findings'],
       properties: {
         baseline: str,
         findings: { type: 'array', items: { type: 'object', required: ['severity', 'title'], properties: { id: str, severity, title: str, source: str } } },
-        blockers: strList, assumptions: strList, relevantFiles: strList, escalate: { type: 'boolean' },
+        blockers: strList, assumptions: strList, relevantFiles: strList,
       },
     },
   },
@@ -71,7 +71,7 @@ export function handle(msg) {
     return { jsonrpc: '2.0', id, result: {
       protocolVersion: typeof params?.protocolVersion === 'string' ? params.protocolVersion : '2025-06-18',
       capabilities: { tools: {} },
-      serverInfo: { name: 'forge', version: "6.0.7" },
+      serverInfo: { name: 'forge', version: "6.1.0" },
       instructions: 'Forge workflow tools. Call them only when a Forge gate instruction says so.',
     } };
   }

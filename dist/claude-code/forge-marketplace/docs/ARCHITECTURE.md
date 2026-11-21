@@ -1,4 +1,4 @@
-# Forge 6.0 architecture
+# Forge 6.1 architecture
 
 ## Layers
 
@@ -25,7 +25,7 @@
 
 | Concern | Shared in core | OMP | Claude Code |
 |---|---|---|---|
-| Gates, agents, requirement modes, plan contract, QA evaluation, reports | ✔ | uses | uses |
+| Gates, agents, requirement gate (one `forge-requirement` pass + summary), plan contract, QA evaluation, reports | ✔ | uses | uses |
 | Approval / QA / delivery / rework / summary transitions | ✔ `transitions.mjs` | uses | uses (via engine) |
 | Git-write detection, discovery/QA command allowlists | ✔ | uses | uses (via engine) |
 | Read-only git snapshot and QA scope | ✔ `workspace.mjs` | uses | uses |

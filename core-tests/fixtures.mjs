@@ -11,7 +11,7 @@ export const PLAN = `# Plan
 ## Code Quality Gates
 - QG-001: Unit tests
 - QG-002: Lint
-## Cooking & Gap Analysis
+## Requirement & Gap Analysis
 - none
 `;
 export const SUBMISSION = {

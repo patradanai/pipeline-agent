@@ -18,6 +18,8 @@ test('root menu lists commands without exposing debug workflow phases', () => {
   assert.ok(values(' ').includes('status'));
   assert.ok(values(' ').includes('delivery'));
   assert.ok(!values(' ').some(x=>/cooking|challenge|awaiting/i.test(x)));
+  assert.ok(!values(' ').some(x=>/^(quick|thorough|mode|--fast)\b/.test(x)));
+  assert.equal(suggest('qui'),null);
   assert.ok(suggest(' ')[0].label.includes('·'));
 });
 

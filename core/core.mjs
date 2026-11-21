@@ -2,7 +2,7 @@
 import { createHash } from 'node:crypto';
 
 export const GATE_AGENTS = Object.freeze({
-  REQUIREMENT: ['forge-requirement', 'forge-critic', 'forge-architect', 'forge-qa-strategist'],
+  REQUIREMENT: ['forge-requirement'],
   PLANNING: ['forge-planner'],
   EXECUTING: ['forge-executor'],
   QA_REVIEW: ['forge-qa', 'forge-code-reviewer'],
@@ -11,7 +11,7 @@ export const GATE_AGENTS = Object.freeze({
 
 /** Gate/role assignments are global operator settings, copied into each run. */
 export const DEFAULT_AGENT_ASSIGNMENTS = Object.freeze({
-  requirement: Object.freeze({ analyst: 'forge-requirement', critic: 'forge-critic', architect: 'forge-architect', strategist: 'forge-qa-strategist' }),
+  requirement: Object.freeze({ analyst: 'forge-requirement' }),
   planning: Object.freeze({ planner: 'forge-planner' }),
   execution: Object.freeze({ executor: 'forge-executor' }),
   qa: Object.freeze({ business: 'forge-qa', reviewer: 'forge-code-reviewer' }),
@@ -203,51 +203,10 @@ export function renderForgeWidget(state) {
   return [`FORGE  ${meter}  ${label}  ${index + 1}/5${rework}`];
 }
 
-export const REQUIREMENT_STEPS = Object.freeze(['DISCOVERY', 'COOKING', 'CHALLENGE']);
-
-/** Requirement modes (v5.26: rigor first).
- * - thorough (DEFAULT): DISCOVERY → COOKING (4 in parallel) → CHALLENGE
- *   (critic + architect, independent, in parallel). Every perspective and the
- *   adversarial second pass always run; only waiting between agents is removed.
- * - fast (opt-in): orchestrator intake replaces the DISCOVERY agent (the
- *   analyst still runs in COOKING), then COOKING → summary → CHALLENGE, which
- *   ALWAYS runs. No step is skipped on the orchestrator's own judgement.
- * - quick (opt-in, low rigor): analyst + QA strategist only; challenge only on
- *   CRITICAL/HIGH or blocker, cross-checked against the specialists' reports.
- * State without a mode (in-flight runs) is treated as thorough. */
-export const REQUIREMENT_MODES = Object.freeze(['fast', 'quick', 'thorough']);
-export const DEFAULT_REQUIREMENT_MODE = 'thorough';
-export function requirementModeOf(state) {
-  return REQUIREMENT_MODES.includes(state?.requirementMode) ? state.requirementMode : 'thorough';
-}
-export function firstRequirementStep(mode) {
-  return mode === 'thorough' || !REQUIREMENT_MODES.includes(mode) ? 'DISCOVERY' : 'COOKING';
-}
-const ESCALATING_SEVERITIES = new Set(['CRITICAL', 'HIGH']);
-export function shouldEscalateRequirement(summary) {
-  if (!summary || typeof summary !== 'object') return true;
-  if (summary.escalate === true) return true;
-  if (Array.isArray(summary.blockers) && summary.blockers.some(b => String(b ?? '').trim())) return true;
-  return Array.isArray(summary.findings) && summary.findings.some(f => ESCALATING_SEVERITIES.has(String(f?.severity ?? '').toUpperCase()));
-}
-/** What happens once every specialist of the CURRENT requirement step reported.
- * Returns {step}, {phase:'PLANNING'} or {summary:true} (await forge_requirement_summary). */
-export function afterRequirementStep(state) {
-  const mode = requirementModeOf(state);
-  const step = state?.requirementStep;
-  if (mode === 'thorough') {
-    const i = REQUIREMENT_STEPS.indexOf(step);
-    if (i < 0) return null;
-    return i + 1 < REQUIREMENT_STEPS.length ? { step: REQUIREMENT_STEPS[i + 1] } : { phase: 'PLANNING' };
-  }
-  if (step === 'COOKING') {
-    if (!state.requirementSummary) return { summary: true };
-    if (mode === 'fast') return { step: 'CHALLENGE' };
-    return state.requirementSummary.escalate ? { step: 'CHALLENGE' } : { phase: 'PLANNING' };
-  }
-  if (step === 'CHALLENGE') return { phase: 'PLANNING' };
-  return null;
-}
+/** Requirement gate: ONE `forge-requirement` pass covers intake, gaps, critique,
+ * architecture, QA strategy and a self-challenge of its own draft. The
+ * orchestrator then reviews that report as a second reader and records the
+ * synthesis with forge_requirement_summary, which opens PLANNING. */
 const MAX_SUMMARY_TEXT = 6000;
 const clip = (v, n) => String(v ?? '').replace(/\u0000/g, '').trim().slice(0, n);
 /** Validate and normalize the orchestrator's requirement synthesis. */
@@ -262,18 +221,16 @@ export function normalizeRequirementSummary(input) {
     if (!title) throw new Error(`Finding ${i + 1} needs a title.`);
     return { id: clip(f?.id, 32) || `F-${String(i + 1).padStart(3, '0')}`, severity, title, source: clip(f?.source, 64) || null };
   });
-  const summary = {
+  return {
     baseline, findings,
     blockers: list(input?.blockers, 20),
     assumptions: list(input?.assumptions, 30),
     relevantFiles: list(input?.relevantFiles, 40, 300),
-    escalate: input?.escalate === true,
   };
-  return { ...summary, escalate: shouldEscalateRequirement(summary) };
 }
 
-/** Severity labels the specialists themselves wrote in their task results.
- * Used to stop a summary from silently dropping their CRITICAL/HIGH items. */
+/** Severity labels the requirement agent itself wrote in its report.
+ * Used to stop a summary from silently dropping its CRITICAL/HIGH items. */
 export function countReportedSeverities(text) {
   const t = String(text ?? '');
   return {
@@ -291,54 +248,27 @@ export function formatRequirementSummary(summary, { maxChars = 5000 } = {}) {
   const text = lines.join('\n');
   return text.length > maxChars ? text.slice(0, maxChars) + '\n…(truncated)' : text;
 }
-export const REQUIREMENT_STEP_AGENTS = Object.freeze({
-  DISCOVERY: ['forge-requirement'],
-  COOKING: ['forge-requirement', 'forge-critic', 'forge-architect', 'forge-qa-strategist'],
-  CHALLENGE: ['forge-critic', 'forge-architect'],
-});
-export function gateKey(state) {
-  return state?.phase === 'REQUIREMENT' ? `REQUIREMENT:${state.requirementStep ?? firstRequirementStep(requirementModeOf(state))}` : state?.phase;
-}
 export function requiredAgentsFor(state) {
   if (!state) return [];
   const agents = effectiveAgentAssignments(state);
-  const phase = state.phase;
-  if (phase === 'REQUIREMENT') {
-    const mode = requirementModeOf(state);
-    const roles = ({
-      DISCOVERY: mode === 'thorough' ? ['analyst'] : [],
-      COOKING: mode === 'quick' ? ['analyst','strategist'] : ['analyst','critic','architect','strategist'],
-      CHALLENGE: ['critic','architect'],
-    })[state.requirementStep ?? firstRequirementStep(mode)] ?? [];
-    return roles.map(role => agents.requirement[role]);
-  }
   const rolesByPhase = {
+    REQUIREMENT: ['requirement','analyst'],
     PLANNING: ['planning','planner'],
     REWORK_PLANNING: ['planning','planner'],
     EXECUTING: ['execution','executor'],
     QA_REVIEW: ['qa','business','reviewer'],
     DELIVERY_PREP: ['delivery','writer'],
   };
-  const route = rolesByPhase[phase];
+  const route = rolesByPhase[state.phase];
   return route ? route.slice(1).map(role => agents[route[0]][role]) : [];
 }
 export function missingGateAgentsFor(state) {
-  return requiredAgentsFor(state).filter(name => !(state?.gateAgents?.[gateKey(state)] ?? []).includes(name));
+  return requiredAgentsFor(state).filter(name => !(state?.gateAgents?.[state.phase] ?? []).includes(name));
 }
+/** v5 stored the requirement sub-steps as phases; they resume as the requirement gate. */
 export function migrateLegacyRequirementState(state) {
   if (!state || !['DISCOVERY', 'COOKING', 'CHALLENGE'].includes(state.phase)) return state;
-  const step = state.phase;
-  const gateAgents = { ...(state.gateAgents ?? {}) };
-  const gateAgentsSpawned = { ...(state.gateAgentsSpawned ?? {}) };
-  const agentRetries = { ...(state.agentRetries ?? {}) };
-  for (const legacyStep of REQUIREMENT_STEPS) {
-    const key = `REQUIREMENT:${legacyStep}`;
-    if (!gateAgents[key] && gateAgents[legacyStep]) gateAgents[key] = gateAgents[legacyStep];
-    if (!gateAgentsSpawned[key] && gateAgentsSpawned[legacyStep]) gateAgentsSpawned[key] = gateAgentsSpawned[legacyStep];
-    if (agentRetries[key] == null && agentRetries[legacyStep] != null) agentRetries[key] = agentRetries[legacyStep];
-  }
-  return { ...state, version: 6, phase: 'REQUIREMENT', requirementStep: step,
-    gateAgents, gateAgentsSpawned, agentRetries };
+  return { ...state, version: 6, phase: 'REQUIREMENT' };
 }
 export function missingGateAgents(phase, seen = []) {
   return (GATE_AGENTS[phase] ?? []).filter(agent => !seen.includes(agent));
@@ -357,11 +287,9 @@ export function planSlug() {
   return `forge-${Date.now().toString(36)}`;
 }
 
-export function initialState(requirement, slug = planSlug(), assignments = null, skills = null, skillPins = {}, requirementMode = 'thorough') {
+export function initialState(requirement, slug = planSlug(), assignments = null, skills = null, skillPins = {}) {
   if (!requirement || !requirement.trim()) throw new Error('Requirement must not be empty');
-  const mode = REQUIREMENT_MODES.includes(requirementMode) ? requirementMode : 'thorough';
   return {
-    requirementMode: mode,
     requirementSummary: null,
     version: 8,
     gateAgents: {},
@@ -371,7 +299,6 @@ export function initialState(requirement, slug = planSlug(), assignments = null,
     agentRetries: {},
     active: true,
     phase: 'REQUIREMENT',
-    requirementStep: firstRequirementStep(mode),
     requirement: requirement.trim(),
     slug,
     proposalRetries: 0,
@@ -405,69 +332,25 @@ Never run git add, git commit, git push, git tag, git merge, git rebase, or publ
 Use short progress headings and structured outputs. Prefer automatic continuation; interrupt the user only for an irreversible, material, or genuinely ambiguous business decision. If necessary, use the native ask tool. Avoid unnecessary questions.
 Submit the plan for approval after writing a real local:// plan file. If Forge still displays PLANNING after a successful native write, xd://propose is allowed; the native OMP plan handler verifies the file and requires human approval.`;
 
-const BRIEF_RULES = `SHARED-CONTEXT RULES (save time without cutting rigor):
-- Give every specialist the SAME Requirement Brief in its task text, including a "Relevant files" list. The list is a starting point, not a fence: a specialist must read anything else it needs and say what it read.
-- Ask for a complete, structured report: every finding labelled CRITICAL|HIGH|MEDIUM|LOW and fact|assumption, with file/line or source evidence. No length cap; no restating the brief.
-- Launch all specialists in ONE task call (parallel batch). Their analyses are independent: no specialist sees another's report.`;
-
-function fastRequirementInstruction(state) {
-  const quick = requirementModeOf(state) === 'quick';
-  const agents = quick ? '`forge-requirement` (analyst) and `forge-qa-strategist`' : '`forge-requirement` (analyst), `forge-critic`, `forge-architect` and `forge-qa-strategist`';
-  return `${HEADER}
-
-[GATE 1/6: REQUIREMENT — ${quick ? 'quick' : 'fast'} intake + cooking]
-Original user requirement:
-${state.requirement}
-
-STEP A (you, the orchestrator, no subagent): do a complete READ-ONLY intake yourself: goals, stakeholders, scope / non-goals, constraints, success metrics, dependencies, acceptance-criteria candidates, ambiguous terms, assumptions, unknowns. Inspect the workspace wherever it is relevant. Write the Requirement Brief including Relevant files (paths). The analyst re-checks this intake in STEP B.
-STEP B: invoke ${agents} through the native task tool in ONE parallel batch, each with the Brief and its role focus: analyst = gaps/ambiguities${quick ? '' : '; critic = counterexamples, hidden assumptions, failure modes; architect = boundaries, alternatives, tradeoffs'}; QA strategist = testability, acceptance and negative cases. Await all results. Do not simulate agents; if one cannot run, report the gate BLOCKED.
-STEP C: deduplicate WITHOUT dropping or downgrading any specialist's finding (keep its original severity; merge duplicates only), resolve low-risk gaps with labelled assumptions, then call \`forge_requirement_summary\` exactly once with baseline, ALL findings, open blockers, assumptions and relevant files. ${quick ? 'Quick mode: a CRITICAL/HIGH finding or open blocker triggers the challenge; Forge cross-checks the specialists\' own severity labels.' : 'Fast mode: the challenge step ALWAYS follows.'}
-${BRIEF_RULES}
-Do not implement or write the plan yet.`;
-}
-
-function focusedChallengeInstruction(state) {
-  const s = state.requirementSummary;
-  const focus = s ? [...(s.findings ?? []).filter(f => ['CRITICAL', 'HIGH'].includes(f.severity)).map(f => `- ${f.id} [${f.severity}] ${f.title}`), ...(s.blockers ?? []).map(b => `- BLOCKER: ${b}`)].join('\n') : '';
-  return `${HEADER}
-
-[GATE 1/6: REQUIREMENT — challenge]
-Priority items (CRITICAL/HIGH findings and open blockers):
-${focus || '- none flagged; challenge the whole synthesis'}
-
-MANDATORY: invoke \`forge-critic\` and \`forge-architect\` independently in ONE parallel task batch (neither sees the other's report). Give both the Requirement Brief and the full requirement synthesis below. Each must challenge the WHOLE synthesis, not only the priority items: counterexamples, cross-component conflicts, failure/recovery, security/privacy, operations, migration and cost where relevant, and propose a resolution or safe default per item. Await both, cross-check them, keep an explicit decision register, and ask the user only for decisions that cannot safely be inferred. Forge advances to Planning when both reports arrive. Do not implement or write the plan yet.
-
-${s ? formatRequirementSummary(s) : ''}`;
-}
-
 function phaseInstructionTemplate(state) {
   const { phase, requirement, slug } = state;
-  if (phase === 'REQUIREMENT' && requirementModeOf(state) !== 'thorough') {
-    if (state.requirementStep === 'CHALLENGE') return focusedChallengeInstruction(state);
-    return fastRequirementInstruction(state);
-  }
-  if (phase === 'REQUIREMENT' && state.requirementStep === 'DISCOVERY') return `${HEADER}
+  if (phase === 'REQUIREMENT') return `${HEADER}
 
-[GATE 1/6: REQUIREMENT — discovery step 1/3]
+[GATE 1/6: REQUIREMENT — single-pass analysis]
 Original user requirement:
 ${requirement}
 
-MANDATORY: invoke the installed global agent \`forge-requirement\` through the native task tool and await its report. If unavailable, report that the gate is blocked; do not simulate an agent. Provide the source template and require a structured response. The orchestrator must synthesize and preserve the result.
-Perform requirement intake: goals, stakeholders, scope/non-goals, constraints, success metrics, dependencies, acceptance criteria candidates, ambiguous terms, and explicit assumptions. Inspect available workspace/docs READ-ONLY only when relevant. Never assume a project is present. Produce a numbered requirement baseline, a short unknowns list and a "Relevant files" list (paths read and why) so the next specialists start from the same context instead of re-discovering it. Do not implement or propose the plan yet. This internal step advances on successful task completion; no user command or form answer is needed.`;
+MANDATORY: invoke the installed global agent \`forge-requirement\` ONCE through the native task tool and await its report. It is this gate's only specialist and covers every lens in one pass. If it cannot run, report the gate BLOCKED; never simulate it.
+Its task text must contain: the original requirement verbatim; decisions and constraints already confirmed in this conversation; paths you already know are relevant (a starting point, not a fence); and the demand that its report covers all six lenses, every finding labelled CRITICAL|HIGH|MEDIUM|LOW and fact|assumption with evidence:
+(1) intake: goals, stakeholders, scope and non-goals, numbered BIZ/REQ candidates with acceptance criteria;
+(2) gaps: ambiguities, conflicts and unanswered decisions;
+(3) critique: counterexamples, hidden assumptions, failure modes;
+(4) architecture: boundaries, alternatives and trade-offs;
+(5) QA strategy: acceptance, negative and edge cases for every critical REQ;
+(6) self-challenge of its own draft: what it revised, BLOCKERs vs safe defaults.
+Do not run your own intake or workspace exploration first: the agent reads what it needs once. When its report arrives, Forge asks you to review it and call \`forge_requirement_summary\`. Do not implement or write the plan yet.`;
 
-  if (phase === 'REQUIREMENT' && state.requirementStep === 'COOKING') return `${HEADER}
-
-[GATE 1/6: REQUIREMENT — cooking step 2/3]
-MANDATORY: invoke the four INSTALLED, NAMED global task agents: \`forge-requirement\`, \`forge-critic\`, \`forge-architect\`, and \`forge-qa-strategist\`. Prefer a single task batch with shared context, one task per agent, and await all four results. Do not substitute general unnamed task agents. Use parallel calls when batching is unavailable. If any cannot run, report gate BLOCKED; do not simulate their execution.
-Paste the SAME discovery baseline, unknowns and Relevant files list into every task (a starting point, not a fence; specialists read more when needed and say what they read). Run four independent READ-ONLY analyses: (1) Analyst: requirements, gaps and ambiguities; (2) Critic: counterexamples, hidden assumptions and failure modes; (3) Architect: boundaries, alternatives and tradeoffs; (4) QA: testability, acceptance and negative cases.
-The named task agents are required; if the native task tool is unavailable, stop this gate and report an actionable blocker. Never simulate their results.
-Deduplicate findings, identify conflicts, attach severity and evidence/assumption labels. Do not implement or propose the plan. The internal REQUIREMENT step advances immediately after successful specialist task results. This is not a separate user-facing gate.`;
-
-  if (phase === 'REQUIREMENT' && state.requirementStep === 'CHALLENGE') return `${HEADER}
-
-[GATE 1/6: REQUIREMENT — challenge step 3/3]
-MANDATORY: invoke \`forge-critic\` and \`forge-architect\` as two independent tasks in ONE parallel task batch (each gets the full cooking synthesis; neither sees the other's report), await both and cross-check. No pretending a subagent was called.
-Challenge the cooking conclusions, including the recommended architecture. Test for counterexamples, cross-component conflicts, failure/recovery, security/privacy, operations, migration, and costs as relevant. Cross-check QA acceptance tests against every critical requirement. Identify BLOCKERS vs safe defaults. Resolve low-risk gaps with clearly marked assumptions and rationale; ask the user only for critical decisions that cannot safely be inferred. Keep an explicit decision register and requirement traceability. Do not implement or propose the plan yet. The internal REQUIREMENT step advances immediately after successful specialist task results. This is not a separate user-facing gate.`;
+  if (phase === 'PLANNING' && state.reworkBaseHash) return reworkInstructionTemplate(state);
 
   if (phase === 'PLANNING') return `${HEADER}
 
@@ -485,7 +368,7 @@ MANDATORY QA CONTRACT IN THE PLAN:
 - Include '## Code Quality Gates' with parseable lines '- QG-001: <quality gate>' for language-appropriate tests, lint/static analysis, typecheck/build where applicable, security/error handling, and maintainability review. Mark not-applicable checks explicitly.
 - Include '## Execution & QA Handoff': after implementation, QA must compare the *approved* plan against actual code, run feasible checks, and report every test by Business Topic. Never mark a check PASS without observed evidence; unrun checks are NOT_RUN.
 
-Write the complete proposed plan into OMP's plan-mode sandbox at local://${slug}-plan.md (not a workspace file). If OMP has already assigned a different root-level local://*-plan.md filename for this session, that OMP-local plan filename is also accepted; never use a repository path. The plan must include a visible 'Cooking & Gap Analysis' section. Forge normally advances to PROPOSAL after a successful write. If the write succeeded but the gate still shows PLANNING, submit the bare plan slug using write xd://propose; native OMP will verify that the file exists and open human review. Do not implement or self-approve.`;
+Write the complete proposed plan into OMP's plan-mode sandbox at local://${slug}-plan.md (not a workspace file). If OMP has already assigned a different root-level local://*-plan.md filename for this session, that OMP-local plan filename is also accepted; never use a repository path. The plan must include a visible 'Requirement & Gap Analysis' section. Forge normally advances to PROPOSAL after a successful write. If the write succeeded but the gate still shows PLANNING, submit the bare plan slug using write xd://propose; native OMP will verify that the file exists and open human review. Do not implement or self-approve.`;
 
   if (phase === 'PROPOSAL') return `${HEADER}
 
@@ -493,6 +376,12 @@ Write the complete proposed plan into OMP's plan-mode sandbox at local://${slug}
 Review ${state.planPath ?? `local://${slug}-plan.md`} for completeness, a VALID '## Business Topics' section with BIZ-IDs, a parseable '## Business Test Cases' TC/REQ/BIZ matrix, code-quality gates and unresolved critical blockers. If critical blockers remain, ask for their resolution and update the plan before proceeding. If the plan is ready, submit it to OMP's built-in Plan Review overlay: use the native write tool to write the exact slug '${(state.planPath ?? `local://${slug}-plan.md`).replace(/^local:\/\//, '').replace(/-plan\.md$/, '')}' as plain text to xd://propose. This opens the user's approval UI. Never self-approve. If the plan file was not written, create it first. Do not finish with just a textual 'ready' response.`;
 
   return `${HEADER}\nThe plan is awaiting explicit operator approval. Do not implement.`;
+}
+
+function requirementSummaryTemplate() {
+  return `[FORGE REQUIREMENT — report received]
+Review the \`forge-requirement\` report as an independent second reader before you summarize: all six lenses present (intake, gaps, critique, architecture, QA strategy, self-challenge)? every CRITICAL/HIGH finding backed by evidence or a labelled assumption? a counterexample or acceptance gap it missed? Record what you add as findings with source "orchestrator"; read files only to settle a specific doubt.
+Then call \`forge_requirement_summary\` exactly once: baseline, ALL findings with their original severity (merge duplicates only; never drop or downgrade one), open blockers, assumptions and relevant files. Forge checks the summary against the report's own CRITICAL/HIGH labels, then opens Planning. Ask the user only for business decisions that cannot be safely inferred. Do not write the plan yet.`;
 }
 
 function executionInstructionTemplate(state) {
@@ -533,17 +422,26 @@ REQUIRED CHECKS:
 DO NOT auto-fix. On observed FAIL, Forge re-enters planning and requires new approval before code repairs. On BLOCKED/NOT_RUN without observed failures, Forge pauses at QA_EVIDENCE_PENDING and retains approved Plan; collect the missing evidence using /forge qa, or explicitly choose /forge rework if implementation changes are required. On PASS, Forge moves to Delivery. Never stage, commit or push.`;
 }
 
+function reworkPlanPath(state) {
+  const cycle = Math.max(1, Number(state.reworkCycles) || 1);
+  const basePlanPath = state.reworkBasePlanPath ?? `local://${state.slug}-plan.md`;
+  return state.planPath && state.planPath !== basePlanPath
+    ? state.planPath
+    : `local://${state.slug}-rework-${cycle}-plan.md`;
+}
+
 function reworkInstructionTemplate(state) {
+  const nextPlanPath = reworkPlanPath(state);
   return `[OMP FORGE — QA FAILED: REWORK PLAN, NEW APPROVAL REQUIRED]
 QA gate: ${state.qaStatus ?? 'BLOCKED'}; rework cycle #${state.reworkCycles ?? 1}.
 Original requirement: ${state.requirement}
-Previous approved plan: ${state.planPath ?? `local://${state.slug}-plan.md`}
+Previous approved plan: ${state.reworkBasePlanPath ?? `local://${state.slug}-plan.md`}
 QA failure evidence (read this report): ${state.qaReportPath ?? 'not available'}
 
 MANDATORY: invoke the named \`forge-planner\` agent via native task and await its report before saving the rework plan.
-You are back in native OMP PLAN MODE. Absolutely no implementation, code edits, test fixes, git add/commit/push or mutating commands. Read the QA report and compare failures with the previous approved plan and original requirements. Group repairs by Business Topic and Test Case (BIZ/REQ/TC/QG), identify root causes and risks, and preserve stable IDs. Modify only the OMP local:// plan, producing an updated, traceable revision with remediation tasks and a new test matrix. Do NOT erase unfinished or blocked tests. Explicitly explain what changes, why, and what will be reverified.
+You are back in native OMP PLAN MODE. Absolutely no implementation, code edits, test fixes, git add/commit/push or mutating commands. Read the QA report and compare failures with the previous approved plan and original requirements. Group repairs by Business Topic and Test Case (BIZ/REQ/TC/QG), identify root causes and risks, and preserve stable IDs. Save a revised plan to ${nextPlanPath}; never overwrite the previous approved plan. The revised plan must include remediation tasks and a new test matrix. Do NOT erase unfinished or blocked tests. Explicitly explain what changes, why, and what will be reverified.
 
-Maintain the mandatory sections ## Business Topics, ## Requirement Traceability, ## Business Test Cases, ## Code Quality Gates, ## Execution & QA Handoff, and ## QA Rework Changes. Use the SAME canonical plan file ${state.planPath ?? `local://${state.slug}-plan.md`} (no alternate filenames). The previously approved plan cannot be re-proposed unchanged. Wait until native Plan Mode is active; never attempt shell or eval workarounds for plan writes. Forge will advance to PROPOSAL and display native Plan Approval. Do NOT auto-approve or implement.`;
+Maintain the mandatory sections ## Business Topics, ## Requirement Traceability, ## Business Test Cases, ## Code Quality Gates, ## Execution & QA Handoff, and ## QA Rework Changes. If the user selects Refine, keep editing the same rework revision at ${nextPlanPath}. Forge will advance to PROPOSAL and display native Plan Approval after a successful write and planner report. Do NOT auto-approve or implement.`;
 }
 
 function deliveryInstructionTemplate(state) {
@@ -566,6 +464,7 @@ Then PRINT the exact commit message in a fenced text block for the human to COPY
 
 // Prompt routing uses the same immutable per-workflow roster as task gates and QA validation.
 export const phaseInstruction = state => routeAgentNames(phaseInstructionTemplate(state), state);
+export const requirementSummaryInstruction = state => routeAgentNames(requirementSummaryTemplate(), state);
 export const executionInstruction = state => routeAgentNames(executionInstructionTemplate(state), state);
 export const qaInstruction = state => routeAgentNames(qaInstructionTemplate(state), state);
 export const reworkInstruction = state => routeAgentNames(reworkInstructionTemplate(state), state);
@@ -999,13 +898,6 @@ export function parseCommand(args) {
   if (/^commit(?:-msg)?$|^delivery$/i.test(trimmed)) return { type: 'delivery' };
   if (/^rework$/i.test(trimmed)) return { type: 'rework' };
   if (/^off$|^cancel$/i.test(trimmed)) return { type: 'cancel' };
-  if (/^mode$/i.test(trimmed)) return { type: 'mode' };
-  const modeSet = trimmed.match(/^mode\s+(fast|quick|thorough)$/i);
-  if (modeSet) return { type: 'mode', mode: modeSet[1].toLowerCase() };
-  if (/^mode(?:\s|$)/i.test(trimmed)) return { type: 'modeInvalid', message: 'Usage: /forge mode [fast|quick|thorough]' };
-  // `fast` is the default, so only `--fast` is a flag; bare "fast ..." stays requirement text.
-  const modeStart = trimmed.match(/^(?:--(quick|fast|thorough)|(quick|thorough))\s+([\s\S]+)$/i);
-  if (modeStart && modeStart[3].trim()) return { type: 'start', requirement: modeStart[3].trim(), mode: (modeStart[1] ?? modeStart[2]).toLowerCase() };
   return { type: 'start', requirement: trimmed };
 }
 
@@ -1051,14 +943,9 @@ export function getForgeArgumentCompletions(argumentPrefix, options = {}) {
       {token:'delivery', detail:'Show delivery and commit message'},
       {token:'rework', detail:'Resume QA rework'},
       {token:'off', detail:'Cancel workflow'},
-      {token:'quick', detail:'LOW RIGOR one run: 2 specialists (trivial changes only)', more:true},
-      {token:'thorough', detail:'One run with full 3-step requirement (default)', more:true},
-      {token:'mode', detail:'Show/set default requirement mode', more:true},
     ];
   } else if (fixed[0].toLowerCase() === 'resume' && fixed.length === 1) {
     candidates = choices([{token:'current',detail:'Continue the current Forge workflow without choosing another session'}]);
-  } else if (fixed[0].toLowerCase() === 'mode' && fixed.length === 1) {
-    candidates = choices([{token:'thorough',detail:'Default: all 3 steps, all specialists, parallel batches'},{token:'fast',detail:'Orchestrator intake instead of discovery agent; challenge always runs'},{token:'quick',detail:'LOW RIGOR: analyst + QA strategist only, for trivial changes'}]);
   } else if (fixed[0].toLowerCase() === 'auto' && fixed.length === 1) {
     candidates = choices([{token:'on',detail:'Enable global auto-start'},{token:'off',detail:'Disable global auto-start'}]);
   } else if (fixed[0].toLowerCase() === 'skill') {

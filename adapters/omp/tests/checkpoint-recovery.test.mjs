@@ -67,9 +67,8 @@ test('human-approved off-branch checkpoint returns to fresh planning, not execut
 });
 
 test('requirement-only checkpoint resumes requirement without fabricating approval', () => {
-  const recovered=prepareHumanRecovery({...state,phase:'REQUIREMENT',approved:false,requirementStep:'COOKING'});
+  const recovered=prepareHumanRecovery({...state,phase:'REQUIREMENT',approved:false});
   assert.equal(recovered.phase,'REQUIREMENT');
-  assert.equal(recovered.requirementStep,'COOKING');
   assert.equal(recovered.approved,false);
 });
 

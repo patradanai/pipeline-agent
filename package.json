@@ -1,6 +1,6 @@
 {
   "name": "forge-suite",
-  "version": "6.0.7",
+  "version": "6.1.0",
   "private": true,
   "type": "module",
   "description": "Forge multi-agent SDLC orchestrator: shared core + OMP extension adapter + Claude Code plugin adapter",

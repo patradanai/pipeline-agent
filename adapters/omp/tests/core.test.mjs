@@ -21,7 +21,9 @@ test('each phase has domain-independent instructions', () => {
     assert.match(prompt, /OMP FORGE — GLOBAL REQUIREMENT HARNESS/);
     assert.match(prompt, /Do not edit the project/);
   }
-  assert.match(phaseInstruction({ ...s, phase:'REQUIREMENT', requirementStep:'COOKING' }), /four INSTALLED, NAMED global task agents/);
+  const req = phaseInstruction(s);
+  assert.match(req, /\[GATE 1\/6: REQUIREMENT — single-pass analysis\]/);
+  assert.doesNotMatch(req, /forge-critic|forge-architect|forge-qa-strategist/);
   assert.match(phaseInstruction({ ...s, phase:'PROPOSAL' }), /xd:\/\/propose/);
 });
 test('auto routing excludes commands, images and active workflows', () => {
@@ -38,6 +40,11 @@ test('command parser', () => {
   assert.deepEqual(parseCommand('resume'), {type:'resume'});
   assert.deepEqual(parseCommand('off'), {type:'cancel'});
   assert.deepEqual(parseCommand('Build a CRM'), {type:'start',requirement:'Build a CRM'});
+  // Removed mode commands are ordinary requirement text now.
+  assert.deepEqual(parseCommand('quick Fix x'), {type:'start',requirement:'quick Fix x'});
+  assert.deepEqual(parseCommand('thorough Redesign billing'), {type:'start',requirement:'thorough Redesign billing'});
+  assert.deepEqual(parseCommand('--fast Build CRM'), {type:'start',requirement:'--fast Build CRM'});
+  assert.deepEqual(parseCommand('mode'), {type:'start',requirement:'mode'});
 });
 
 import {
@@ -155,10 +162,36 @@ test('rework and delivery prompts never authorize Git writes', () => {
   assert.deepEqual(parseCommand('commit-msg'),{type:'delivery'});
   assert.deepEqual(parseCommand('rework'),{type:'rework'});
 });
+test('rework planning uses a separate revision path and preserves it through Refine', () => {
+  const base = {
+    ...initialState('Manage bookings', 'forge-test'),
+    phase: 'REWORK_PLANNING',
+    reworkBaseHash: 'sha256-old',
+    reworkBasePlanPath: 'local://forge-test-plan.md',
+    reworkCycles: 1,
+    qaStatus: 'FAIL',
+  };
+  const firstPrompt = reworkInstruction(base);
+  assert.match(firstPrompt, /Save a revised plan to local:\/\/forge-test-rework-1-plan\.md/);
+  assert.doesNotMatch(firstPrompt, /Save a revised plan to local:\/\/forge-test-plan\.md/);
+  const legacyPrompt = phaseInstruction({
+    ...base, phase: 'PLANNING', reworkBasePlanPath: null, planPath: 'local://forge-test-plan.md',
+  });
+  assert.match(legacyPrompt, /keep editing the same rework revision at local:\/\/forge-test-rework-1-plan\.md/);
+
+
+  const refinedPrompt = phaseInstruction({
+    ...base, phase: 'PLANNING', planPath: 'local://forge-test-rework-1-plan.md',
+  });
+  assert.match(refinedPrompt, /QA FAILED: REWORK PLAN/);
+  assert.match(refinedPrompt, /keep editing the same rework revision at local:\/\/forge-test-rework-1-plan\.md/);
+});
+
 
 test('global gate contract identifies exact agent ownership', async () => {
-  const {GATE_AGENTS,REQUIREMENT_STEP_AGENTS,missingGateAgents}=await import('../forge/core.mjs');
-  assert.equal(REQUIREMENT_STEP_AGENTS.COOKING.length,4);
+  const {GATE_AGENTS,missingGateAgents}=await import('../forge/core.mjs');
+  assert.deepEqual(GATE_AGENTS.REQUIREMENT,['forge-requirement']);
+  assert.deepEqual(missingGateAgents('REQUIREMENT',[]),['forge-requirement']);
   assert.deepEqual(missingGateAgents('QA_REVIEW',['forge-qa']),['forge-code-reviewer']);
   assert.deepEqual(missingGateAgents('DELIVERY_PREP',['forge-delivery']),[]);
   assert.deepEqual(missingGateAgents('AWAITING_APPROVAL',[]),[]);
@@ -203,43 +236,32 @@ test('v5 plan contract detects test linked to another business topic', () => {
   assert.ok(result.issues.some(x=>x.includes('wrong business topic')));
 });
 
-// ---------------------------------------------------------------- v5.25
-import { parseCommand as pc525, shouldEscalateRequirement, normalizeRequirementSummary, afterRequirementStep, firstRequirementStep, requiredAgentsFor as req525, initialState as init525 } from '../forge/core.mjs';
-test('v5.25: mode prefixes parse without eating ordinary requirement text', () => {
-  assert.deepEqual(pc525('quick Add CSV export'), {type:'start', requirement:'Add CSV export', mode:'quick'});
-  assert.deepEqual(pc525('thorough Redesign billing'), {type:'start', requirement:'Redesign billing', mode:'thorough'});
-  assert.deepEqual(pc525('--fast Build CRM'), {type:'start', requirement:'Build CRM', mode:'fast'});
-  assert.deepEqual(pc525('fast food ordering app'), {type:'start', requirement:'fast food ordering app'});
-  assert.deepEqual(pc525('mode'), {type:'mode'});
-  assert.deepEqual(pc525('mode quick'), {type:'mode', mode:'quick'});
-  assert.equal(pc525('mode turbo').type, 'modeInvalid');
-});
-test('v5.25: escalation rule', () => {
-  assert.equal(shouldEscalateRequirement({findings:[{severity:'MEDIUM'}],blockers:[]}), false);
-  assert.equal(shouldEscalateRequirement({findings:[{severity:'high'}]}), true);
-  assert.equal(shouldEscalateRequirement({findings:[],blockers:['x']}), true);
-  assert.equal(shouldEscalateRequirement({findings:[],escalate:true}), true);
-  assert.equal(shouldEscalateRequirement(null), true);
-});
-test('v5.25: summary normalization caps and validates', () => {
+// ---------------------------------------------------------------- v6.1
+import { normalizeRequirementSummary, migrateLegacyRequirementState, requirementSummaryInstruction, initialState as init61 } from '../forge/core.mjs';
+test('v6.1: summary normalization caps and validates', () => {
   assert.throws(()=>normalizeRequirementSummary({baseline:'short',findings:[]}),/baseline/);
+  assert.throws(()=>normalizeRequirementSummary({baseline:'Goal and scope and acceptance criteria here',findings:[{severity:'URGENT',title:'x'}]}),/Finding 1 needs severity CRITICAL\|HIGH\|MEDIUM\|LOW/);
   const s=normalizeRequirementSummary({baseline:'Goal and scope and acceptance criteria here',findings:Array.from({length:60},(_,i)=>({severity:'low',title:'t'+i}))});
   assert.equal(s.findings.length,40); assert.equal(s.findings[0].severity,'LOW'); assert.equal(s.findings[0].id,'F-001');
 });
-test('v5.25: step graph per mode; legacy state stays thorough', () => {
-  assert.equal(firstRequirementStep('fast'),'COOKING');
-  assert.equal(firstRequirementStep('thorough'),'DISCOVERY');
-  const legacy={phase:'REQUIREMENT',requirementStep:'COOKING',requirement:'x'};
-  assert.deepEqual(afterRequirementStep(legacy),{step:'CHALLENGE'});
-  assert.deepEqual(req525({...legacy,requirementStep:'DISCOVERY'}),['forge-requirement']);
-  const fast={...legacy,requirementMode:'fast'};
-  assert.deepEqual(afterRequirementStep(fast),{summary:true});
-  assert.deepEqual(afterRequirementStep({...fast,requirementSummary:{escalate:false}}),{step:'CHALLENGE'}); // v5.26: always
-  assert.deepEqual(afterRequirementStep({...legacy,requirementMode:'quick',requirementSummary:{escalate:false}}),{phase:'PLANNING'});
-  assert.deepEqual(afterRequirementStep({...fast,requirementSummary:{escalate:true}}),{step:'CHALLENGE'});
-  assert.deepEqual(req525({...fast,requirementStep:'DISCOVERY'}),[]);
-  assert.equal(init525('Req').requirementStep,'DISCOVERY');
-  assert.equal(init525('Req',undefined,null,null,{},'quick').requirementStep,'COOKING');
+test('v6.1: v5 requirement sub-phases migrate to REQUIREMENT; other states unchanged', () => {
+  for (const phase of ['DISCOVERY','COOKING','CHALLENGE']) {
+    const legacy={active:true,phase,gateAgents:{COOKING:['forge-critic']},requirement:'x'};
+    const m=migrateLegacyRequirementState(legacy);
+    assert.equal(m.phase,'REQUIREMENT'); assert.equal(m.version,6);
+    assert.deepEqual(m.gateAgents,legacy.gateAgents);
+  }
+  const planning={active:true,phase:'PLANNING'};
+  assert.equal(migrateLegacyRequirementState(planning),planning);
+});
+test('v6.1: summary prompt and PLANNING instruction carry the synthesis', () => {
+  const s=init61('Req','forge-x');
+  assert.match(requirementSummaryInstruction(s),/^\[FORGE REQUIREMENT — report received\]/);
+  assert.match(requirementSummaryInstruction(s),/forge_requirement_summary/);
+  const summary=normalizeRequirementSummary({baseline:'Goal: export CSV; scope: reports only',findings:[{severity:'medium',title:'Encoding unspecified'}],blockers:['Max rows?']});
+  const planning=phaseInstruction({...s,phase:'PLANNING',requirementSummary:summary});
+  assert.match(planning,/\[GATE 2\/6: PLANNING\]/);
+  assert.match(planning,/Use this requirement synthesis as the starting point[\s\S]*Goal: export CSV[\s\S]*\[MEDIUM\] Encoding unspecified[\s\S]*Max rows\?/);
 });
 
 import { countReportedSeverities } from '../forge/core.mjs';

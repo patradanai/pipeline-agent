@@ -12,24 +12,24 @@ In Claude Code:
 /plugin marketplace add /absolute/path/to/forge-suite/dist/claude-code/forge-marketplace
 /plugin install forge@forge-local
 ```
-Restart Claude Code, then check `/hooks` (Forge hooks listed), `/mcp` (server `forge`), `/agents` (9 `forge:` agents).
+Restart Claude Code, then check `/hooks` (Forge hooks listed), `/mcp` (server `forge`), `/agents` (6 `forge:` agents).
 Requires `node` 22+ on PATH.
 
 ## Use
 
 ```text
-/forge Build a booking approval flow        # thorough requirement (default)
-/forge --fast <requirement>                 # orchestrator intake, challenge always runs
-/forge quick <requirement>                  # LOW RIGOR, trivial changes only
-/forge status | plan | approve | qa | rework | delivery | report | mode [thorough|fast|quick] | agents | off
+/forge Build a booking approval flow        # start a workflow
+/forge status | plan | approve | qa | rework | delivery | report | agents | off
 ```
 
 Each subcommand also exists as its own command for autocomplete: type `/forge` and pick
 `/forge-status`, `/forge-resume`, `/forge-approve`, `/forge-plan`, `/forge-qa`, `/forge-rework`, `/forge-delivery`,
-`/forge-report`, `/forge-agents`, `/forge-mode`, `/forge-quick`, `/forge-fast`, `/forge-thorough`, `/forge-off`.
+`/forge-report`, `/forge-agents`, `/forge-off`.
 
 Flow:
-1. Requirement specialists run through the Agent tool (`forge:forge-requirement`, …). Forge advances when their reports arrive.
+1. Requirement: one `forge:forge-requirement` run covers intake, gaps, critique, architecture, QA strategy and a
+   self-challenge. Claude reviews that report as a second reader and calls `forge_requirement_summary`
+   (Forge rejects a summary that drops the report's CRITICAL/HIGH findings) → PLANNING.
 2. Planning: `forge:forge-planner`, then Claude enters plan mode and calls **ExitPlanMode** with the full plan.
    Forge checks the plan contract first; an invalid plan is denied with the exact issues.
 3. You approve in Claude Code's native plan prompt. Forge moves to EXECUTING. (If context was cleared and Forge
@@ -45,7 +45,7 @@ and during QA/delivery; specialists read-only; executor has no shell; wrong agen
 
 `${CLAUDE_PLUGIN_DATA}` (Claude Code's persistent plugin data dir):
 `sessions/<session_id>.json` (state), `reports/<session>/<slug>/` (plan, QA report, delivery, commit message),
-`config.json` (`requirementMode`). Nothing is written into your project by Forge.
+`config.json` (`trace`). Nothing is written into your project by Forge.
 
 ## Models
 

@@ -3,8 +3,11 @@ import assert from 'node:assert/strict';
 import { createEngine, normalizeAgentName } from '../core/engine.mjs';
 import { requiredAgentsFor } from '../core/core.mjs';
 import { PLAN, SUBMISSION, FAIL_SUBMISSION } from './fixtures.mjs';
+import { reworkTransition } from '../core/transitions.mjs';
 
-function harness(config = {}) {
+const SUMMARY = { baseline: 'Goal: bookings with approvals. Scope: create + approve. Acceptance: both flows work.', findings: [{ severity: 'LOW', title: 'naming' }] };
+
+function harness(config = {}, initial = null) {
   const saved = {};
   const engine = createEngine({ platform: 'claude-code', config, profile: { agentRef: n => `forge:${n}` }, deps: {
     snapshotWorkingTree: () => ({ available: true, hash: 'h', root: '/r' }),
@@ -13,7 +16,7 @@ function harness(config = {}) {
     saveQaReport: (_s, md) => { saved.qa = md; return '/data/qa.md'; },
     saveDelivery: (_s, md, msg) => { saved.delivery = msg; return { deliveryPath: '/data/d.md', commitMessagePath: '/data/c.txt' }; },
   } });
-  let state = null;
+  let state = initial;
   const h = ev => { const r = engine.handle(state, ev); state = r.state; return r.out; };
   const main = { kind: 'main', agent: null };
   return {
@@ -33,12 +36,17 @@ function harness(config = {}) {
     agentStop: ev => h({ type: 'agent.stop', ...ev }),
     prompt: () => h({ type: 'prompt' }),
     runGate() { let o; for (const a of requiredAgentsFor(state)) o = this.agent(a); return o; },
+    summarize(summary = SUMMARY) {
+      const p = this.pre('forge.requirement_summary', summary);
+      assert.equal(p.decision, undefined, `summary denied: ${p.reason}`);
+      return this.post('forge.requirement_summary', summary);
+    },
   };
 }
 
 async function toApproval(x) {
   x.cmd('Build a booking system');
-  for (let i = 0; i < 3; i++) x.runGate();
+  x.runGate(); x.summarize();
   assert.equal(x.state.phase, 'PLANNING');
   x.runGate();
   assert.equal(x.pre('plan.submit', { plan: PLAN }).decision, undefined);
@@ -56,14 +64,20 @@ test('no workflow → engine never interferes, not even with git', () => {
   assert.equal(x.pre('write', { file_path: 'a' }).decision, undefined);
 });
 
-test('thorough happy path: requirement ×3 → planning → native approval → execute → QA PASS → delivery', async () => {
+test('happy path: one requirement pass + summary → planning → native approval → execute → QA PASS → delivery', async () => {
   const x = harness();
   const start = x.cmd('Build a booking system');
-  assert.equal(x.state.requirementMode, 'thorough');
-  assert.match(start.context, /discovery step 1\/3/);
-  assert.match(x.runGate().context, /cooking step 2\/3/);
-  assert.match(x.runGate().context, /challenge step 3\/3[\s\S]*ONE parallel task batch/);
-  assert.match(x.runGate().context, /GATE 2\/6: PLANNING[\s\S]*ExitPlanMode/);
+  assert.doesNotMatch(start.message, /thorough/);
+  assert.match(start.context, /GATE 1\/6: REQUIREMENT — single-pass analysis[\s\S]*forge:forge-requirement/);
+  assert.deepEqual(requiredAgentsFor(x.state), ['forge-requirement']);
+  // planning cannot be skipped: the summary needs the report first
+  assert.match(x.pre('forge.requirement_summary', SUMMARY).reason, /requirement report missing/);
+  assert.match(x.runGate().context, /^\[FORGE REQUIREMENT — report received\]/);
+  assert.equal(x.state.phase, 'REQUIREMENT');
+  const planning = x.summarize({ ...SUMMARY, blockers: ['approver role undecided'] });
+  assert.equal(x.state.phase, 'PLANNING');
+  assert.match(planning.context, /^Forge: requirement summary recorded \(0 CRITICAL\/HIGH, 1 open blocker\(s\)\) → PLANNING\./);
+  assert.match(planning.context, /GATE 2\/6: PLANNING[\s\S]*Use this requirement synthesis as the starting point[\s\S]*approver role undecided[\s\S]*ExitPlanMode/);
   // plan before planner → denied
   assert.match(x.pre('plan.submit', { plan: PLAN }).reason, /forge:forge-planner/);
   assert.match(x.runGate().context, /PLANNER REPORT RECEIVED/);
@@ -136,6 +150,16 @@ test('QA FAIL → rework requires a NEW different plan and new approval', async 
   assert.equal(x.pre('plan.submit', { plan: PLAN + '\n## QA Rework Changes\n- fix 500\n' }).decision, undefined);
   assert.equal(x.state.phase, 'AWAITING_APPROVAL');
 });
+test('re-entering rework preserves the approved plan as a read-only base', () => {
+  const first = reworkTransition({
+    phase: 'QA_FAILED', approvedPlanHash: 'sha256-old',
+    planPath: 'local://forge-plan.md', reworkCycles: 0,
+  });
+  const retried = reworkTransition(first);
+  assert.equal(retried.reworkBasePlanPath, 'local://forge-plan.md');
+  assert.equal(retried.planPath, null);
+});
+
 
 test('guards: git writes, publish MCP, .git, wrong agent, specialist writes, executor shell', async () => {
   const x = harness(); x.cmd('Build a booking system');
@@ -143,7 +167,7 @@ test('guards: git writes, publish MCP, .git, wrong agent, specialist writes, exe
   assert.equal(x.pre('other', {}, { rawTool: 'mcp__github__create_pull_request' }).decision, 'deny');
   assert.equal(x.pre('agent', { subagent_type: 'forge:forge-executor' }).decision, 'deny');
   assert.equal(x.pre('agent', { subagent_type: 'Explore' }).decision, undefined);
-  const sub = { kind: 'sub', agent: 'forge:forge-critic' };
+  const sub = { kind: 'sub', agent: 'forge:forge-planner' };
   assert.equal(x.pre('edit', { file_path: 'a' }, { actor: sub }).decision, 'deny');
   const exec = { kind: 'sub', agent: 'forge:forge-executor' };
   assert.equal(x.pre('bash', { command: 'ls' }, { actor: exec }).decision, 'deny');
@@ -159,7 +183,8 @@ test('empty subagent report: subagent is asked once, then main is told to re-run
   assert.match(x.agentStop({ agent: 'forge:forge-requirement', agentId: 'a1', report: '' }).continueReason, /final message/);
   assert.equal(x.agentStop({ agent: 'forge:forge-requirement', agentId: 'a1', report: '' }).continueReason, undefined);
   assert.match(x.prompt().context, /finished without a report/);
-  assert.equal(x.state.requirementStep, 'DISCOVERY');
+  assert.equal(x.state.phase, 'REQUIREMENT');
+  assert.deepEqual(x.state.gateAgents.REQUIREMENT ?? [], []);
 });
 
 test('background agents: spawn result has no report; completion arrives later and is delivered on the next main event', () => {
@@ -169,9 +194,9 @@ test('background agents: spawn result has no report; completion arrives later an
   assert.equal(x.post('agent', input, 'Backgrounded agent').context, undefined); // no false "no report"
   assert.equal(x.stop().continueReason, undefined); // still running → never ask to re-run
   x.agentStop({ agent: 'forge:forge-requirement', agentId: 'bg1', report: 'Baseline: …' });
-  assert.equal(x.state.requirementStep, 'COOKING');
+  assert.equal(x.state.requirementSummaryRequested, true);
   const next = x.prompt();
-  assert.match(next.context, /cooking step 2\/3/);
+  assert.match(next.context, /FORGE REQUIREMENT — report received/);
   assert.equal(x.state.pendingContext, null);
 });
 
@@ -181,42 +206,49 @@ test('report delivered through a handback tool counts even if the final message 
   const sub = { kind: 'sub', agent: 'forge:forge-requirement', agentId: 'h1' };
   assert.equal(x.pre('coord', {}, { actor: sub, rawTool: 'SubagentHandback', inputText: '- [HIGH][fact] missing tenant id' }).decision, undefined);
   x.agentStop({ agent: 'forge:forge-requirement', agentId: 'h1', report: '' });
-  assert.equal(x.state.requirementStep, 'COOKING');
+  assert.deepEqual(x.state.gateAgents.REQUIREMENT, ['forge-requirement']);
   assert.equal(x.state.agentCompletions.at(-1).reportedSeverities.high, 1);
 });
 
 test('coordination tools are allowed before approval (main and subagents)', () => {
   const x = harness(); x.cmd('Build a booking system');
   assert.equal(x.pre('coord', {}, { rawTool: 'SendMessage' }).decision, undefined);
-  assert.equal(x.pre('coord', {}, { rawTool: 'TaskStop', actor: { kind: 'sub', agent: 'forge:forge-critic', agentId: 'c' } }).decision, undefined);
+  assert.equal(x.pre('coord', {}, { rawTool: 'TaskStop', actor: { kind: 'sub', agent: 'forge:forge-planner', agentId: 'c' } }).decision, undefined);
 });
 
 test('Stop delivers a queued gate instruction instead of ending the turn', () => {
   const x = harness(); x.cmd('Build a booking system');
   x.pre('agent', { subagent_type: 'forge:forge-requirement' });
   x.agentStop({ agent: 'forge:forge-requirement', agentId: 'q1', report: 'ok' });
-  assert.match(x.stop().continueReason, /cooking step 2\/3/);
+  assert.match(x.stop().continueReason, /FORGE REQUIREMENT — report received/);
 });
 
-test('fast mode uses the summary tool and always challenges; cross-check holds', () => {
-  const x = harness();
-  x.cmd('--fast Build CRM');
-  assert.equal(x.state.requirementStep, 'COOKING');
-  const agents = requiredAgentsFor(x.state);
-  x.agent(agents[0], '- [HIGH][fact] no tenant column');
-  for (const a of agents.slice(1)) x.agent(a);
-  const low = { baseline: 'Goal and scope and acceptance criteria here', findings: [{ severity: 'LOW', title: 'naming' }] };
-  assert.match(x.pre('forge.requirement_summary', low).reason, /1 HIGH/);
-  const ok = { ...low, findings: [{ severity: 'HIGH', title: 'No tenant column' }] };
-  assert.equal(x.pre('forge.requirement_summary', ok).decision, undefined);
-  assert.match(x.post('forge.requirement_summary', ok).context, /challenge/);
-  assert.equal(x.state.requirementStep, 'CHALLENGE');
+test('summary cross-check: a report\'s CRITICAL/HIGH cannot vanish from the summary', () => {
+  const x = harness(); x.cmd('Build CRM');
+  x.agent('forge-requirement', '- [HIGH][fact] no tenant column\n- [CRITICAL][assumption] PII export');
+  assert.match(x.pre('forge.requirement_summary', SUMMARY).reason, /1 CRITICAL and 1 HIGH label\(s\), but the summary lists no CRITICAL\/HIGH finding/);
+  assert.match(x.post('forge.requirement_summary', SUMMARY).context, /rejected/);
+  assert.equal(x.state.phase, 'REQUIREMENT');
+  assert.match(x.pre('forge.requirement_summary', { ...SUMMARY, baseline: 'short' }).reason, /needs a baseline/);
+  assert.match(x.pre('forge.requirement_summary', { ...SUMMARY, findings: [{ severity: 'URGENT', title: 'x' }] }).reason, /Finding 1 needs severity CRITICAL\|HIGH\|MEDIUM\|LOW/);
+  const ok = { ...SUMMARY, findings: [{ severity: 'HIGH', title: 'No tenant column' }] };
+  assert.match(x.summarize(ok).context, /recorded \(1 CRITICAL\/HIGH, 0 open blocker\(s\)\) → PLANNING/);
+  assert.deepEqual(x.state.requirementSummary.specialistSeverities, { critical: 1, high: 1 });
+  // a second summary is refused: the gate already moved on
+  assert.match(x.pre('forge.requirement_summary', ok).reason, /no Forge REQUIREMENT gate is active/);
 });
 
 test('Stop nudges are capped (no infinite loops)', () => {
   const x = harness(); x.cmd('Build a booking system');
-  assert.ok(x.stop().continueReason); assert.ok(x.stop().continueReason);
+  assert.match(x.stop().continueReason, /forge:forge-requirement has not reported\. Invoke it once/);
+  assert.ok(x.stop().continueReason);
   assert.equal(x.stop().continueReason, undefined);
+  // after the report: the summary is asked for, also capped
+  const y = harness(); y.cmd('Build a booking system');
+  y.agent('forge-requirement');
+  assert.match(y.stop().continueReason, /FORGE REQUIREMENT — report received/); // no queued text left (delivered on Agent post) → nudge 1
+  assert.match(y.stop().continueReason, /FORGE REQUIREMENT — report received/);
+  assert.equal(y.stop().continueReason, undefined);
 });
 
 test('/forge off writes a tombstone; afterwards the session is unguarded', () => {
@@ -226,10 +258,25 @@ test('/forge off writes a tombstone; afterwards the session is unguarded', () =>
   assert.equal(x.pre('write', { file_path: 'a' }).decision, undefined);
 });
 
-test('mode command returns a config update; config default applies to new runs', () => {
-  assert.deepEqual(harness().cmd('mode fast').configUpdate, { requirementMode: 'fast' });
-  const x = harness({ requirementMode: 'fast' }); x.cmd('Build');
-  assert.equal(x.state.requirementMode, 'fast');
+test('former mode words are plain requirement text', () => {
+  const x = harness(); x.cmd('quick Fix the login bug');
+  assert.equal(x.state.phase, 'REQUIREMENT'); assert.equal(x.state.requirement, 'quick Fix the login bug');
+  assert.deepEqual(requiredAgentsFor(x.state), ['forge-requirement']);
+  const y = harness(); y.cmd('mode');
+  assert.equal(y.state.requirement, 'mode');
+});
+
+test('legacy v6.0 state with requirementStep still completes the requirement gate', () => {
+  const legacy = { active: true, version: 8, phase: 'REQUIREMENT', requirement: 'Build CRM', slug: 'forge-old',
+    requirementStep: 'COOKING', requirementMode: 'thorough', agentRetries: { 'REQUIREMENT:COOKING': 2 },
+    gateAgents: { 'REQUIREMENT:DISCOVERY': ['forge-requirement'] }, requirementSummary: { baseline: 'old fast-mode summary text here', findings: [] } };
+  const x = harness({}, legacy);
+  assert.deepEqual(requiredAgentsFor(x.state), ['forge-requirement']);
+  x.agent('forge-requirement');
+  assert.deepEqual(x.state.gateAgents.REQUIREMENT, ['forge-requirement']);
+  x.summarize();
+  assert.equal(x.state.phase, 'PLANNING');
+  assert.equal(x.state.requirementSummary.baseline, SUMMARY.baseline);
 });
 
 test('plan written to the host plan file (no inline plan) is validated and approved', () => {
@@ -238,11 +285,14 @@ test('plan written to the host plan file (no inline plan) is validated and appro
   let st = null; const h = ev => { const r = engine.handle(st, ev); st = r.state; return r.out; };
   const main = { kind: 'main' };
   h({ type: 'command', text: 'Build a booking system' });
-  for (let g = 0; g < 4; g++) for (const a of requiredAgentsFor(st)) {
+  const runGate = () => { for (const a of requiredAgentsFor(st)) {
     h({ type: 'tool.pre', tool: 'agent', input: { subagent_type: `forge:${a}` }, actor: main });
-    h({ type: 'agent.stop', agent: `forge:${a}`, agentId: a + g, report: 'ok' });
-  }
+    h({ type: 'agent.stop', agent: `forge:${a}`, agentId: a, report: 'ok' });
+  } };
+  runGate();
+  h({ type: 'tool.post', tool: 'forge.requirement_summary', input: SUMMARY, actor: main });
   assert.equal(st.phase, 'PLANNING');
+  runGate();
   assert.equal(h({ type: 'tool.pre', tool: 'plan.write', input: { file_path: '/home/u/.claude/plans/p.md' }, planFile: '/home/u/.claude/plans/p.md', actor: main }).decision, undefined);
   assert.equal(h({ type: 'tool.pre', tool: 'plan.submit', input: {}, actor: main, permissionMode: 'plan' }).decision, undefined);
   assert.equal(st.phase, 'AWAITING_APPROVAL');
@@ -257,10 +307,9 @@ test('token guard: a specialist cannot be re-run while running or after it repor
   assert.equal(x.pre('agent', input).decision, undefined);
   assert.match(x.pre('agent', input).reason, /still running/);
   x.agentStop({ agent: 'forge:forge-requirement', agentId: 'r1', report: 'baseline' });
-  // gate advanced to COOKING: forge-requirement is required again there (new gate) → allowed once
-  assert.equal(x.pre('agent', input).decision, undefined);
-  x.agentStop({ agent: 'forge:forge-requirement', agentId: 'r2', report: 'cooking analysis' });
-  assert.match(x.pre('agent', input).reason, /already reported/);
+  // one counted pass per gate: a second run after the report is refused
+  assert.match(x.pre('agent', input).reason, /already reported for REQUIREMENT/);
+  assert.equal(x.state.phase, 'REQUIREMENT');
 });
 
 test('a run that never stops does not block forever', () => {

@@ -197,7 +197,7 @@ test('bare /forge auto is help, never starts REQUIREMENT auto',async()=>{
 
 
 test('resume picker lets user choose current rather than silently using current requirement',async()=>{
-  const activeCurrent={active:true,phase:'REQUIREMENT',requirement:'auto',slug:'forge-auto',requirementStep:'DISCOVERY'};
+  const activeCurrent={active:true,phase:'REQUIREMENT',requirement:'auto',slug:'forge-auto'};
   const commands=new Map();const events=new Map();const notices=[];let switches=0;
   class Manager {static async listForPicker(){return []};getBranch(){return [{type:'custom',customType:FORGE_STATE_ENTRY,data:activeCurrent}]};getSessionFile(){return '/current.jsonl'};getSessionDir(){return tmp}}
   const pi={zod:fakeZ,setLabel(){},on(n,f){events.set(n,f)},registerCommand(n,c){commands.set(n,c)},registerTool(){},appendEntry(){},sendUserMessage(){}};

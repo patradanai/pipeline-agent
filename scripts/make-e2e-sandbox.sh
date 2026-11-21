@@ -23,8 +23,8 @@ JS
   printf 'node_modules\n' > "$dir/.gitignore"
 }
 
-# S1/S3/S4/S6/S7/S8: healthy project
-for s in s1-happy s3-fast s4-quick s6-guards s7-resume s8-approve; do make_repo "$s"; done
+# S1/S3 (S3 reuses s1-happy)/S4/S5/S6: healthy project
+for s in s1-happy s4-guards s5-resume s6-approve; do make_repo "$s"; done
 
 # S2: QA must FAIL first — a legacy module with a failing test that the requirement forbids touching
 make_repo s2-rework

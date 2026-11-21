@@ -11,7 +11,7 @@ const cases = [
 ];
 for (const [phase, title, fraction] of cases) {
   test(`compact widget: ${phase} renders one line without future gates`, () => {
-    const result = renderForgeWidget({phase, active:true, requirementStep:'CHALLENGE'});
+    const result = renderForgeWidget({phase, active:true});
     assert.equal(result.length, 1);
     assert.match(result[0], new RegExp(title));
     assert.match(result[0], new RegExp(fraction.replace('/', '\\/')));

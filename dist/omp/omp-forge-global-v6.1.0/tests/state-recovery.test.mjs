@@ -68,7 +68,7 @@ test('stale recovery candidates are rejected',()=>{
 });
 
 test('recovery never infers approval from stale REQUIREMENT with approved flag',()=>{
-  const state={...approved,phase:'REQUIREMENT',requirementStep:'DISCOVERY'};
+  const state={...approved,phase:'REQUIREMENT'};
   const fixed=applyRecoveryProposal(state,recoveryProposal(state,'inactive'));
   assert.equal(fixed.phase,'PLANNING');
   assert.equal(fixed.approved,false);

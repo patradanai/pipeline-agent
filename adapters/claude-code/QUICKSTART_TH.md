@@ -14,20 +14,20 @@ npm run build
 /plugin install forge@forge-local
 ```
 
-รีสตาร์ท Claude Code แล้วตรวจ `/hooks` (มี hook ของ Forge), `/mcp` (มี server `forge`), `/agents` (มี agent `forge:` 9 ตัว) ต้องมี `node` 22 ขึ้นไป
+รีสตาร์ท Claude Code แล้วตรวจ `/hooks` (มี hook ของ Forge), `/mcp` (มี server `forge`), `/agents` (มี agent `forge:` 6 ตัว) ต้องมี `node` 22 ขึ้นไป
 
 ## ใช้งาน
 
 ```text
-/forge สร้างระบบอนุมัติการจองห้อง     # thorough (ค่าเริ่มต้น)
+/forge สร้างระบบอนุมัติการจองห้อง     # เริ่มงาน
 /forge status                          # ดู Gate ปัจจุบัน
 /forge approve                         # อนุมัติเองเมื่อ context ถูกล้างจน Forge ไม่เห็นการอนุมัติ
 /forge off                             # ยกเลิก
 ```
 
-พิมพ์ `/forge` แล้วเลือกจากเมนูได้เลย: `/forge-status`, `/forge-resume`, `/forge-approve`, `/forge-qa`, `/forge-rework`, `/forge-delivery`, `/forge-mode`, `/forge-quick`, `/forge-fast`, `/forge-thorough`, `/forge-off` ฯลฯ
+พิมพ์ `/forge` แล้วเลือกจากเมนูได้เลย: `/forge-status`, `/forge-resume`, `/forge-approve`, `/forge-qa`, `/forge-rework`, `/forge-delivery`, `/forge-off` ฯลฯ
 
-ลำดับ: Requirement (specialist ผ่าน Agent tool) → Planner → Claude เข้า plan mode แล้วเรียก **ExitPlanMode** พร้อมแผนเต็ม → Forge ตรวจ plan contract ก่อน → **คุณกดอนุมัติในหน้าต่างของ Claude Code** → Executor ลงมือ → เมื่อ Claude จะหยุด Forge สั่ง QA อิสระ → QA PASS → Delivery พร้อม commit message ให้ copy
+ลำดับ: Requirement (`forge:forge-requirement` รันครั้งเดียว ครบทุกมุม → Claude ตรวจรายงานซ้ำแล้วส่ง `forge_requirement_summary`) → Planner → Claude เข้า plan mode แล้วเรียก **ExitPlanMode** พร้อมแผนเต็ม → Forge ตรวจ plan contract ก่อน → **คุณกดอนุมัติในหน้าต่างของ Claude Code** → Executor ลงมือ → เมื่อ Claude จะหยุด Forge สั่ง QA อิสระ → QA PASS → Delivery พร้อม commit message ให้ copy
 
 Forge ไม่รัน git add/commit/push เอง และไม่เขียนไฟล์ลงโปรเจกต์ รายงานทั้งหมดอยู่ใน data dir ของ plugin
 

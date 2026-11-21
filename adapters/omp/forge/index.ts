@@ -20,15 +20,8 @@ import {
   listAssignedAgentNames,
   formatAgentAssignments,
   agentNameFor,
-  REQUIREMENT_STEPS,
-  REQUIREMENT_MODES,
-  DEFAULT_REQUIREMENT_MODE,
-  requirementModeOf,
-  firstRequirementStep,
-  afterRequirementStep,
   normalizeRequirementSummary,
   countReportedSeverities,
-  gateKey,
   requiredAgentsFor,
   missingGateAgentsFor,
   migrateLegacyRequirementState,
@@ -50,6 +43,7 @@ import {
   nextPhase,
   parseCommand,
   phaseInstruction,
+  requirementSummaryInstruction,
   qaInstruction,
   reworkInstruction,
   renderDeliveryReport,
@@ -59,7 +53,7 @@ import {
 } from './core.mjs';
 
 /**
- * Global OMP Forge Harness v6.0 — OMP adapter over the shared Forge core.
+ * Global OMP Forge Harness v6.1 — OMP adapter over the shared Forge core.
  *
  * Plan mode -> native approval -> execution -> independent QA ->
  * FAIL: rework planning -> renewed approval -> execute -> QA;
@@ -69,7 +63,7 @@ import {
  * Never changes a project's files during the planning or QA stages.
  */
 export default function forgeExtension(pi: ExtensionAPI) {
-  pi.setLabel('Forge v6.0 (OMP adapter on shared core) · native /agents');
+  pi.setLabel('Forge v6.1 (OMP adapter on shared core) · native /agents');
 
   const stateEntry = 'dev.omp-forge.workflow.v1'; // keep existing state entry for upgrades
   const extensionDir = dirname(fileURLToPath(import.meta.url));
@@ -87,7 +81,6 @@ export default function forgeExtension(pi: ExtensionAPI) {
   let activeSessionManager: any = null;
   const checkpointRoot = process.env.FORGE_CHECKPOINT_DIR || join(agentRoot, 'forge-checkpoints');
   let autoStart = false;
-  let requirementMode: string = DEFAULT_REQUIREMENT_MODE;
   const runningTasks = new Map<string, { key: string; agents: string[] }>();
   const planWriteCalls = new Map<string, { path: string; phase: string }>();
   // Native mode changes cannot run during an OMP streaming/tool turn. A plan
@@ -127,30 +120,19 @@ export default function forgeExtension(pi: ExtensionAPI) {
   const isPlanWritePath = (target: string) =>
     Boolean(workflow && isSandboxPlanPath(target) &&
       (workflow.phase === 'REWORK_PLANNING'
-        ? (!workflow.reworkBasePlanPath || target !== workflow.reworkBasePlanPath)
+        ? target !== (workflow.reworkBasePlanPath ?? `local://${workflow.slug}-plan.md`)
         : (!workflow.planPath || target === workflow.planPath)));
 
 
   // Gate transitions occur as soon as a required tool has SUCCESSFULLY finished.
   // Relying on session_stop alone can strand OMP when there are pending messages,
   // task tool completions, or the built-in continuation cap has been reached.
-  function nextRequirementStep(ctx: any): string | null {
-    if (!workflow?.active || workflow.phase !== 'REQUIREMENT' || !hasAgents('REQUIREMENT')) return null;
-    const next = afterRequirementStep(workflow);
-    if (!next) return null;
-    if (next.summary) {
-      if (workflow.requirementSummaryRequested) return null;
-      workflow = { ...workflow, requirementSummaryRequested: true };
-      saveState(); updateDashboard(ctx);
-      return requirementSummaryPrompt();
-    }
-    workflow = next.step ? { ...workflow, requirementStep: next.step } : { ...workflow, phase: 'PLANNING', planWritten: false };
+  // The forge-requirement report asks for the summary once; the summary tool opens Planning.
+  function requestRequirementSummary(ctx: unknown): string | null {
+    if (!workflow?.active || workflow.phase !== 'REQUIREMENT' || !hasAgents('REQUIREMENT') || workflow.requirementSummaryRequested) return null;
+    workflow = { ...workflow, requirementSummaryRequested: true };
     saveState(); updateDashboard(ctx);
-    return phaseInstruction(workflow);
-  }
-
-  function requirementSummaryPrompt() {
-    return '[FORGE REQUIREMENT — specialists done]\nAll required specialist reports arrived. Deduplicate them and call `forge_requirement_summary` exactly once (baseline, findings with severity, open blockers, assumptions, relevant files). Forge then runs a short focused challenge only if a CRITICAL/HIGH finding or blocker exists; otherwise it goes straight to Planning. Do not write the plan yet.';
+    return requirementSummaryInstruction(workflow);
   }
 
   const snapshotWorkingTree = (cwd: string | undefined) => coreSnapshotWorkingTree(cwd);
@@ -165,7 +147,6 @@ export default function forgeExtension(pi: ExtensionAPI) {
   function readConfig() {
     const cfg = readStoredConfig();
     autoStart = cfg.autoStart === true;
-    requirementMode = REQUIREMENT_MODES.includes(cfg.requirementMode) ? cfg.requirementMode : DEFAULT_REQUIREMENT_MODE;
     try { configuredSkills = cloneGateSkills(cfg.gateSkills); }
     catch { configuredSkills = cloneGateSkills(); }
     guardedAgentNames = new Set([
@@ -891,7 +872,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
     tick(0);
   }
 
-  async function begin(requirement: string, ctx: any, useInputReplacement = false, modeOverride?: string) {
+  async function begin(requirement: string, ctx: any, useInputReplacement = false) {
     if (workflow?.active) {
       notify(ctx, 'A Forge workflow is active. Steer it, or use /forge off.', 'warning');
       return null;
@@ -917,17 +898,11 @@ export default function forgeExtension(pi: ExtensionAPI) {
       notify(ctx, `Forge cannot start: missing required OMP agent definitions: ${missing.join(', ')}. Check /agents or reinstall the Forge agent files.`, 'error');
       return null;
     }
-    const mode = modeOverride && REQUIREMENT_MODES.includes(modeOverride) ? modeOverride : requirementMode;
-    workflow = initialState(requirement, undefined, configuredAgents, configuredSkills, skillPins, mode);
+    workflow = initialState(requirement, undefined, configuredAgents, configuredSkills, skillPins);
     pendingCheckpointRecovery = null; approvalHandoff = null; nativeReview = null;
     saveState();
     updateDashboard(ctx);
-    notify(ctx, mode === 'thorough'
-      ? 'Forge: REQUIREMENT (discovery → cooking ×4 parallel → challenge ×2 parallel) → Planning → Approval → Execute → QA → Delivery'
-      : mode === 'fast'
-        ? 'Forge: REQUIREMENT fast (orchestrator intake → cooking ×4 parallel → challenge ×2 parallel, always) → Planning → Approval → Execute → QA → Delivery'
-        : 'Forge: REQUIREMENT quick — LOW RIGOR (analyst + QA strategist; no critic/architect unless CRITICAL/HIGH). Use only for trivial changes; /forge off and /forge <req> for the full gate.',
-      mode === 'quick' ? 'warning' : 'info');
+    notify(ctx, 'Forge: REQUIREMENT (one forge-requirement pass + your review) → Planning → Approval → Execute → QA → Delivery');
     const instruction = phaseInstruction(workflow);
     if (!useInputReplacement) pi.sendUserMessage(instruction, { attribution: 'agent' });
     return instruction;
@@ -941,7 +916,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: 'forge_requirement_summary',
     label: 'Submit Forge Requirement Summary',
-    description: 'Fast/quick requirement mode only: submit the deduplicated requirement synthesis (all findings, original severities) after the specialist batch. Fast mode always continues to the challenge; quick mode challenges on CRITICAL/HIGH or blockers. Changes no project files.',
+    description: 'Submit the requirement synthesis after the forge-requirement report: baseline, ALL findings with their original severity, open blockers, assumptions and relevant files. Forge cross-checks the report\'s own CRITICAL/HIGH labels, then opens Planning. Changes no project files.',
     loadMode: 'essential',
     approval: 'read',
     parameters: z.object({
@@ -950,26 +925,20 @@ export default function forgeExtension(pi: ExtensionAPI) {
       blockers: z.array(z.string()).optional(),
       assumptions: z.array(z.string()).optional(),
       relevantFiles: z.array(z.string()).optional(),
-      escalate: z.boolean().optional(),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const fail = (text: string) => ({ content: [{ type: 'text', text: `Forge requirement summary rejected: ${text}` }], isError: true });
       let applied;
       try { applied = applyRequirementSummary(workflow, params); } catch (err) { return fail(String((err as Error)?.message ?? err)); }
-      const { summarizedHigh, summary } = applied;
-      if (applied.next === 'CHALLENGE') {
-        workflow = applied.state;
-        saveState(); updateDashboard(ctx);
-        return { content: [{ type: 'text', text: `Forge: summary recorded (${summarizedHigh} CRITICAL/HIGH, ${summary.blockers.length} blocker(s)) → challenge.\n\n${phaseInstruction(workflow)}` }], details: { next: 'CHALLENGE' } };
-      }
+      const head = `Forge: requirement summary recorded (${applied.summarizedHigh} CRITICAL/HIGH, ${applied.summary.blockers.length} open blocker(s)) → Planning.`;
       workflow = applied.state;
       saveState(); updateDashboard(ctx);
       if (!(await enterPlan(ctx))) {
         workflow = { ...workflow, phase: 'PLAN_MODE_PENDING' };
         saveState(); updateDashboard(ctx);
-        return { content: [{ type: 'text', text: '[FORGE REQUIREMENT COMPLETE — quick mode, no high-risk findings, challenge skipped]\nNative Plan Mode is temporarily unavailable during this turn. Do NOT write local:// or xd://propose yet. Finish this turn; Forge will activate Plan Mode and start Planning automatically.' }], details: { next: 'PLAN_MODE_PENDING' } };
+        return { content: [{ type: 'text', text: `${head}\n[FORGE REQUIREMENT COMPLETE] Native Plan Mode is temporarily unavailable during this turn. Do NOT write local:// or xd://propose yet. Finish this turn; Forge will activate Plan Mode and start Planning automatically.` }], details: { next: 'PLAN_MODE_PENDING' } };
       }
-      return { content: [{ type: 'text', text: `Forge (quick mode): no CRITICAL/HIGH findings or blockers → challenge skipped.\n\n${phaseInstruction(workflow)}` }], details: { next: 'PLANNING' } };
+      return { content: [{ type: 'text', text: `${head}\n\n${phaseInstruction(workflow)}` }], details: { next: 'PLANNING' } };
     },
   });
 
@@ -1212,17 +1181,10 @@ export default function forgeExtension(pi: ExtensionAPI) {
         return;
       }
       if (command.type === 'agents') return notifyAssignedAgents(ctx);
-      if (command.type === 'agentHelp') return notify(ctx, 'Agent assignment commands have been removed to reduce duplication. Use OMP /agents to configure the nine fixed Forge agents. /forge agents shows the read-only Gate mapping.', 'warning');
+      if (command.type === 'agentHelp') return notify(ctx, 'Agent assignment commands have been removed to reduce duplication. Use OMP /agents to configure the six fixed Forge agents. /forge agents shows the read-only Gate mapping.', 'warning');
       if (command.type === 'autoHelp') return notify(ctx, 'Usage: /forge auto on | /forge auto off. Bare /forge auto is not a requirement and will not start a workflow.', 'warning');
       if (command.type === 'auto') {
         try { saveConfig(command.enabled); notify(ctx, `Forge global auto-start ${command.enabled ? 'ON' : 'OFF'}.`); }
-        catch (err) { notify(ctx, `Could not save config: ${String(err)}`, 'error'); }
-        return;
-      }
-      if (command.type === 'modeInvalid') return notify(ctx, command.message, 'warning');
-      if (command.type === 'mode') {
-        if (!command.mode) return notify(ctx, `Forge requirement mode: ${requirementMode}. thorough (default) = all 3 steps, all specialists, parallel batches; fast = orchestrator intake replaces the discovery agent, challenge always runs; quick = LOW RIGOR, 2 specialists, trivial changes only. Set: /forge mode thorough|fast|quick. One run: /forge quick <req>, /forge --fast <req>.`);
-        try { persistConfig({ requirementMode: command.mode }); requirementMode = command.mode; notify(ctx, `Forge default requirement mode: ${command.mode}. Applies to new workflows.`); }
         catch (err) { notify(ctx, `Could not save config: ${String(err)}`, 'error'); }
         return;
       }
@@ -1241,7 +1203,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
         const mismatch = recoveryProposal(workflow, ctx.sessionModes?.getState?.().plan ?? 'unknown');
         if (mismatch) notify(ctx, `Forge state warning: ${mismatch.explanation} Run /forge recover to confirm a safe correction.`, 'warning');
         const missingAgents = workflow?.phase === 'EXECUTION_BLOCKED' ? missingGateAgentsFor({ ...workflow, phase: 'EXECUTING' }) : missingGateAgentsFor(workflow);
-        notify(ctx, `Forge: ${workflow?.phase ?? 'inactive'}${workflow?.phase === 'REQUIREMENT' ? ` (internal: ${workflow.requirementStep}, mode: ${requirementModeOf(workflow)})` : ''} | requirement: ${workflow?.requirement ? String(workflow.requirement).replace(/[\r\n]/g, ' ').slice(0, 80) : '(none)'} | slug: ${workflow?.slug ?? '-'} | approved: ${workflow?.approved === true ? 'yes' : 'no'} | QA: ${workflow?.qaStatus ?? 'pending'} | rework: ${workflow?.reworkCycles ?? 0} | waiting agents: ${missingAgents.join(',') || 'none'}${workflow?.phase === 'EXECUTION_BLOCKED' ? ' | action: /forge qa reviews existing work without rerunning implementation; /forge resume retries execution.' : ''} | global auto: ${autoStart ? 'ON' : 'OFF'}`);
+        notify(ctx, `Forge: ${workflow?.phase ?? 'inactive'} | requirement: ${workflow?.requirement ? String(workflow.requirement).replace(/[\r\n]/g, ' ').slice(0, 80) : '(none)'} | slug: ${workflow?.slug ?? '-'} | approved: ${workflow?.approved === true ? 'yes' : 'no'} | QA: ${workflow?.qaStatus ?? 'pending'} | rework: ${workflow?.reworkCycles ?? 0} | waiting agents: ${missingAgents.join(',') || 'none'}${workflow?.phase === 'EXECUTION_BLOCKED' ? ' | action: /forge qa reviews existing work without rerunning implementation; /forge resume retries execution.' : ''} | global auto: ${autoStart ? 'ON' : 'OFF'}`);
         return;
       }
       if (command.type === 'report') {
@@ -1322,7 +1284,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
           return;
         }
         if (workflow?.phase === 'AGENTS_BLOCKED') {
-          workflow = { ...workflow, active: true, phase: 'REQUIREMENT', requirementStep: workflow.requirementStep ?? firstRequirementStep(requirementModeOf(workflow)), gateAgents: {}, agentRetries: {} }; saveState();
+          workflow = { ...workflow, active: true, phase: 'REQUIREMENT', gateAgents: {}, agentRetries: {}, requirementSummaryRequested: false }; saveState();
           // Discovery can resume read-only even while OMP Plan Mode is unavailable.
           await enterPlan(ctx);
           pi.sendUserMessage(phaseInstruction(workflow), { attribution: 'agent' });
@@ -1380,7 +1342,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
           return;
         }
       }
-      await begin(requirement, ctx, false, command.mode);
+      await begin(requirement, ctx);
     },
   });
 
@@ -1503,21 +1465,20 @@ export default function forgeExtension(pi: ExtensionAPI) {
         return;
       }
     }
-    const reqNext = workflow.phase === 'REQUIREMENT' ? afterRequirementStep(workflow) : null;
-    if (workflow.phase === 'REQUIREMENT' && reqNext?.summary && hasAgents('REQUIREMENT')) {
-      const key = `${gateKey(workflow)}:summary`;
+    if (workflow.phase === 'REQUIREMENT' && hasAgents('REQUIREMENT')) {
+      const key = 'REQUIREMENT:summary';
       const retries = workflow.agentRetries?.[key] ?? 0;
       if (retries < 2) {
         workflow = { ...workflow, requirementSummaryRequested: true, agentRetries: { ...(workflow.agentRetries ?? {}), [key]: retries + 1 } };
         saveState(); updateDashboard(ctx);
-        return { continue: true, additionalContext: requirementSummaryPrompt() };
+        return { continue: true, additionalContext: requirementSummaryInstruction(workflow) };
       }
       return;
     }
-    const next = workflow.phase === 'REQUIREMENT' ? (reqNext?.step ? 'REQUIREMENT' : (reqNext?.phase ?? null)) : nextPhase(workflow.phase);
+    const next = nextPhase(workflow.phase);
     if (next && !hasAgents(workflow.phase)) {
       const missing = missingGateAgentsFor(workflow);
-      const key = gateKey(workflow);
+      const key = workflow.phase;
       const retries = workflow.agentRetries?.[key] ?? 0;
       if (retries < 1) {
         workflow = { ...workflow, agentRetries: { ...(workflow.agentRetries ?? {}), [key]: 1 } }; saveState(); updateDashboard(ctx);
@@ -1533,17 +1494,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
       return { continue: true, additionalContext: `${phaseInstruction(workflow)}\n\nForge is still awaiting a successful write of the plan file. Do not claim it exists until the write tool succeeds.` };
     }
     if (next) {
-      if (next === 'PLANNING' && !(await enterPlan(ctx))) {
-        workflow = { ...workflow, phase: 'PLAN_MODE_BLOCKED', blockedFrom: next, active: false };
-        saveState(); updateDashboard(ctx);
-        notify(ctx, 'Forge requires Native Plan Mode before writing the plan. Discovery is complete; use /forge resume after Plan Mode can be entered.', 'error');
-        return;
-      }
-      if (next === 'REQUIREMENT') {
-        workflow = { ...workflow, requirementStep: reqNext.step };
-      } else {
-        workflow = { ...workflow, phase: next };
-      }
+      workflow = { ...workflow, phase: next };
       saveState(); updateDashboard(ctx);
       return { continue: true, additionalContext: phaseInstruction(workflow) };
     }
@@ -1662,11 +1613,11 @@ export default function forgeExtension(pi: ExtensionAPI) {
     const allowed = requiredAgentsFor(workflow);
     if (!allowed.includes(selected)) return { block: true, reason: `Forge ${workflow.phase}: expected ${allowed.join(', ') || '(no subagents)'}; got ${selected || 'unknown'}.` };
     // Spawn is not success. Completion is acknowledged only after a task tool result.
-    const spawned = new Set(workflow.gateAgentsSpawned?.[gateKey(workflow)] ?? []);
+    const spawned = new Set(workflow.gateAgentsSpawned?.[workflow.phase] ?? []);
     spawned.add(selected);
-    workflow = { ...workflow, gateAgentsSpawned: { ...(workflow.gateAgentsSpawned ?? {}), [gateKey(workflow)]: [...spawned] } };
+    workflow = { ...workflow, gateAgentsSpawned: { ...(workflow.gateAgentsSpawned ?? {}), [workflow.phase]: [...spawned] } };
     saveState();
-    return { note: `Forge ${workflow.phase}${workflow.phase === 'REQUIREMENT' ? `/${workflow.requirementStep}` : ''} specialist: ${selected}` };
+    return { note: `Forge ${workflow.phase} specialist: ${selected}` };
   });
 
   function taskAgents(input: any): string[] {
@@ -1695,12 +1646,12 @@ export default function forgeExtension(pi: ExtensionAPI) {
     const pending = runningTasks.get(id);
     if (id) runningTasks.delete(id);
     // No matching dispatch or errored task: never count as completed.
-    if (!pending || pending.key !== gateKey(workflow) || event.isError) return;
+    if (!pending || pending.key !== workflow.phase || event.isError) return;
     const outputs = (event.content ?? []).filter((x: any)=>x?.type==='text' && typeof x.text==='string' && x.text.trim()).map((x: any)=>x.text);
     // Empty successful tool results are not meaningful completed agent reports.
     if (!outputs.length && !event.details) return;
     for (const agent of pending.agents) {
-      if ((workflow.gateAgentsSpawned?.[gateKey(workflow)] ?? []).includes(agent)) {
+      if ((workflow.gateAgentsSpawned?.[workflow.phase] ?? []).includes(agent)) {
         markAgent(agent, ctx);
         workflow = { ...workflow, agentCompletions: [...(workflow.agentCompletions ?? []),
           { gate: pending.key, agent, resultId: id, reportedAt: new Date().toISOString(),
@@ -1709,17 +1660,9 @@ export default function forgeExtension(pi: ExtensionAPI) {
         saveState();
       }
     }
-    const instruction = nextRequirementStep(ctx);
-    if (instruction && workflow.phase === 'PLANNING' && !(await enterPlan(ctx))) {
-      // OMP can reject sessionModes.set with `busy` during an active turn.
-      // Never ask the model to write a plan until Plan Mode is actually ready.
-      // It will retry once the turn settles, then automatically continue.
-      workflow = { ...workflow, phase: 'PLAN_MODE_PENDING' };
-      saveState(); updateDashboard(ctx);
-      return { additionalContext: '[FORGE REQUIREMENT COMPLETE]\nAll mandatory specialists finished. Native Plan Mode is temporarily unavailable during this turn. Do NOT write local:// or xd://propose yet. Finish this turn; Forge will activate Plan Mode and automatically start Planning from session_stop. No human command or form answer is required.' };
-    }
-    // Inject the next internal step in the SAME model turn; no extra user chat
+    // Ask for the requirement summary in the SAME model turn; no extra user chat
     // message, /forge command, or review form answer is needed.
+    const instruction = requestRequirementSummary(ctx);
     return instruction ? { additionalContext: instruction } : undefined;
   });
 
@@ -1751,7 +1694,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
       const id = String(event.toolCallId ?? event.id ?? '');
       // Keep task-agent tracking in sync with the input that will actually be executed.
       // An OMP tool_call hook can replace task arguments before native task dispatch.
-      if (id) runningTasks.set(id, { key: gateKey(workflow), agents: taskAgents(event.input) });
+      if (id) runningTasks.set(id, { key: workflow.phase, agents: taskAgents(event.input) });
       let skillBrief = '';
       try { skillBrief = skillBriefForGate(); }
       catch (err) { if (id) runningTasks.delete(id); return { block: true, reason: `Forge gate skill verification failed: ${String(err)}` }; }
@@ -1866,7 +1809,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
           target === workflow.planPath && isSandboxPlanPath(target)) return;
       if (tool === 'write' && workflow.phase === 'AWAITING_APPROVAL' && workflow.planWritten &&
           target === workflow.planPath && isSandboxPlanPath(target)) return;
-      const pending = workflow.phase === 'REQUIREMENT' ? ` Finish specialist tasks for ${workflow.requirementStep}: ${missingGateAgentsFor(workflow).join(', ') || 'waiting for stage transition'}. The harness advances automatically; do NOT ask the user to send a next-gate message.` : '';
+      const pending = workflow.phase === 'REQUIREMENT' ? ` Finish the requirement analysis: ${missingGateAgentsFor(workflow).join(', ') || 'call forge_requirement_summary'}. The harness advances automatically; do NOT ask the user to send a next-gate message.` : '';
       const planHint = ['PLANNING','REWORK_PLANNING'].includes(workflow.phase) && tool === 'write'
         ? ` Only a root-level local://*-plan.md file is allowed; received ${JSON.stringify(target)}.` : '';
       return { block: true, reason: `Forge ${workflow.phase} is read-only: implementation writes require explicit native Plan Approval.${planHint}${pending}` };

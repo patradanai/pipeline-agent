@@ -1,5 +1,5 @@
 {
   "name": "forge",
   "description": "Forge: gated multi-agent SDLC (requirement → plan → native approval → execute → QA → delivery) with no agent git writes",
-  "version": "6.0.7"
+  "version": "6.1.0"
 }

@@ -4,17 +4,17 @@ import {mkdtempSync, readFileSync, existsSync, rmSync, mkdirSync, writeFileSync,
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import forgeExtension from '../forge/index.ts';
-import {GATE_AGENTS, requiredAgentsFor, migrateLegacyRequirementState} from '../forge/core.mjs';
+import {requiredAgentsFor, initialState} from '../forge/core.mjs';
 
 const tmp = mkdtempSync(join(tmpdir(),'omp-forge-tests-'));
 process.env.FORGE_REPORT_DIR = tmp;
 process.env.FORGE_CONFIG_PATH = join(tmp, 'test-forge-config.json');
 process.env.PI_CODING_AGENT_DIR = join(tmp, 'agent-home');
 mkdirSync(join(process.env.PI_CODING_AGENT_DIR, 'agents'), {recursive:true});
-for (const name of ['forge-requirement','forge-critic','forge-architect','forge-qa-strategist','forge-planner','forge-executor','forge-qa','forge-code-reviewer','forge-delivery','my-planner','my-critic','my-qa','my-code-reviewer','my-executor']) {
+for (const name of ['forge-requirement','forge-planner','forge-executor','forge-qa','forge-code-reviewer','forge-delivery','my-planner']) {
   writeFileSync(join(process.env.PI_CODING_AGENT_DIR,'agents',`${name}.md`),'---\nname: '+name+'\ndescription: Custom specialist\n---\nTest specialist\n');
 }
-writeFileSync(process.env.FORGE_CONFIG_PATH, JSON.stringify({autoStart:false, requirementMode:'thorough'})+'\n');
+writeFileSync(process.env.FORGE_CONFIG_PATH, JSON.stringify({autoStart:false})+'\n');
 process.on('exit',()=>rmSync(tmp,{recursive:true,force:true}));
 
 const fakeZ = new Proxy({}, {
@@ -92,13 +92,28 @@ async function writeCanonicalPlan(x, targetPath = null) {
   assert.match(result.additionalContext,/FORGE PLAN SAVED/);
   return path;
 }
+const SUMMARY = {
+  baseline:'Goal: deliver the requested feature; scope and acceptance are agreed.',
+  findings:[{severity:'MEDIUM',title:'Edge case for empty input unspecified',source:'forge-requirement'}],
+  blockers:[], assumptions:['Single tenant'], relevantFiles:[],
+};
+async function submitSummary(x, params = SUMMARY) {
+  return await x.tools.get('forge_requirement_summary').execute('summary-call',params,undefined,undefined,x.ctx);
+}
+
+/** REQUIREMENT → one forge-requirement report → summary → PLANNING. */
+async function completeRequirement(x, params = SUMMARY) {
+  const report = await runCompletedAgent(x,'forge-requirement');
+  assert.match(report.additionalContext,/\[FORGE REQUIREMENT — report received\]/);
+  const result = await submitSummary(x, params);
+  assert.notEqual(result.isError,true,result.content?.[0]?.text);
+  return result;
+}
 
 async function reachPlanning(x, requirement = 'Plan a feature') {
   await x.events.get('session_start')({},x.ctx);
   await x.commands.get('forge').handler(requirement,x.ctx);
-  for (let i=0;i<3;i++) {
-    for (const agent of requiredAgentsFor(x.entries.at(-1).data)) await runCompletedAgent(x,agent);
-  }
+  await completeRequirement(x);
   await runCompletedAgent(x,'forge-planner');
   return x.entries.at(-1).data;
 }
@@ -113,16 +128,11 @@ async function advanceToReview(x) {
   await x.events.get('session_start')({},x.ctx);
   await x.commands.get('forge').handler('Create a CRM',x.ctx);
   assert.equal(x.getPlan(),'active');
-  assert.match(x.sent[0].content,/GATE 1\/6: REQUIREMENT — discovery step 1\/3/);
-  const expected = ['REQUIREMENT:COOKING','REQUIREMENT:CHALLENGE','PLANNING'];
-  for (let i=0;i<3;i++) {
-    const state = x.entries.at(-1).data;
-    let transition;
-    for (const agent of requiredAgentsFor(state)) transition=await runCompletedAgent(x,agent);
-    const next = x.entries.at(-1).data;
-    assert.equal(next.phase === 'REQUIREMENT' ? `REQUIREMENT:${next.requirementStep}` : next.phase, expected[i]);
-    assert.match(transition.additionalContext, i === 2 ? /GATE 2\/6: PLANNING/ : /GATE 1\/6: REQUIREMENT/);
-  }
+  assert.match(x.sent[0].content,/GATE 1\/6: REQUIREMENT — single-pass analysis/);
+  const result = await completeRequirement(x);
+  assert.equal(x.entries.at(-1).data.phase,'PLANNING');
+  assert.match(result.content[0].text,/^Forge: requirement summary recorded \(0 CRITICAL\/HIGH, 0 open blocker\(s\)\) → Planning\./);
+  assert.match(result.content[0].text,/GATE 2\/6: PLANNING/);
   await runCompletedAgent(x,'forge-planner');
   await writeCanonicalPlan(x);
   await x.events.get('plan_review_requested')({planContent:PLAN,planPath:`local://${x.entries.at(-1).data.slug}-plan.md`},x.ctx);
@@ -430,9 +440,17 @@ test('QA failure loops through rework plan then fresh approval before execution'
   assert.match(rework.additionalContext,/qa-report.md/);
   assert.equal(x.getPlan(),'active');
   assert.equal(x.entries.at(-1).data.phase,'REWORK_PLANNING');
+  const reworkState = x.entries.at(-1).data;
+  const originalPlanPath = reworkState.reworkBasePlanPath;
+  const reworkPath = `local://${reworkState.slug}-rework-${reworkState.reworkCycles}-plan.md`;
+  assert.notEqual(reworkPath, originalPlanPath);
+  assert.equal((await x.events.get('tool_call')({
+    toolName:'write', input:{path:originalPlanPath,content:PLAN},
+  },x.ctx)).block,true,'the approved base plan must remain read-only');
+
   await runCompletedAgent(x,'forge-planner');
-  await writeCanonicalPlan(x,'local://forge-rework-v2-plan.md');
-  await x.events.get('plan_review_requested')({planContent:PLAN,planPath:'local://forge-rework-v2-plan.md'},x.ctx);
+  await writeCanonicalPlan(x,reworkPath);
+  await x.events.get('plan_review_requested')({planContent:PLAN,planPath:reworkPath},x.ctx);
   assert.equal(x.entries.at(-1).data.phase,'AWAITING_APPROVAL');
   assert.equal(x.entries.at(-1).data.approved,false);
   // Refine is not approval; it loops to planning.
@@ -440,8 +458,8 @@ test('QA failure loops through rework plan then fresh approval before execution'
   assert.equal(x.entries.at(-1).data.phase,'PLANNING');
   assert.equal(x.entries.at(-1).data.approved,false);
   await runCompletedAgent(x,'forge-planner');
-  await writeCanonicalPlan(x,'local://forge-rework-v2-plan.md');
-  await x.events.get('plan_review_requested')({planContent:PLAN+'\n## Rework fix\n- Remove duplicate booking\n',planPath:'local://forge-rework-v2-plan.md'},x.ctx);
+  await writeCanonicalPlan(x,reworkPath);
+  await x.events.get('plan_review_requested')({planContent:PLAN+'\n## Rework fix\n- Remove duplicate booking\n',planPath:reworkPath},x.ctx);
   await x.events.get('plan_review_resolved')({choice:'keep'},x.ctx);
   assert.equal(x.entries.at(-1).data.phase,'EXECUTING');
   assert.equal(x.entries.at(-1).data.approved,true);
@@ -463,11 +481,21 @@ test('required gate agents are enforced and wrong agent is blocked', async () =>
   assert.match(blocked.reason,/forge-requirement/);
   let next=await x.events.get('session_stop')({},x.ctx);
   assert.equal(next.continue,true);
-  assert.match(next.additionalContext,/forge-requirement/);
+  assert.match(next.additionalContext,/Mandatory named subagents were not observed: forge-requirement/);
   next=await x.events.get('session_stop')({},x.ctx);
   assert.equal(next,undefined);
   assert.equal(x.entries.at(-1).data.phase,'AGENTS_BLOCKED');
   assert.equal(x.entries.at(-1).data.active,false);
+  await x.commands.get('forge').handler('resume current',x.ctx);
+  const resumed=x.entries.at(-1).data;
+  assert.equal(resumed.phase,'REQUIREMENT');
+  assert.equal(resumed.active,true);
+  assert.deepEqual(resumed.gateAgents,{});
+  assert.deepEqual(resumed.agentRetries,{});
+  assert.equal(resumed.requirementSummaryRequested,false);
+  assert.match(x.sent.at(-1).content,/GATE 1\/6: REQUIREMENT — single-pass analysis/);
+  await completeRequirement(x);
+  assert.equal(x.entries.at(-1).data.phase,'PLANNING');
 });
 
 test('post-execution QA PASS is blocked if independent specialists did not spawn', async () => {
@@ -504,7 +532,7 @@ test('v5 a spawned agent without a task result cannot satisfy a gate', async () 
   assert.equal(result.continue,true);
   assert.match(result.additionalContext,/not observed/);
   assert.equal(x.entries.at(-1).data.phase,'REQUIREMENT');
-  assert.equal(x.entries.at(-1).data.requirementStep,'DISCOVERY');
+  assert.deepEqual(x.entries.at(-1).data.gateAgents.REQUIREMENT ?? [],[]);
 });
 
 test('v5 failed task tool result cannot satisfy the gate', async () => {
@@ -516,7 +544,10 @@ test('v5 failed task tool result cannot satisfy the gate', async () => {
   const result=await x.events.get('session_stop')({},x.ctx);
   assert.equal(result.continue,true);
   assert.equal(x.entries.at(-1).data.phase,'REQUIREMENT');
-  assert.equal(x.entries.at(-1).data.requirementStep,'DISCOVERY');
+  assert.deepEqual(x.entries.at(-1).data.gateAgents.REQUIREMENT ?? [],[]);
+  const summary=await submitSummary(x);
+  assert.equal(summary.isError,true);
+  assert.match(summary.content[0].text,/requirement report missing: run forge-requirement once/);
 });
 
 test('v5 invalid native plan review cannot authorize execution', async () => {
@@ -538,7 +569,7 @@ test('v5 disallows Git writes in a Forge subagent session', async () => {
 });
 
 
-test('v5.1 regression: OMP Plan Mode inactive cannot deadlock read-only Discovery and required task', async () => {
+test('v5.1 regression: OMP Plan Mode inactive cannot deadlock read-only requirement analysis and required task', async () => {
   const x=setup(); await x.events.get('session_start')({},x.ctx);
   await x.commands.get('forge').handler('Change debit card enum references',x.ctx);
   x.setPlan('inactive'); // OMP mode transition between turns/subagent entry
@@ -549,38 +580,32 @@ test('v5.1 regression: OMP Plan Mode inactive cannot deadlock read-only Discover
   assert.equal((await x.events.get('tool_call')({toolName:'edit',input:{path:'src/operations.ts'}},x.ctx)).block,true);
   assert.equal((await x.events.get('tool_call')({toolName:'write',input:{path:'xd://propose'}},x.ctx)).block,true);
   await runCompletedAgent(x,'forge-requirement');
-  const next=await x.events.get('session_stop')({},x.ctx);
-  assert.equal(next.continue,true);
-  assert.equal(x.entries.at(-1).data.phase,'REQUIREMENT');
-  assert.equal(x.entries.at(-1).data.requirementStep,'COOKING');
+  assert.equal(await x.events.get('tool_call')({toolName:'forge_requirement_summary',input:SUMMARY},x.ctx),undefined);
+  const result=await submitSummary(x);
+  assert.notEqual(result.isError,true);
+  assert.equal(x.entries.at(-1).data.phase,'PLANNING');
 });
 
-test('v5.1 regression: temporarily paused Plan Mode is not a blocker for cooking and challenge', async () => {
+test('v5.1 regression: temporarily paused Plan Mode is not a blocker for the requirement report and summary', async () => {
   const x=setup(); await x.events.get('session_start')({},x.ctx);
   await x.commands.get('forge').handler('Build booking workflow',x.ctx);
   x.setPlan('paused');
   await runCompletedAgent(x,'forge-requirement');
-  await x.events.get('session_stop')({},x.ctx);
-  assert.equal(x.entries.at(-1).data.phase,'REQUIREMENT');
-  assert.equal(x.entries.at(-1).data.requirementStep,'COOKING');
-  for (const agent of requiredAgentsFor(x.entries.at(-1).data)) await runCompletedAgent(x,agent);
   const next=await x.events.get('session_stop')({},x.ctx);
   assert.equal(next.continue,true);
+  assert.match(next.additionalContext,/\[FORGE REQUIREMENT — report received\]/);
   assert.equal(x.entries.at(-1).data.phase,'REQUIREMENT');
-  assert.equal(x.entries.at(-1).data.requirementStep,'CHALLENGE');
+  await submitSummary(x);
+  assert.equal(x.entries.at(-1).data.phase,'PLANNING');
 });
 
-test('v5.4: Plan Mode resumed after requirement tasks, and proposal requires successful plan write', async () => {
+test('v5.4: Plan Mode resumed after requirement summary, and proposal requires successful plan write', async () => {
   const x=setup(); await x.events.get('session_start')({},x.ctx);
   await x.commands.get('forge').handler('Build booking workflow',x.ctx);
-  for (const step of ['DISCOVERY','COOKING','CHALLENGE']) {
-    x.setPlan('paused');
-    assert.equal(x.entries.at(-1).data.requirementStep,step);
-    for (const agent of requiredAgentsFor(x.entries.at(-1).data)) await runCompletedAgent(x,agent);
-  }
+  x.setPlan('paused');
+  await completeRequirement(x);
   assert.equal(x.entries.at(-1).data.phase,'PLANNING');
   assert.equal(x.getPlan(),'active');
-  const path=`local://${x.entries.at(-1).data.slug}-plan.md`;
   assert.equal((await x.events.get('tool_call')({toolName:'write',input:{path:'xd://propose'}},x.ctx)).block,true);
   await runCompletedAgent(x,'forge-planner');
   assert.equal(x.entries.at(-1).data.phase,'PLANNING');
@@ -631,7 +656,6 @@ test('v5.2: /forge opens multiline editor and preserves line breaks before start
   assert.equal(editorCalls, 1);
   assert.equal(x.entries.at(-1).data.requirement, draft);
   assert.equal(x.entries.at(-1).data.phase, 'REQUIREMENT');
-  assert.equal(x.entries.at(-1).data.requirementStep, 'DISCOVERY');
   assert.equal(x.sent.length, 1);
 });
 
@@ -665,34 +689,43 @@ test('v5.2: unsupported editor API warns rather than silently using single line'
   assert.match(x.notifications.at(-1).message, /multiline requirement editor/i);
 });
 
-// v5.3 regression: the UI shows one REQUIREMENT gate, never three separate gates.
-test('v5.3: one REQUIREMENT gate runs internal discovery cooking challenge with specialist results', async () => {
+// v5.3 regression: the UI shows one REQUIREMENT gate, never internal steps.
+test('v6.1: one REQUIREMENT gate runs a single forge-requirement pass, then the summary opens PLANNING', async () => {
   const x = setup();
   const widgets = [];
   x.ctx.ui.setWidget = (id, lines) => widgets.push({ id, lines });
   await x.events.get('session_start')({}, x.ctx);
   await x.commands.get('forge').handler('Create a cross-platform booking flow', x.ctx);
-  assert.equal(x.entries.at(-1).data.phase, 'REQUIREMENT');
-  assert.equal(x.entries.at(-1).data.requirementStep, 'DISCOVERY');
-  for (const [i, internalStep] of ['DISCOVERY', 'COOKING', 'CHALLENGE'].entries()) {
-    const state = x.entries.at(-1).data;
-    assert.equal(state.phase, 'REQUIREMENT');
-    assert.equal(state.requirementStep, internalStep);
-    const lastWidget = widgets.at(-1).lines;
-    assert.equal(lastWidget.length, 1);
-    assert.match(lastWidget[0], /Requirement/);
-    assert.doesNotMatch(lastWidget[0], /DISCOVERY|COOKING|CHALLENGE|AWAITING APPROVAL|○/);
-    let transition;
-    for (const name of requiredAgentsFor(state)) transition = await runCompletedAgent(x, name);
-    assert.match(transition.additionalContext, /GATE/);
-    if (i < 2) assert.equal(x.entries.at(-1).data.phase, 'REQUIREMENT');
-  }
-  assert.equal(x.entries.at(-1).data.phase, 'PLANNING');
+  const state = x.entries.at(-1).data;
+  assert.equal(state.phase, 'REQUIREMENT');
+  assert.deepEqual(requiredAgentsFor(state), ['forge-requirement']);
+  const lastWidget = widgets.at(-1).lines;
+  assert.equal(lastWidget.length, 1);
+  assert.match(lastWidget[0], /Requirement/);
+  assert.doesNotMatch(lastWidget[0], /DISCOVERY|COOKING|CHALLENGE|AWAITING APPROVAL|○/);
+  const first = await runCompletedAgent(x, 'forge-requirement');
+  assert.match(first.additionalContext, /^\[FORGE REQUIREMENT — report received\]/);
+  assert.equal(x.entries.at(-1).data.phase, 'REQUIREMENT', 'a report alone never opens PLANNING');
+  assert.equal(x.entries.at(-1).data.requirementSummaryRequested, true);
+  const second = await runCompletedAgent(x, 'forge-requirement');
+  assert.doesNotMatch(second?.additionalContext ?? '', /report received/, 'summary prompt is sent only once');
+  const result = await submitSummary(x, {...SUMMARY, blockers:['Max booking horizon?']});
+  assert.match(result.content[0].text, /^Forge: requirement summary recorded \(0 CRITICAL\/HIGH, 1 open blocker\(s\)\) → Planning\./);
+  assert.match(result.content[0].text, /Use this requirement synthesis as the starting point[\s\S]*Edge case for empty input unspecified[\s\S]*Max booking horizon\?/);
+  const planning = x.entries.at(-1).data;
+  assert.equal(planning.phase, 'PLANNING');
+  assert.equal(planning.planWritten, false);
+  assert.equal(planning.requirementSummary.baseline, SUMMARY.baseline);
+  assert.deepEqual(planning.requirementSummary.blockers, ['Max booking horizon?']);
+  assert.deepEqual(planning.requirementSummary.specialistSeverities, {critical:0, high:0});
   assert.equal(x.getPlan(), 'active');
-  assert.equal(x.entries.at(-1).data.agentCompletions.length, 7);
+  assert.ok(planning.agentCompletions.every(c => c.gate === 'REQUIREMENT'));
+  const again = await submitSummary(x);
+  assert.equal(again.isError, true);
+  assert.match(again.content[0].text, /no Forge REQUIREMENT gate is active/);
 });
 
-test('v5.3: legacy in-flight v5.2 cooking state restores as REQUIREMENT internal step', async () => {
+test('v6.1: legacy v5 COOKING state resumes as the single REQUIREMENT gate', async () => {
   const x = setup();
   const old = {
     ...initialOld(), phase: 'COOKING', gateAgents: { DISCOVERY: ['forge-requirement'], COOKING: ['forge-requirement'] },
@@ -700,13 +733,30 @@ test('v5.3: legacy in-flight v5.2 cooking state restores as REQUIREMENT internal
   };
   x.entries.push({ type: 'custom', customType: 'dev.omp-forge.workflow.v1', data: old });
   await x.events.get('session_start')({}, x.ctx);
-  const restored = x.ctx.sessionManager.getBranch().at(-1).data; // old entry is preserved; extension normalizes in memory
-  assert.equal(restored.phase, 'COOKING');
   await x.commands.get('forge').handler('status', x.ctx);
   assert.match(x.notifications.at(-1).message, /REQUIREMENT/);
-  const result = await x.events.get('before_subagent_spawn')({agent:'forge-critic'}, x.ctx);
-  assert.notEqual(result?.block, true);
   assert.equal((await x.events.get('before_subagent_spawn')({agent:'forge-planner'}, x.ctx)).block, true);
+  assert.equal((await x.events.get('before_subagent_spawn')({agent:'forge-critic'}, x.ctx)).block, true);
+  await completeRequirement(x);
+  assert.equal(x.entries.at(-1).data.phase, 'PLANNING');
+});
+
+test('v6.1: legacy v6.0 state with requirementStep/mode still completes with one report and a new summary', async () => {
+  const x = setup();
+  const old = {
+    ...initialState('Legacy v6.0 requirement', 'legacy-v60'),
+    requirementStep: 'CHALLENGE', requirementMode: 'fast',
+    gateAgents: { 'REQUIREMENT:DISCOVERY': ['forge-requirement'], 'REQUIREMENT:COOKING': ['forge-requirement','forge-critic'] },
+    agentRetries: { 'REQUIREMENT:COOKING': 1 },
+    requirementSummary: { baseline: 'Old v6.0 baseline that must be replaced', findings: [], blockers: [], assumptions: [], relevantFiles: [], escalate: true },
+  };
+  x.entries.push({ type: 'custom', customType: 'dev.omp-forge.workflow.v1', data: old });
+  await x.events.get('session_start')({}, x.ctx);
+  assert.equal((await submitSummary(x)).isError, true, 'old step keys do not count as the report');
+  await completeRequirement(x);
+  const state = x.entries.at(-1).data;
+  assert.equal(state.phase, 'PLANNING');
+  assert.equal(state.requirementSummary.baseline, SUMMARY.baseline);
 });
 
 function initialOld() {
@@ -717,21 +767,12 @@ function initialOld() {
 }
 
 // v5.4: a QA/plan deadlock was caused by advancing only in session_stop.
-test('v5.4: requirement stages advance immediately via task tool_result without session_stop or user prompts', async () => {
+test('v5.4: requirement report asks for the summary via task tool_result without session_stop or user prompts', async () => {
   const x=setup(); await x.events.get('session_start')({},x.ctx);
   await x.commands.get('forge').handler('Analyze a feature change',x.ctx);
-  const stages=[];
-  for (const expected of ['COOKING','CHALLENGE']) {
-    const state=x.entries.at(-1).data;
-    let signal;
-    for (const agent of requiredAgentsFor(state)) signal=await runCompletedAgent(x,agent);
-    stages.push(x.entries.at(-1).data.requirementStep);
-    assert.match(signal.additionalContext,new RegExp(expected.toLowerCase(),'i'));
-  }
-  for (const agent of requiredAgentsFor(x.entries.at(-1).data)) await runCompletedAgent(x,agent);
-  assert.deepEqual(stages,['COOKING','CHALLENGE']);
+  await completeRequirement(x);
   assert.equal(x.entries.at(-1).data.phase,'PLANNING');
-  assert.equal(x.sent.length,1,'no synthetic user messages needed per step');
+  assert.equal(x.sent.length,1,'no synthetic user messages needed');
 });
 
 test('v5.4: plan write denied before requirements complete and approval cannot open without saved plan', async () => {
@@ -747,7 +788,7 @@ test('v5.4: plan write denied before requirements complete and approval cannot o
 test('v5.4: a failed local plan write cannot advance PLANNING to PROPOSAL', async () => {
   const x=setup();await x.events.get('session_start')({},x.ctx);
   await x.commands.get('forge').handler('Feature to analyze',x.ctx);
-  for (let i=0;i<3;i++) for (const agent of requiredAgentsFor(x.entries.at(-1).data)) await runCompletedAgent(x,agent);
+  await completeRequirement(x);
   await runCompletedAgent(x,'forge-planner');
   const id='write-failed';const path=`local://${x.entries.at(-1).data.slug}-plan.md`;
   await x.events.get('tool_call')({toolName:'write',toolCallId:id,input:{path}},x.ctx);
@@ -760,16 +801,16 @@ test('v5.4: a failed local plan write cannot advance PLANNING to PROPOSAL', asyn
 test('v5.4: busy Plan Mode after specialist task defers planning until session settles', async () => {
   const x=setup();await x.events.get('session_start')({},x.ctx);
   await x.commands.get('forge').handler('Design feature requirement',x.ctx);
-  for (let i=0;i<2;i++) for (const agent of requiredAgentsFor(x.entries.at(-1).data)) await runCompletedAgent(x,agent);
-  // In actual OMP mode transitions may return 'busy' during tool_result.
+  await runCompletedAgent(x,'forge-requirement');
+  // In actual OMP mode transitions may return 'busy' during tool execution.
   x.setPlan('inactive');
   const origSet=x.ctx.sessionModes.set;
   let first=true;
   x.ctx.sessionModes.set=async (...args) => first ? (first=false,{ok:false,code:'busy',message:'turn running'}) : origSet(...args);
-  let last;
-  for (const agent of requiredAgentsFor(x.entries.at(-1).data)) last=await runCompletedAgent(x,agent);
+  const last=await submitSummary(x);
   assert.equal(x.entries.at(-1).data.phase,'PLAN_MODE_PENDING');
-  assert.match(last.additionalContext,/Do NOT write local:\/\//);
+  assert.match(last.content[0].text,/\[FORGE REQUIREMENT COMPLETE\]/);
+  assert.match(last.content[0].text,/Do NOT write local:\/\//);
   assert.equal((await x.events.get('tool_call')({toolName:'write',input:{path:`local://${x.entries.at(-1).data.slug}-plan.md`}},x.ctx)).block,true);
   const timers=[];
   x.ctx.setTimeout=(cb,_ms)=>{timers.push(cb);};
@@ -788,7 +829,7 @@ test('v5.4: restoring paused Plan Mode uses enter (not unsupported resume)', asy
   x.setPlan('paused');
   const calls=[];
   x.ctx.sessionModes.set=async arg=>{calls.push(arg);x.setPlan('active');return {ok:true};};
-  for (let i=0;i<3;i++) for (const agent of requiredAgentsFor(x.entries.at(-1).data)) await runCompletedAgent(x,agent);
+  await completeRequirement(x);
   assert.equal(x.entries.at(-1).data.phase,'PLANNING');
   assert.deepEqual(calls,[{mode:'plan',action:'enter'}]);
 });
@@ -814,10 +855,7 @@ for (const mode of ['active','paused','inactive']) {
     const x=setup();
     await x.events.get('session_start')({},x.ctx);
     await x.commands.get('forge').handler('Plan a feature',x.ctx);
-    for (const step of ['DISCOVERY','COOKING','CHALLENGE']) {
-      assert.equal(x.entries.at(-1).data.requirementStep,step);
-      for (const agent of requiredAgentsFor(x.entries.at(-1).data)) await runCompletedAgent(x,agent);
-    }
+    await completeRequirement(x);
     await runCompletedAgent(x,'forge-planner');
     assert.equal(x.entries.at(-1).data.phase,'PLANNING');
     x.setPlan(mode);
@@ -838,7 +876,7 @@ test('v5.6: PLANNING permits an alternate OMP-local plan filename then pins it',
   const x=setup();
   await x.events.get('session_start')({},x.ctx);
   await x.commands.get('forge').handler('Plan a feature',x.ctx);
-  for (let i=0;i<3;i++) for (const agent of requiredAgentsFor(x.entries.at(-1).data)) await runCompletedAgent(x,agent);
+  await completeRequirement(x);
   await runCompletedAgent(x,'forge-planner');
   const path='local://nosess-occupation-ops-plan.md';
   assert.equal(await x.events.get('tool_call')({toolName:'write',toolCallId:'alt-plan',input:{path,content:PLAN}},x.ctx),undefined);
@@ -853,7 +891,7 @@ test('v5.6: planning sandbox exception remains narrow and source writes still bl
   const x=setup();
   await x.events.get('session_start')({},x.ctx);
   await x.commands.get('forge').handler('Plan a feature',x.ctx);
-  for (let i=0;i<3;i++) for (const agent of requiredAgentsFor(x.entries.at(-1).data)) await runCompletedAgent(x,agent);
+  await completeRequirement(x);
   await runCompletedAgent(x,'forge-planner');
   x.setPlan('paused');
   const blockedPaths=['src/main.go','.github/workflows/test.yml','local://notes.md','local://folder/other-plan.md','local://../bad-plan.md','local://plan.md','xd://resolve','xd://reject','/tmp/forge-plan.md'];
@@ -871,7 +909,7 @@ test('v5.6: failed local plan write never advances to PROPOSAL', async () => {
   const x=setup();
   await x.events.get('session_start')({},x.ctx);
   await x.commands.get('forge').handler('Plan a feature',x.ctx);
-  for (let i=0;i<3;i++) for (const agent of requiredAgentsFor(x.entries.at(-1).data)) await runCompletedAgent(x,agent);
+  await completeRequirement(x);
   await runCompletedAgent(x,'forge-planner');
   const path=`local://${x.entries.at(-1).data.slug}-plan.md`;
   assert.equal(await x.events.get('tool_call')({toolName:'write',toolCallId:'bad-plan',input:{path,content:PLAN}},x.ctx),undefined);
@@ -1068,9 +1106,7 @@ test('v5.13: successful plan exists but lost write receipt cannot deadlock nativ
   const x=setup();
   await x.events.get('session_start')({},x.ctx);
   await x.commands.get('forge').handler('Implement feature with acceptance cases',x.ctx);
-  for (const step of ['DISCOVERY','COOKING','CHALLENGE']) {
-    for (const agent of requiredAgentsFor(x.entries.at(-1).data)) await runCompletedAgent(x,agent);
-  }
+  await completeRequirement(x);
   await runCompletedAgent(x,'forge-planner');
   assert.equal(x.entries.at(-1).data.phase,'PLANNING');
   const slug=x.entries.at(-1).data.slug;
@@ -1094,9 +1130,7 @@ test('v5.13: native plan proposal bypasses only Forge stale state, not human app
   const x=setup();
   await x.events.get('session_start')({},x.ctx);
   await x.commands.get('forge').handler('Plan a feature',x.ctx);
-  for (const step of ['DISCOVERY','COOKING','CHALLENGE']) {
-    for (const agent of requiredAgentsFor(x.entries.at(-1).data)) await runCompletedAgent(x,agent);
-  }
+  await completeRequirement(x);
   await runCompletedAgent(x,'forge-planner');
   const slug=x.entries.at(-1).data.slug;
   const path=`local://${slug}-plan.md`;
@@ -1119,7 +1153,7 @@ test('v5.14: paused native Plan Mode after writing plan resumes only after idle 
   const x=setup();
   await x.events.get('session_start')({},x.ctx);
   await x.commands.get('forge').handler('Plan a feature',x.ctx);
-  for (let i=0;i<3;i++) for (const agent of requiredAgentsFor(x.entries.at(-1).data)) await runCompletedAgent(x,agent);
+  await completeRequirement(x);
   await runCompletedAgent(x,'forge-planner');
   let idle=false;
   const timers=[];
@@ -1160,7 +1194,7 @@ test('v5.14: proposal with stale write telemetry does not loop when mode paused'
   const x=setup();
   await x.events.get('session_start')({},x.ctx);
   await x.commands.get('forge').handler('Plan a feature',x.ctx);
-  for(let i=0;i<3;i++) for(const agent of requiredAgentsFor(x.entries.at(-1).data)) await runCompletedAgent(x,agent);
+  await completeRequirement(x);
   await runCompletedAgent(x,'forge-planner');
   assert.equal(x.entries.at(-1).data.phase,'PLANNING');
   x.setPlan('inactive');
@@ -1185,7 +1219,7 @@ test('v5.14: permanent Plan Mode refusal never unlocks implementation or silentl
   const x=setup();
   await x.events.get('session_start')({},x.ctx);
   await x.commands.get('forge').handler('Plan a feature',x.ctx);
-  for (let i=0;i<3;i++) for (const agent of requiredAgentsFor(x.entries.at(-1).data)) await runCompletedAgent(x,agent);
+  await completeRequirement(x);
   await runCompletedAgent(x,'forge-planner');
   x.setPlan('paused');
   const timers=[];
@@ -1470,7 +1504,7 @@ test('v5.14: resume old PLAN_MODE_BLOCKED session with saved plan directly into 
   const x=setup();
   await x.events.get('session_start')({},x.ctx);
   await x.commands.get('forge').handler('Plan a feature',x.ctx);
-  for (let i=0;i<3;i++) for(const agent of requiredAgentsFor(x.entries.at(-1).data)) await runCompletedAgent(x,agent);
+  await completeRequirement(x);
   await runCompletedAgent(x,'forge-planner');
   await writeCanonicalPlan(x);
   const blocked={...x.entries.at(-1).data,phase:'PLAN_MODE_BLOCKED',active:false,blockedFrom:'PROPOSAL'};
@@ -2083,51 +2117,12 @@ test('v5.24: plan_review_requested records OMP planFilePath without changing the
   assert.equal(w.planPath,`local://${slug}-plan.md`);
 });
 
-// ---------------------------------------------------------------- v5.25 fast requirement
+// ---------------------------------------------------------------- v6.1 single-pass requirement
 const LOW_SUMMARY = {
   baseline: 'Goal: CRM contacts. Scope: create/list contacts. Non-goals: billing. Acceptance: contact saved and listed.',
-  findings: [{severity:'MEDIUM', title:'Duplicate email handling unspecified', source:'forge-critic'}, {severity:'LOW', title:'Sort order default'}],
+  findings: [{severity:'MEDIUM', title:'Duplicate email handling unspecified', source:'forge-requirement'}, {severity:'LOW', title:'Sort order default'}],
   assumptions: ['Emails are unique per tenant'], relevantFiles: ['src/contacts.ts'],
 };
-const summaryTool = (x, params) => x.tools.get('forge_requirement_summary').execute('sum-'+(++agentCallSeq), params, undefined, undefined, x.ctx);
-async function runStepAgents(x) {
-  let transition, n = 0;
-  for (const agent of requiredAgentsFor(x.entries.at(-1).data)) { transition = await runCompletedAgent(x, agent); n++; }
-  return { transition, n };
-}
-
-test('v5.26: fast mode — orchestrator intake, 4 in parallel, summary, challenge ALWAYS runs (6 subagents)', async () => {
-  const x=setup(); await x.events.get('session_start')({},x.ctx);
-  await x.commands.get('forge').handler('--fast Create a CRM',x.ctx);
-  let w=x.entries.at(-1).data;
-  assert.equal(w.requirementMode,'fast'); assert.equal(w.requirementStep,'COOKING');
-  assert.match(x.sent.at(-1).content,/ONE task call \(parallel batch\)/);
-  assert.match(x.sent.at(-1).content,/starting point, not a fence/);
-  assert.doesNotMatch(x.sent.at(-1).content,/<= 12 bullets|read only those files/);
-  const c=await runStepAgents(x);
-  assert.equal(c.n,4);
-  assert.match(c.transition.additionalContext,/forge_requirement_summary/);
-  const res=await summaryTool(x,LOW_SUMMARY);           // no HIGH findings at all
-  w=x.entries.at(-1).data;
-  assert.equal(w.requirementStep,'CHALLENGE');           // still challenged
-  assert.match(res.content[0].text,/challenge the WHOLE synthesis|WHOLE synthesis/);
-  assert.match(res.content[0].text,/Duplicate email handling unspecified/);
-  const ch=await runStepAgents(x);
-  assert.equal(ch.n,2);
-  assert.equal(x.entries.at(-1).data.phase,'PLANNING');
-  assert.match(ch.transition.additionalContext,/GATE 2\/6: PLANNING/);
-  assert.match(ch.transition.additionalContext,/Requirement baseline/);
-});
-
-test('v5.26: HIGH finding is listed as a priority item in the challenge', async () => {
-  const x=setup(); await x.events.get('session_start')({},x.ctx);
-  await x.commands.get('forge').handler('--fast Create a CRM',x.ctx);
-  await runStepAgents(x);
-  const res=await summaryTool(x,{...LOW_SUMMARY, findings:[{severity:'HIGH', title:'Tenant isolation conflicts with shared contact list'}]});
-  assert.equal(x.entries.at(-1).data.requirementStep,'CHALLENGE');
-  assert.match(res.content[0].text,/Priority items[\s\S]*Tenant isolation conflicts/);
-  assert.deepEqual(requiredAgentsFor(x.entries.at(-1).data),['forge-critic','forge-architect']);
-});
 
 async function runAgentWithText(x, agent, text) {
   const id=`task-${++agentCallSeq}`;
@@ -2136,122 +2131,84 @@ async function runAgentWithText(x, agent, text) {
   return x.events.get('tool_result')({toolName:'task',toolCallId:id,isError:false,content:[{type:'text',text}]},x.ctx);
 }
 
-test('v5.26: summary cannot silently drop specialists\' CRITICAL/HIGH findings', async () => {
-  for (const flag of ['quick','--fast']) {
-    const x=setup(); await x.events.get('session_start')({},x.ctx);
-    await x.commands.get('forge').handler(`${flag} Create a CRM`,x.ctx);
-    const agents=requiredAgentsFor(x.entries.at(-1).data);
-    await runAgentWithText(x,agents[0],'- [HIGH][fact] Contacts table has no tenant column (src/db.ts:12)');
-    for (const a of agents.slice(1)) await runAgentWithText(x,a,'- [LOW][assumption] naming');
-    const r=await summaryTool(x,LOW_SUMMARY);
-    assert.equal(r.isError,true,flag);
-    assert.match(r.content[0].text,/1 HIGH/);
-    assert.equal(x.entries.at(-1).data.requirementSummary ?? null,null);
-    const ok=await summaryTool(x,{...LOW_SUMMARY, findings:[...LOW_SUMMARY.findings,{severity:'HIGH',title:'No tenant column'}]});
-    assert.notEqual(ok.isError,true);
-    assert.equal(x.entries.at(-1).data.requirementStep,'CHALLENGE');
-  }
-});
-
-test('v5.26: default mode is thorough; thorough challenge runs critic + architect in one parallel batch', async () => {
-  const {DEFAULT_REQUIREMENT_MODE}=await import('../forge/core.mjs');
-  assert.equal(DEFAULT_REQUIREMENT_MODE,'thorough');
+test('v6.1: summary cannot silently drop the report\'s CRITICAL/HIGH findings', async () => {
   const x=setup(); await x.events.get('session_start')({},x.ctx);
-  await x.commands.get('forge').handler('A thorough run',x.ctx);
-  assert.equal(x.entries.at(-1).data.requirementStep,'DISCOVERY');
-  assert.match(x.sent.at(-1).content,/Relevant files/);
-  let t; for (let i=0;i<2;i++) { const r=await runStepAgents(x); t=r.transition; }
-  assert.equal(x.entries.at(-1).data.requirementStep,'CHALLENGE');
-  assert.match(t.additionalContext,/ONE parallel task batch/);
-  assert.doesNotMatch(t.additionalContext,/separately/);
-});
-
-test('v5.26: quick start warns that it is low rigor', async () => {
-  const x=setup(); await x.events.get('session_start')({},x.ctx);
-  await x.commands.get('forge').handler('quick Rename a label',x.ctx);
-  const n=x.notifications.find(m=>/LOW RIGOR/.test(m.message));
-  assert.ok(n); assert.equal(n.level,'warning');
-});
-
-test('v5.25: open blocker escalates even without HIGH findings', async () => {
-  const x=setup(); await x.events.get('session_start')({},x.ctx);
-  await x.commands.get('forge').handler('--fast Create a CRM',x.ctx);
-  await runStepAgents(x);
-  await summaryTool(x,{...LOW_SUMMARY, blockers:['Which auth provider?']});
-  assert.equal(x.entries.at(-1).data.requirementStep,'CHALLENGE');
-});
-
-test('v5.25: quick mode runs only analyst + QA strategist', async () => {
-  const x=setup(); await x.events.get('session_start')({},x.ctx);
-  await x.commands.get('forge').handler('quick Add CSV export',x.ctx);
+  await x.commands.get('forge').handler('Create a CRM',x.ctx);
+  await runAgentWithText(x,'forge-requirement','- [HIGH][fact] Contacts table has no tenant column (src/db.ts:12)\n- [LOW][assumption] naming');
+  const r=await submitSummary(x,LOW_SUMMARY);
+  assert.equal(r.isError,true);
+  assert.match(r.content[0].text,/the requirement report contains 0 CRITICAL and 1 HIGH label\(s\), but the summary lists no CRITICAL\/HIGH finding/);
+  assert.equal(x.entries.at(-1).data.phase,'REQUIREMENT');
+  assert.equal(x.entries.at(-1).data.requirementSummary ?? null,null);
+  const ok=await submitSummary(x,{...LOW_SUMMARY, findings:[...LOW_SUMMARY.findings,{severity:'HIGH',title:'No tenant column'}]});
+  assert.notEqual(ok.isError,true);
+  assert.match(ok.content[0].text,/^Forge: requirement summary recorded \(1 CRITICAL\/HIGH, 0 open blocker\(s\)\) → Planning\./);
+  assert.match(ok.content[0].text,/\[HIGH\] No tenant column/);
   const w=x.entries.at(-1).data;
-  assert.equal(w.requirementMode,'quick');
-  assert.equal(w.requirement,'Add CSV export');
-  assert.deepEqual(requiredAgentsFor(w),['forge-requirement','forge-qa-strategist']);
-  const {n}=await runStepAgents(x);
-  assert.equal(n,2);
-  await summaryTool(x,LOW_SUMMARY);
+  assert.equal(w.phase,'PLANNING');
+  assert.deepEqual(w.requirementSummary.specialistSeverities,{critical:0,high:1});
+});
+
+test('v6.1: summary is rejected before the report, with bad severity or a too-short baseline', async () => {
+  const x=setup(); await x.events.get('session_start')({},x.ctx);
+  await x.commands.get('forge').handler('Create a CRM',x.ctx);
+  let r=await submitSummary(x,LOW_SUMMARY);
+  assert.equal(r.isError,true);
+  assert.match(r.content[0].text,/requirement report missing: run forge-requirement once and await its report first\./);
+  await runCompletedAgent(x,'forge-requirement');
+  r=await submitSummary(x,{...LOW_SUMMARY, findings:[{severity:'URGENT', title:'x'}]});
+  assert.equal(r.isError,true);
+  assert.match(r.content[0].text,/Finding 1 needs severity CRITICAL\|HIGH\|MEDIUM\|LOW\./);
+  r=await submitSummary(x,{...LOW_SUMMARY, baseline:'too short'});
+  assert.equal(r.isError,true);
+  assert.match(r.content[0].text,/Requirement summary needs a baseline/);
+  assert.equal(x.entries.at(-1).data.phase,'REQUIREMENT');
+  r=await submitSummary(x,LOW_SUMMARY);
+  assert.notEqual(r.isError,true);
   assert.equal(x.entries.at(-1).data.phase,'PLANNING');
 });
 
-test('v5.25: summary is rejected before specialists finish, twice, in thorough mode, or with bad severity', async () => {
+test('v6.1: session_stop asks for the summary at most twice instead of stalling or blocking', async () => {
   const x=setup(); await x.events.get('session_start')({},x.ctx);
-  await x.commands.get('forge').handler('--fast Create a CRM',x.ctx);
-  let r=await summaryTool(x,LOW_SUMMARY);
-  assert.equal(r.isError,true); assert.match(r.content[0].text,/specialist reports missing/);
-  await runStepAgents(x);
-  r=await summaryTool(x,{...LOW_SUMMARY, findings:[{severity:'URGENT', title:'x'}]});
-  assert.equal(r.isError,true);
-  assert.equal(x.entries.at(-1).data.phase,'REQUIREMENT');
-  await summaryTool(x,LOW_SUMMARY);
-  r=await summaryTool(x,LOW_SUMMARY);
-  assert.equal(r.isError,true);
-
-  const y=setup(); await y.events.get('session_start')({},y.ctx);
-  await y.commands.get('forge').handler('A thorough run',y.ctx); // test config default = thorough
-  assert.equal(y.entries.at(-1).data.requirementStep,'DISCOVERY');
-  r=await summaryTool(y,LOW_SUMMARY);
-  assert.equal(r.isError,true); assert.match(r.content[0].text,/thorough/);
+  await x.commands.get('forge').handler('Create a CRM',x.ctx);
+  await runCompletedAgent(x,'forge-requirement');
+  for (let i=0;i<2;i++) {
+    const stop=await x.events.get('session_stop')({},x.ctx);
+    assert.equal(stop.continue,true);
+    assert.match(stop.additionalContext,/^\[FORGE REQUIREMENT — report received\][\s\S]*forge_requirement_summary/);
+  }
+  assert.equal(await x.events.get('session_stop')({},x.ctx),undefined);
+  const w=x.entries.at(-1).data;
+  assert.equal(w.phase,'REQUIREMENT');
+  assert.equal(w.active,true);
+  assert.equal(w.agentRetries['REQUIREMENT:summary'],2);
+  assert.notEqual((await submitSummary(x,LOW_SUMMARY)).isError,true);
+  assert.equal(x.entries.at(-1).data.phase,'PLANNING');
 });
 
-test('v5.25: session_stop nudges for the summary instead of stalling', async () => {
+test('v6.1: unknown tools remain blocked in REQUIREMENT', async () => {
   const x=setup(); await x.events.get('session_start')({},x.ctx);
-  await x.commands.get('forge').handler('--fast Create a CRM',x.ctx);
-  await runStepAgents(x);
-  const stop=await x.events.get('session_stop')({},x.ctx);
-  assert.equal(stop.continue,true);
-  assert.match(stop.additionalContext,/forge_requirement_summary/);
-  assert.equal(x.entries.at(-1).data.phase,'REQUIREMENT');
-});
-
-test('v5.25: unknown tools remain blocked in REQUIREMENT; summary tool only in REQUIREMENT', async () => {
-  const x=setup(); await x.events.get('session_start')({},x.ctx);
-  await x.commands.get('forge').handler('--fast Create a CRM',x.ctx);
+  await x.commands.get('forge').handler('Create a CRM',x.ctx);
   assert.equal((await x.events.get('tool_call')({toolName:'mystery_tool',input:{}},x.ctx)).block,true);
   assert.equal((await x.events.get('tool_call')({toolName:'write',input:{path:'src/a.ts'}},x.ctx)).block,true);
 });
 
-test('v5.25: /forge mode shows and persists the default; new runs use it', async () => {
+test('v6.1: removed mode words are plain requirement text', async () => {
   const x=setup(); await x.events.get('session_start')({},x.ctx);
-  try {
-    await x.commands.get('forge').handler('mode quick',x.ctx);
-    assert.equal(JSON.parse(readFileSync(process.env.FORGE_CONFIG_PATH,'utf8')).requirementMode,'quick');
-    await x.commands.get('forge').handler('Plain requirement text',x.ctx);
-    assert.equal(x.entries.at(-1).data.requirementMode,'quick');
-    await x.commands.get('forge').handler('mode',x.ctx);
-    assert.match(x.notifications.at(-1).message,/requirement mode: quick/);
-  } finally {
-    await x.commands.get('forge').handler('off',x.ctx);
-    await x.commands.get('forge').handler('mode thorough',x.ctx);
-  }
+  await x.commands.get('forge').handler('quick Fix x',x.ctx);
+  const w=x.entries.at(-1).data;
+  assert.equal(w.phase,'REQUIREMENT');
+  assert.equal(w.requirement,'quick Fix x');
+  assert.equal('requirementMode' in w,false);
+  assert.deepEqual(requiredAgentsFor(w),['forge-requirement']);
+  assert.ok(x.notifications.some(n=>n.message==='Forge: REQUIREMENT (one forge-requirement pass + your review) → Planning → Approval → Execute → QA → Delivery'));
+  assert.ok(!x.notifications.some(n=>/LOW RIGOR|requirement mode/i.test(n.message)));
 });
 
-test('v5.26: fast mode reaches native approval and execution like thorough', async () => {
+test('v6.1: requirement synthesis survives native approval into execution', async () => {
   const x=setup(); await x.events.get('session_start')({},x.ctx);
-  await x.commands.get('forge').handler('--fast Create a CRM',x.ctx);
-  await runStepAgents(x);
-  await summaryTool(x,LOW_SUMMARY);
-  await runStepAgents(x); // challenge always runs in fast mode
+  await x.commands.get('forge').handler('Create a CRM',x.ctx);
+  await completeRequirement(x,LOW_SUMMARY);
   await runCompletedAgent(x,'forge-planner');
   await writeCanonicalPlan(x);
   await x.events.get('plan_review_requested')({planContent:PLAN,planPath:`local://${x.entries.at(-1).data.slug}-plan.md`},x.ctx);

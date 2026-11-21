@@ -9,7 +9,7 @@ FORGE_FILES=(index.ts session-resume.mjs core.mjs forge-state.mjs state-recovery
 for path in "${FORGE_FILES[@]/#/$ROOT/forge/}" "$ROOT/forge/config.json"; do
   [[ -f "$path" ]] || { printf 'Missing required file: %s\n' "$path" >&2; exit 1; }
 done
-for agent in forge-requirement forge-critic forge-architect forge-qa-strategist forge-planner forge-executor forge-qa forge-code-reviewer forge-delivery; do
+for agent in forge-requirement forge-planner forge-executor forge-qa forge-code-reviewer forge-delivery; do
   [[ -f "$ROOT/agents/$agent.md" ]] || { printf 'Missing agent: %s\n' "$agent" >&2; exit 1; }
 done
 mkdir -p "$EXT" "$AGENTS" "$BACKUP_DIR"
@@ -48,15 +48,28 @@ for file in "$ROOT"/agents/forge-*.md; do
     fi
   fi
 done
+# forge-critic, forge-architect and forge-qa-strategist were merged into forge-requirement.
+# Park every copy (incl. ones parked by an older uninstall.sh) in the backup directory
+# so OMP /agents no longer lists agents that Forge never runs.
+retired=0
+for file in "$AGENTS"/forge-{critic,architect,qa-strategist}.md "$AGENTS"/forge-{critic,architect,qa-strategist}.md.disabled.*; do
+  [[ -f "$file" ]] || continue
+  mv "$file" "$BACKUP_DIR/$(basename "$file")"
+  retired=$((retired+1))
+done
 shopt -u nullglob
-printf 'Installed OMP Forge v6.0 (shared core) at %s\n' "$AGENT_ROOT"
+printf 'Installed OMP Forge v6.1 (shared core) at %s\n' "$AGENT_ROOT"
 printf 'Backup directory: %s\n' "$BACKUP_DIR"
 printf 'Configuration preserved: %s/config.json\n' "$EXT"
 printf 'Agent definitions: %s installed, %s preserved, %s restored from uninstall (model/prompt changes kept)\n' "$installed" "$preserved" "$restored"
+printf 'Retired agents (merged into forge-requirement) moved to backup: %s\n' "$retired"
+if ! cmp -s "$ROOT/agents/forge-requirement.md" "$AGENTS/forge-requirement.md"; then
+  printf 'NOTE: forge-requirement now runs the whole Requirement gate in one pass, but your installed copy differs from the bundled one. Compare it with %s, or replace it: FORGE_REINSTALL_AGENTS=1 bash install.sh (backups kept).\n' "$ROOT/agents/forge-requirement.md"
+fi
 printf 'Restart OMP. Then type: /forge (opens multiline requirement editor)\n'
 printf 'Manage agent models/prompts with OMP /agents; view fixed Forge map with /forge agents\n'
 printf 'Native Plan Review; no automatic git commits or pushes.\n'
-printf 'Requirement mode: thorough by default (all specialists, parallel batches). Opt-in: /forge --fast <req>, /forge quick <req> (low rigor)\n'
+printf 'Requirement gate: one forge-requirement pass (intake, gaps, critique, architecture, QA strategy, self-challenge), then your review via forge_requirement_summary\n'
 printf 'Gate Skills: /forge skill (interactive), /forge skill list, /forge skill add qa go-testing\n'
 printf 'Paste a new SKILL.md: /forge skill create (or /forge skill create qa)\n'
 printf 'Autocomplete: type /forge followed by Space, then choose from the native suggestion list (Tab when needed).\n'

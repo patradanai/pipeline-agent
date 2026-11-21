@@ -1,11 +1,8 @@
 {
-  "_comment": "Claude Code model per agent. Pick a profile at build time: FORGE_MODELS=balanced npm test (default: rigor). OMP keeps models in native /agents.",
+  "_comment": "Claude Code model per agent. Pick a profile at build time: FORGE_MODELS=balanced npm test (default: rigor). OMP keeps models in native /agents. forge-requirement carries the whole Requirement gate (incl. the adversarial pass), so it stays on opus in balanced.",
   "profiles": {
     "rigor": {
       "forge-requirement": "opus",
-      "forge-critic": "opus",
-      "forge-architect": "opus",
-      "forge-qa-strategist": "opus",
       "forge-planner": "opus",
       "forge-executor": "sonnet",
       "forge-qa": "opus",
@@ -13,10 +10,7 @@
       "forge-delivery": "sonnet"
     },
     "balanced": {
-      "forge-requirement": "sonnet",
-      "forge-critic": "opus",
-      "forge-architect": "sonnet",
-      "forge-qa-strategist": "sonnet",
+      "forge-requirement": "opus",
       "forge-planner": "opus",
       "forge-executor": "sonnet",
       "forge-qa": "opus",
@@ -25,9 +19,6 @@
     },
     "economy": {
       "forge-requirement": "sonnet",
-      "forge-critic": "sonnet",
-      "forge-architect": "sonnet",
-      "forge-qa-strategist": "sonnet",
       "forge-planner": "sonnet",
       "forge-executor": "sonnet",
       "forge-qa": "sonnet",
