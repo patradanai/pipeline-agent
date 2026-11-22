@@ -26,6 +26,7 @@ checks that made the old gate rigorous.
 - OMP permits `propose <slug>` only in PROPOSAL for the saved plan slug. OMP
   still validates the plan and opens native human approval; the command cannot
   mark the workflow approved.
+- OMP rework stays in Forge PLAN while drafting. After a successful rework-plan save, Forge restores native Plan Mode and opens approval UI automatically, avoiding blocked-write and manual-proposal loops.
 
 ## Removed
 

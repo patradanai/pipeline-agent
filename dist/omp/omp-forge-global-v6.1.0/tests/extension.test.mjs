@@ -87,11 +87,11 @@ async function runCompletedAgent(x, agent) {
   return await x.events.get('tool_result')({toolName:'task',toolCallId:id,isError:false,content:[{type:'text',text:'Completed task and returned evidence'}]},x.ctx);
 }
 
-async function writeCanonicalPlan(x, targetPath = null) {
+async function writeCanonicalPlan(x, targetPath = null, content = PLAN) {
   const state = x.entries.at(-1).data;
   const path = targetPath ?? `local://${state.slug}-plan.md`;
   const id = `write-${++agentCallSeq}`;
-  assert.equal(await x.events.get('tool_call')({toolName:'write',toolCallId:id,input:{path,content:PLAN}},x.ctx),undefined);
+  assert.equal(await x.events.get('tool_call')({toolName:'write',toolCallId:id,input:{path,content}},x.ctx),undefined);
   const result = await x.events.get('tool_result')({toolName:'write',toolCallId:id,isError:false,content:[{type:'text',text:`Wrote ${path}`}]},x.ctx);
   assert.equal(x.entries.at(-1).data.phase,'PLAN');
   assert.match(result.additionalContext,/FORGE PLAN SAVED/);
@@ -470,7 +470,7 @@ test('after QA PASS, delivery tool produces copy-ready message without invoking 
   assert.match(x.notifications.at(-1).message,/commit-message.txt/);
 });
 
-test('QA failure loops through rework plan then fresh approval before execution', async () => {
+test('QA failure stays in Forge PLAN and opens native review after rework plan save', async () => {
   const x=setup(); await advanceToReview(x);
   await x.events.get('plan_review_resolved')({choice:'execute'},x.ctx);
   x.setPlan('inactive'); await x.events.get('agent_start')({},x.ctx); await runCompletedAgent(x,'forge-executor');
@@ -483,34 +483,50 @@ test('QA failure loops through rework plan then fresh approval before execution'
   assert.equal(x.entries.at(-1).data.approved,false);
   assert.equal(x.entries.at(-1).data.reworkCycles,1);
   assert.equal((await x.events.get('tool_call')({toolName:'edit',input:{path:'src/booking.ts'}},x.ctx)).block,true);
-  assert.equal(await x.events.get('session_stop')({},x.ctx),undefined,'rework waits safely until native Plan Mode can be activated');
-  x.setPlan('active');
+
   const rework=await x.events.get('session_stop')({},x.ctx);
-  assert.equal(rework.continue,true);
+  assert.equal(rework.continue,true,'Forge starts rework without entering native Plan Mode');
   assert.match(rework.additionalContext,/QA FAILED: REWORK PLAN/);
-  assert.match(rework.additionalContext,/qa-report.md/);
-  assert.equal(x.getPlan(),'active');
-  assert.equal(x.entries.at(-1).data.phase,'PLAN');
+  assert.match(rework.additionalContext,/Forge PLAN owns rework drafting/);
+  assert.equal(x.getPlan(),'inactive');
   const reworkState = x.entries.at(-1).data;
   const originalPlanPath = reworkState.reworkBasePlanPath;
   const reworkPath = `local://${reworkState.slug}-rework-${reworkState.reworkCycles}-plan.md`;
+  const reworkPlan = PLAN+'\n## QA Rework Changes\n- Fix duplicate booking.\n';
   assert.notEqual(reworkPath, originalPlanPath);
   assert.equal((await x.events.get('tool_call')({
     toolName:'write', input:{path:originalPlanPath,content:PLAN},
   },x.ctx)).block,true,'the approved base plan must remain read-only');
 
   await runCompletedAgent(x,'forge-planner');
-  await writeCanonicalPlan(x,reworkPath);
-  await x.events.get('plan_review_requested')({planContent:PLAN,planPath:reworkPath},x.ctx);
-  assert.equal(x.entries.at(-1).data.phase,'PLAN');
-  assert.equal(x.entries.at(-1).data.approved,false);
+  let idle=false; const timers=[]; let opened=0;
+  x.ctx.isIdle=()=>idle;
+  x.ctx.setTimeout=callback=>timers.push(callback);
+  x.ctx.openPlanReview=async()=>{
+    opened++;
+    await x.events.get('plan_review_requested')({planContent:reworkPlan,planPath:reworkPath},x.ctx);
+    return true;
+  };
+  x.setPlan('paused');
+  await writeCanonicalPlan(x,reworkPath,reworkPlan);
+  assert.equal(x.entries.at(-1).data.planWritten,true);
+  assert.equal(x.entries.at(-1).data.proposalDeferred,true);
+  assert.equal(timers.length,1);
+  idle=true;
+  await timers.shift()();
+  assert.equal(opened,1,'Forge opens native review without a user proposal step');
+  assert.equal(x.getPlan(),'active');
+  assert.equal(x.entries.at(-1).data.planValid,true);
+  assert.equal(x.entries.at(-1).data.approved,false,'the review UI does not self-approve');
+
+  x.ctx.setTimeout=()=>{};
   // Refine is not approval; it loops to planning.
   await x.events.get('plan_review_resolved')({choice:'refine'},x.ctx);
   assert.equal(x.entries.at(-1).data.phase,'PLAN');
   assert.equal(x.entries.at(-1).data.approved,false);
   await runCompletedAgent(x,'forge-planner');
-  await writeCanonicalPlan(x,reworkPath);
-  await x.events.get('plan_review_requested')({planContent:PLAN+'\n## Rework fix\n- Remove duplicate booking\n',planPath:reworkPath},x.ctx);
+  await writeCanonicalPlan(x,reworkPath,reworkPlan);
+  await x.events.get('plan_review_requested')({planContent:reworkPlan,planPath:reworkPath},x.ctx);
   await x.events.get('plan_review_resolved')({choice:'keep'},x.ctx);
   assert.equal(x.entries.at(-1).data.phase,'EXECUTE');
   assert.equal(x.entries.at(-1).data.approved,true);
@@ -1653,7 +1669,7 @@ test('v5.18: scope read is unavailable before approved QA and gracefully handles
   assert.match(during.details.reason,/Git status\/diff inventory unavailable/);
 });
 
-test('v5.18: explicit rework after evidence block needs Plan Mode and retains approval on failure',async()=>{
+test('explicit rework from QA BLOCKED stays in Forge PLAN without native mode',async()=>{
   const x=setup(); await advanceToReview(x);
   await x.events.get('plan_review_resolved')({choice:'execute'},x.ctx);
   x.setPlan('inactive'); await x.events.get('agent_start')({},x.ctx);
@@ -1661,16 +1677,15 @@ test('v5.18: explicit rework after evidence block needs Plan Mode and retains ap
   await runQaAgents(x);
   const blocked=structuredClone(SUBMISSION); blocked.codeQualityChecks[0].status='NOT_RUN';
   await x.tools.get('forge_qa_submit').execute('call',blocked,null,null,x.ctx);
-  const approved=x.entries.at(-1).data.approvedPlanHash;
-  x.ctx.sessionModes.set=async()=>({ok:false,message:'session is busy'});
-  await x.commands.get('forge').handler('rework',x.ctx);
-  assert.equal(x.entries.at(-1).data.phase,'QA');
-  assert.equal(x.entries.at(-1).data.approvedPlanHash,approved);
-  x.ctx.sessionModes.set=async()=>({ok:true});
+  const modeRequests=[];
+  x.ctx.sessionModes.set=async (...args)=>{ modeRequests.push(args); return {ok:false,message:'session is busy'}; };
   await x.commands.get('forge').handler('rework',x.ctx);
   assert.equal(x.entries.at(-1).data.phase,'PLAN');
   assert.equal(x.entries.at(-1).data.approved,false);
   assert.equal(x.entries.at(-1).data.reworkCycles,1);
+  assert.equal(modeRequests.length,0,'rework does not ask native Plan Mode to start');
+  assert.equal(x.getPlan(),'inactive');
+  assert.match(x.sent.at(-1).content,/QA FAILED: REWORK PLAN/);
 });
 
 test('v5.18: forge_qa_scope provides actual untracked files without executing repo code', async () => {

@@ -110,10 +110,10 @@ export default function forgeExtension(pi: ExtensionAPI) {
   const READ_ONLY_TOOLS = ['read', 'grep', 'glob', 'ls', 'ask'];
   const orphanKey = (c: any) => c ? `missing-branch:${c.identity.fingerprint}:${c.state.slug}:${c.state.phase}` : '';
   // local:// plan artifacts belong to OMP's session-local plan sandbox, NOT
-  // the checked-out repository. They must be writeable during PLANNING even
-  // while OMP temporarily reports plan mode as paused/inactive in a tool hook.
-  // Limit the exception to a single root-level *-plan.md basename, and pin
-  // it after a successful write. All project paths remain denied pre-approval.
+  // the checked-out repository. They stay writable throughout Forge's PLAN
+  // gate, even when OMP reports native Plan Mode as paused/inactive.
+  // Limit the exception to a single root-level *-plan.md basename, then pin it.
+  // All project paths remain denied before native human approval.
   const isSandboxPlanPath = (target: string) =>
     /^local:\/\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}-plan\.md$/.test(target);
   const isPlanWritePath = (target: string) =>
@@ -777,7 +777,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
         // The native mode itself is the source of truth for readiness.
         saveState(); updateDashboard(ctx);
         releaseRecovery();
-        pi.sendUserMessage(workflow.reworkBasePlanPath ? reworkInstruction(workflow) : phaseInstruction(workflow), { attribution: 'agent' });
+        pi.sendUserMessage(phaseInstruction(workflow), { attribution: 'agent' });
       }, 250);
     };
     schedule();
@@ -1233,12 +1233,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
         if (!workflow || !['FAIL', 'BLOCKED'].includes(workflow.qaStatus) || !['QA', 'PLAN'].includes(workflow.phase)) {
           return notify(ctx, 'Rework requires a previous QA FAIL/BLOCKED.', 'warning');
         }
-        if (workflow.phase === 'QA' && workflow.qaStatus === 'BLOCKED' && !(await enterPlan(ctx))) {
-          notify(ctx, 'Rework is pending: native Plan Mode is unavailable. The prior approved QA checkpoint was preserved. Retry /forge rework when the session is idle.', 'warning');
-          return;
-        }
-        workflow = reworkTransition(workflow); saveState();
-        if (!(await enterPlan(ctx))) { deferNativePlanUntilIdle(ctx, 'rework'); return; }
+        workflow = reworkTransition(workflow); saveState(); updateDashboard(ctx);
         pi.sendUserMessage(reworkInstruction(workflow), { attribution: 'agent' });
         return;
       }
@@ -1287,7 +1282,6 @@ export default function forgeExtension(pi: ExtensionAPI) {
         }
         if (!workflow?.active) return notify(ctx, 'No active Forge workflow.', 'warning');
         if (workflow.phase === 'PLAN' && workflow.reworkBasePlanPath && !workflow.planWritten) {
-          if (!(await enterPlan(ctx))) { deferNativePlanUntilIdle(ctx, 'rework'); return; }
           pi.sendUserMessage(reworkInstruction(workflow), { attribution: 'agent' });
           return;
         }
@@ -1389,10 +1383,6 @@ export default function forgeExtension(pi: ExtensionAPI) {
       return { continue: true, additionalContext: qaInstruction(workflow) };
     }
     if (workflow.phase === 'PLAN' && workflow.reworkBasePlanPath) {
-      if (ctx.sessionModes?.getState?.().plan !== 'active') {
-        deferNativePlanUntilIdle(ctx, 'rework');
-        return;
-      }
       if (workflow.planWritten) {
         deferNativePlanUntilIdle(ctx, 'review');
         return;
@@ -1782,10 +1772,6 @@ export default function forgeExtension(pi: ExtensionAPI) {
       if (tool === 'write' && workflow.phase === 'PLAN' && isPlanWritePath(target)) {
         if (!hasAgents('PLAN')) {
           return { block: true, reason: 'Forge requires the planner report before the plan can be saved.' };
-        }
-        if (workflow.reworkBasePlanPath && ctx.sessionModes?.getState?.().plan !== 'active') {
-          deferNativePlanUntilIdle(ctx, 'rework');
-          return { block: true, reason: 'Native Plan Mode must be active for rework plan writes. Forge will restore it when the turn is idle; do not retry tools in a loop.' };
         }
         const id = String(event.toolCallId ?? event.id ?? '');
         if (id) planWriteCalls.set(id, { path: target, phase: workflow.phase, reworkCycles: workflow.reworkCycles ?? 0 });
