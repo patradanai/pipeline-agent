@@ -871,6 +871,18 @@ for (const mode of ['active','paused','inactive']) {
     else assert.match(proposal.reason,/deferred|temporarily paused/i);
   });
 }
+test('v6.1: PROPOSAL permits native propose only for the saved canonical plan', async () => {
+  const x=setup();
+  await reachPlanning(x);
+  const path=await writeCanonicalPlan(x);
+  const slug=x.entries.at(-1).data.slug;
+  const hook=x.events.get('tool_call');
+  assert.equal(await hook({toolName:'bash',input:{command:`propose ${slug}`}},x.ctx),undefined);
+  assert.equal(x.entries.at(-1).data.approved,false,'proposal is not approval');
+  assert.equal((await hook({toolName:'bash',input:{command:'propose unrelated-plan'}},x.ctx)).block,true);
+  assert.equal((await hook({toolName:'bash',input:{command:`propose ${slug} --force`}},x.ctx)).block,true);
+  assert.equal(path,x.entries.at(-1).data.planPath);
+});
 
 test('v5.6: PLANNING permits an alternate OMP-local plan filename then pins it', async () => {
   const x=setup();

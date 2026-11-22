@@ -1817,6 +1817,13 @@ export default function forgeExtension(pi: ExtensionAPI) {
 
     if (['bash', 'shell', 'terminal', 'exec', 'run'].includes(tool)) {
       const command = String(input.command ?? input.cmd ?? '');
+      // OMP's `propose <slug>` CLI is a native plan-review control-plane call,
+      // not a shell command. Permit only the already-written canonical plan in
+      // PROPOSAL; OMP still owns validation and human approval.
+      const proposal = command.match(/^propose\s+([A-Za-z0-9][A-Za-z0-9._-]{0,127})$/);
+      const canonicalSlug = workflow.planPath?.replace(/^local:\/\//, '').replace(/-plan\.md$/, '');
+      if (workflow.phase === 'PROPOSAL' && workflow.planWritten &&
+          proposal?.[1] === canonicalSlug) return;
       if (isAllowedDiscoveryCommand(command)) return;
       return { block: true, reason: `Forge ${workflow.phase} permits only safe read-only inspection commands before Approval.` };
     }

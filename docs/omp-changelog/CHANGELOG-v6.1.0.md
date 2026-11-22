@@ -23,6 +23,9 @@ checks that made the old gate rigorous.
 - `forge-requirement` stays on opus in the `balanced` model profile: it now
   carries the critic role.
 - Plan section renamed 'Cooking & Gap Analysis' → 'Requirement & Gap Analysis'.
+- OMP permits `propose <slug>` only in PROPOSAL for the saved plan slug. OMP
+  still validates the plan and opens native human approval; the command cannot
+  mark the workflow approved.
 
 ## Removed
 
