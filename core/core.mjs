@@ -1,12 +1,12 @@
 /** Pure workflow and QA report logic; independent of the OMP runtime. */
 import { createHash } from 'node:crypto';
+import { normalizeForgeState } from './forge-state.mjs';
 
 export const GATE_AGENTS = Object.freeze({
   REQUIREMENT: ['forge-requirement'],
-  PLANNING: ['forge-planner'],
-  EXECUTING: ['forge-executor'],
-  QA_REVIEW: ['forge-qa', 'forge-code-reviewer'],
-  DELIVERY_PREP: ['forge-delivery'],
+  PLAN: ['forge-planner'],
+  EXECUTE: ['forge-executor'],
+  QA: ['forge-qa', 'forge-code-reviewer', 'forge-delivery'],
 });
 
 /** Gate/role assignments are global operator settings, copied into each run. */
@@ -61,7 +61,8 @@ export function normalizeSkillGate(value) {
     ?? (SKILL_GATES.includes(name) ? name : null);
 }
 export function cloneGateSkills(source) {
-  const result = Object.fromEntries(SKILL_GATES.map(g => [g, []]));
+  const defaults = { requirement: ['forge-requirement-gate'], planning: ['forge-plan-gate'], execution: ['forge-execute-gate'], qa: ['forge-qa-gate'], delivery: [] };
+  const result = Object.fromEntries(SKILL_GATES.map(g => [g, [...defaults[g]]]));
   for (const gate of SKILL_GATES) {
     const values = source?.[gate];
     if (values == null) continue;
@@ -106,9 +107,7 @@ export function formatGateSkills(source) {
   return SKILL_GATES.map(g => `${g.toUpperCase().padEnd(12)} ${mapping[g].length ? mapping[g].join(', ') : '(none)'}`).join('\n');
 }
 export function currentSkillGate(phase) {
-  return ({ REQUIREMENT:'requirement', PLANNING:'planning', REWORK_PLANNING:'planning', PLAN_MODE_PENDING:'planning',
-    PROPOSAL:'planning', AWAITING_APPROVAL:'planning', EXECUTING:'execution', QA_REVIEW:'qa',
-    QA_FAILED:'qa', DELIVERY_PREP:'delivery', DELIVERY_BLOCKED:'delivery' })[String(phase)] ?? null;
+  return ({ REQUIREMENT:'requirement', PLAN:'planning', EXECUTE:'execution', QA:'qa' })[String(phase)] ?? null;
 }
 /** Apply skill text to every named subagent task, not just the lead orchestrator prompt. */
 export function injectGateSkillsIntoTask(input, phase, skillBrief) {
@@ -177,30 +176,22 @@ export function routeAgentNames(instruction, state) {
  * This is presentation-only; it never modifies the workflow state or gating.
  */
 export function renderForgeWidget(state) {
-  if (!state) return null;
+  if (!state?.active) return null;
   const phase = String(state.phase ?? '');
-  if (['PROPOSAL', 'AWAITING_APPROVAL', 'DELIVERY'].includes(phase)) return null;
-  if (['PLAN_MODE_BLOCKED', 'AGENTS_BLOCKED', 'EXECUTION_BLOCKED', 'DELIVERY_BLOCKED', 'QA_FAILED'].includes(phase)) {
-    return ['FORGE  ·  Attention needed  ·  /forge status'];
-  }
-  const workStages = {
+  if (phase === 'PLAN' && state.planWritten && state.planValid && !state.approved) return null;
+  const stages = {
     REQUIREMENT: [0, 'Requirement'],
-    PLANNING: [1, 'Planning'],
-    PLAN_MODE_PENDING: [1, 'Planning'],
-    REWORK_PLANNING: [1, 'Planning'],
-    EXECUTING: [2, 'Execution'],
-    QA_REVIEW: [3, 'QA review'],
-    QA_EVIDENCE_PENDING: [3, 'QA evidence needed'],
-    QA_PASSED: [4, 'Delivery'],
-    DELIVERY_PREP: [4, 'Delivery'],
+    PLAN: [1, 'Planning'],
+    EXECUTE: [2, 'Execution'],
+    QA: [3, state.qaStatus === 'PASS' ? 'Delivery' : state.qaEvidencePending ? 'QA evidence needed' : 'QA review'],
   };
-  const stage = workStages[phase];
+  const stage = stages[phase];
   if (!stage) return null;
   const [index, label] = stage;
-  const meter = '▰'.repeat(index + 1) + '▱'.repeat(4 - index);
-  const rework = phase === 'REWORK_PLANNING' && Number(state.reworkCycles) > 0
+  const meter = '▰'.repeat(index + 1) + '▱'.repeat(3 - index);
+  const rework = phase === 'PLAN' && Number(state.reworkCycles) > 0
     ? `  ·  Rework ${Math.max(1, Math.trunc(Number(state.reworkCycles)))}` : '';
-  return [`FORGE  ${meter}  ${label}  ${index + 1}/5${rework}`];
+  return [`FORGE  ${meter}  ${label}  ${index + 1}/4${rework}`];
 }
 
 /** Requirement gate: ONE `forge-requirement` pass covers intake, gaps, critique,
@@ -253,11 +244,9 @@ export function requiredAgentsFor(state) {
   const agents = effectiveAgentAssignments(state);
   const rolesByPhase = {
     REQUIREMENT: ['requirement','analyst'],
-    PLANNING: ['planning','planner'],
-    REWORK_PLANNING: ['planning','planner'],
-    EXECUTING: ['execution','executor'],
-    QA_REVIEW: ['qa','business','reviewer'],
-    DELIVERY_PREP: ['delivery','writer'],
+    PLAN: ['planning','planner'],
+    EXECUTE: ['execution','executor'],
+    QA: state.qaStatus === 'PASS' ? ['delivery','writer'] : ['qa','business','reviewer'],
   };
   const route = rolesByPhase[state.phase];
   return route ? route.slice(1).map(role => agents[route[0]][role]) : [];
@@ -265,22 +254,19 @@ export function requiredAgentsFor(state) {
 export function missingGateAgentsFor(state) {
   return requiredAgentsFor(state).filter(name => !(state?.gateAgents?.[state.phase] ?? []).includes(name));
 }
-/** v5 stored the requirement sub-steps as phases; they resume as the requirement gate. */
+/** Normalize legacy checkpoints before shared-core consumers inspect them. */
 export function migrateLegacyRequirementState(state) {
-  if (!state || !['DISCOVERY', 'COOKING', 'CHALLENGE'].includes(state.phase)) return state;
-  return { ...state, version: 6, phase: 'REQUIREMENT' };
+  return normalizeForgeState(state);
 }
 export function missingGateAgents(phase, seen = []) {
   return (GATE_AGENTS[phase] ?? []).filter(agent => !seen.includes(agent));
 }
-export const PHASES = Object.freeze([
-  'REQUIREMENT', 'PLANNING', 'PROPOSAL',
-  'AWAITING_APPROVAL', 'EXECUTING', 'QA_REVIEW', 'QA_EVIDENCE_PENDING', 'REWORK_PLANNING', 'DELIVERY_PREP', 'DELIVERY', 'DELIVERY_BLOCKED', 'QA_FAILED',
-]);
+export const PHASES = Object.freeze(['REQUIREMENT', 'PLAN', 'EXECUTE', 'QA']);
 
 export const NEXT_PHASE = Object.freeze({
-  REQUIREMENT: 'PLANNING',
-  PLANNING: 'PROPOSAL',
+  REQUIREMENT: 'PLAN',
+  PLAN: 'EXECUTE',
+  EXECUTE: 'QA',
 });
 
 export function planSlug() {
@@ -330,13 +316,13 @@ const HEADER = `[OMP FORGE — GLOBAL REQUIREMENT HARNESS]
 You are an orchestration lead, NOT an implementation agent before human approval. Forge enforces a read-only safety boundary before native Plan Approval, even if Plan Mode is paused or inactive. Do not edit the project, run mutating commands, commit, install dependencies, or create implementation code before explicit approval. Work with any domain, project, or no repository at all.
 Never run git add, git commit, git push, git tag, git merge, git rebase, or publish changes on behalf of the user, at any stage. The user performs Git writes manually after delivery. Existing user constraints override your suggestions. Never invent evidence, tests, subagent calls, approvals, or locked decisions. Clearly distinguish observed facts, assumptions, recommendations, and unresolved decisions.
 Use short progress headings and structured outputs. Prefer automatic continuation; interrupt the user only for an irreversible, material, or genuinely ambiguous business decision. If necessary, use the native ask tool. Avoid unnecessary questions.
-Submit the plan for approval after writing a real local:// plan file. If Forge still displays PLANNING after a successful native write, xd://propose is allowed; the native OMP plan handler verifies the file and requires human approval.`;
+Submit the plan for approval after writing a real local:// plan file. If Forge still displays PLAN after a successful native write, xd://propose is allowed; the native OMP plan handler verifies the file and requires human approval.`;
 
 function phaseInstructionTemplate(state) {
   const { phase, requirement, slug } = state;
   if (phase === 'REQUIREMENT') return `${HEADER}
 
-[GATE 1/6: REQUIREMENT — single-pass analysis]
+[GATE 1/4: REQUIREMENT — single-pass analysis]
 Original user requirement:
 ${requirement}
 
@@ -350,11 +336,16 @@ Its task text must contain: the original requirement verbatim; decisions and con
 (6) self-challenge of its own draft: what it revised, BLOCKERs vs safe defaults.
 Do not run your own intake or workspace exploration first: the agent reads what it needs once. When its report arrives, Forge asks you to review it and call \`forge_requirement_summary\`. Do not implement or write the plan yet.`;
 
-  if (phase === 'PLANNING' && state.reworkBaseHash) return reworkInstructionTemplate(state);
+  if (phase === 'PLAN' && state.planWritten && state.planValid) return `${HEADER}\nThe plan is awaiting explicit operator approval. Do not implement.`;
+  if (phase === 'PLAN' && state.planWritten) return `${HEADER}
 
-  if (phase === 'PLANNING') return `${HEADER}
+[GATE 2/4: NATIVE OMP PLAN APPROVAL]
+Review ${state.planPath ?? `local://${slug}-plan.md`} for completeness and unresolved blockers. If ready, submit it to OMP's built-in Plan Review overlay: use the native write tool to write the exact slug '${(state.planPath ?? `local://${slug}-plan.md`).replace(/^local:\/\//, '').replace(/-plan\.md$/, '')}' as plain text to xd://propose. This opens the user's approval UI. Never self-approve. If the plan file was not written, create it first. Do not finish with just a textual 'ready' response.`;
+  if (phase === 'PLAN' && state.reworkBaseHash) return reworkInstructionTemplate(state);
 
-[GATE 2/6: PLANNING]${state.requirementSummary ? `
+  if (phase === 'PLAN') return `${HEADER}
+
+[GATE 2/4: PLANNING]${state.requirementSummary ? `
 Use this requirement synthesis as the starting point (do not re-run requirement discovery):
 ${formatRequirementSummary(state.requirementSummary)}
 ` : ''}
@@ -368,12 +359,8 @@ MANDATORY QA CONTRACT IN THE PLAN:
 - Include '## Code Quality Gates' with parseable lines '- QG-001: <quality gate>' for language-appropriate tests, lint/static analysis, typecheck/build where applicable, security/error handling, and maintainability review. Mark not-applicable checks explicitly.
 - Include '## Execution & QA Handoff': after implementation, QA must compare the *approved* plan against actual code, run feasible checks, and report every test by Business Topic. Never mark a check PASS without observed evidence; unrun checks are NOT_RUN.
 
-Write the complete proposed plan into OMP's plan-mode sandbox at local://${slug}-plan.md (not a workspace file). If OMP has already assigned a different root-level local://*-plan.md filename for this session, that OMP-local plan filename is also accepted; never use a repository path. The plan must include a visible 'Requirement & Gap Analysis' section. Forge normally advances to PROPOSAL after a successful write. If the write succeeded but the gate still shows PLANNING, submit the bare plan slug using write xd://propose; native OMP will verify that the file exists and open human review. Do not implement or self-approve.`;
+Write the complete proposed plan into OMP's plan-mode sandbox at local://${slug}-plan.md (not a workspace file). If OMP has already assigned a different root-level local://*-plan.md filename for this session, that OMP-local plan filename is also accepted; never use a repository path. The plan must include a visible 'Requirement & Gap Analysis' section. After a successful write, submit the bare plan slug using write xd://propose; native OMP will verify that the file exists and open human review. Do not implement or self-approve.`;
 
-  if (phase === 'PROPOSAL') return `${HEADER}
-
-[GATE 3/6: NATIVE OMP PLAN APPROVAL]
-Review ${state.planPath ?? `local://${slug}-plan.md`} for completeness, a VALID '## Business Topics' section with BIZ-IDs, a parseable '## Business Test Cases' TC/REQ/BIZ matrix, code-quality gates and unresolved critical blockers. If critical blockers remain, ask for their resolution and update the plan before proceeding. If the plan is ready, submit it to OMP's built-in Plan Review overlay: use the native write tool to write the exact slug '${(state.planPath ?? `local://${slug}-plan.md`).replace(/^local:\/\//, '').replace(/-plan\.md$/, '')}' as plain text to xd://propose. This opens the user's approval UI. Never self-approve. If the plan file was not written, create it first. Do not finish with just a textual 'ready' response.`;
 
   return `${HEADER}\nThe plan is awaiting explicit operator approval. Do not implement.`;
 }
@@ -419,7 +406,7 @@ REQUIRED CHECKS:
 6. Submit the structured report using the 'forge_qa_submit' tool exactly once. The tool computes the final gate result and saves a Markdown/JSON report outside the project. Do not declare PASS on your own.
 7. If the tool is unavailable, explicitly report that QA could not be completed; do not claim success.
 
-DO NOT auto-fix. On observed FAIL, Forge re-enters planning and requires new approval before code repairs. On BLOCKED/NOT_RUN without observed failures, Forge pauses at QA_EVIDENCE_PENDING and retains approved Plan; collect the missing evidence using /forge qa, or explicitly choose /forge rework if implementation changes are required. On PASS, Forge moves to Delivery. Never stage, commit or push.`;
+DO NOT auto-fix. On observed FAIL, Forge re-enters PLAN and requires new approval before code repairs. On BLOCKED/NOT_RUN without observed failures, Forge remains in QA and retains the approved plan; collect missing evidence using /forge qa, or choose /forge rework if implementation changes are required. On PASS, prepare delivery within QA. Never stage, commit or push.`;
 }
 
 function reworkPlanPath(state) {
@@ -441,7 +428,7 @@ QA failure evidence (read this report): ${state.qaReportPath ?? 'not available'}
 MANDATORY: invoke the named \`forge-planner\` agent via native task and await its report before saving the rework plan.
 You are back in native OMP PLAN MODE. Absolutely no implementation, code edits, test fixes, git add/commit/push or mutating commands. Read the QA report and compare failures with the previous approved plan and original requirements. Group repairs by Business Topic and Test Case (BIZ/REQ/TC/QG), identify root causes and risks, and preserve stable IDs. Save a revised plan to ${nextPlanPath}; never overwrite the previous approved plan. The revised plan must include remediation tasks and a new test matrix. Do NOT erase unfinished or blocked tests. Explicitly explain what changes, why, and what will be reverified.
 
-Maintain the mandatory sections ## Business Topics, ## Requirement Traceability, ## Business Test Cases, ## Code Quality Gates, ## Execution & QA Handoff, and ## QA Rework Changes. If the user selects Refine, keep editing the same rework revision at ${nextPlanPath}. Forge will advance to PROPOSAL and display native Plan Approval after a successful write and planner report. Do NOT auto-approve or implement.`;
+Maintain the mandatory sections ## Business Topics, ## Requirement Traceability, ## Business Test Cases, ## Code Quality Gates, ## Execution & QA Handoff, and ## QA Rework Changes. If the user selects Refine, keep editing the same rework revision at ${nextPlanPath}. Submit the revised plan for native approval after the planner report. Do NOT auto-approve or implement.`;
 }
 
 function deliveryInstructionTemplate(state) {
@@ -463,11 +450,15 @@ Then PRINT the exact commit message in a fenced text block for the human to COPY
 }
 
 // Prompt routing uses the same immutable per-workflow roster as task gates and QA validation.
-export const phaseInstruction = state => routeAgentNames(phaseInstructionTemplate(state), state);
+export const phaseInstruction = state => {
+  if (state.phase === 'EXECUTE') return executionInstruction(state);
+  if (state.phase === 'QA') return state.qaStatus === 'PASS' ? deliveryInstruction(state) : qaInstruction(state);
+  return `Load and follow the ${state.phase === 'REQUIREMENT' ? 'forge-requirement-gate' : 'forge-plan-gate'} skill.\n\n${routeAgentNames(phaseInstructionTemplate(state), state)}`;
+};
 export const requirementSummaryInstruction = state => routeAgentNames(requirementSummaryTemplate(), state);
-export const executionInstruction = state => routeAgentNames(executionInstructionTemplate(state), state);
-export const qaInstruction = state => routeAgentNames(qaInstructionTemplate(state), state);
-export const reworkInstruction = state => routeAgentNames(reworkInstructionTemplate(state), state);
+export const executionInstruction = state => `Load and follow the forge-execute-gate skill.\n\n${routeAgentNames(executionInstructionTemplate(state), state)}`;
+export const qaInstruction = state => `Load and follow the forge-qa-gate skill.\n\n${routeAgentNames(qaInstructionTemplate(state), state)}`;
+export const reworkInstruction = state => `Load and follow the forge-plan-gate skill.\n\n${routeAgentNames(reworkInstructionTemplate(state), state)}`;
 export const deliveryInstruction = state => routeAgentNames(deliveryInstructionTemplate(state), state);
 
 /** This guard covers obvious agent-authored Git writes, not subprocesses or arbitrary user scripts. */

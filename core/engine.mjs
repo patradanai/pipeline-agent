@@ -43,11 +43,12 @@ import {
 } from './transitions.mjs';
 import { adaptInstruction } from './platform.mjs';
 import { isValidRestoreCandidate, prepareHumanRecovery } from './checkpoint-recovery.mjs';
+import { normalizeForgeState } from './forge-state.mjs';
 
 const READ_ONLY = new Set(['read', 'grep', 'glob', 'ls', 'web', 'ask', 'todo', 'coord']);
 const MAX_HANDBACK = 20000;
-const PRE_APPROVAL = new Set(['REQUIREMENT', 'PLAN_MODE_PENDING', 'PLANNING', 'PROPOSAL', 'AWAITING_APPROVAL', 'REWORK_PLANNING']);
-const QA_PHASES = new Set(['QA_REVIEW', 'QA_EVIDENCE_PENDING']);
+const PRE_APPROVAL = new Set(['REQUIREMENT', 'PLAN']);
+const QA_PHASES = new Set(['QA']);
 const FORGE_AGENTS = new Set(Object.values(GATE_AGENTS).flat());
 const PUBLISH_TOOL = /(?:github|gitlab|bitbucket)/i;
 const PUBLISH_ACTION = /(?:commit|push|merge|create[_-]?pull|update[_-]?file|create[_-]?file|delete[_-]?file|release|tag)/i;
@@ -95,20 +96,20 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
         return keep({ active: false, version: 9, ...(cancelledSlug ? { cancelledSlug } : {}) }, { message: 'Forge workflow cancelled. No files or Git state were changed.' });
       }
       case 'qa': {
-        if (!state?.approved || !state.planValid || !['EXECUTING', 'QA_REVIEW', 'QA_FAILED', 'QA_EVIDENCE_PENDING'].includes(state.phase)) {
+        if (!state?.approved || !state.planValid || !['EXECUTE', 'QA'].includes(state.phase)) {
           return keep(state, { message: 'No approved execution is available for QA.' });
         }
-        const next = { ...state, active: true, phase: 'QA_REVIEW', qaRetries: 0, qaEvidencePending: false, gateAgents: { ...(state.gateAgents ?? {}), QA_REVIEW: [] } };
+        const next = { ...state, active: true, phase: 'QA', qaStatus: null, qaRetries: 0, qaEvidencePending: false, gateAgents: { ...(state.gateAgents ?? {}), QA: [] } };
         return keep(next, { context: say(qaInstruction(next)), message: 'Forge QA review started.' });
       }
       case 'rework': {
-        if (!state || !['QA_FAILED', 'REWORK_PLANNING', 'QA_EVIDENCE_PENDING'].includes(state.phase)) return keep(state, { message: 'Rework requires a previous QA FAIL/BLOCKED.' });
-        const next = state.phase === 'REWORK_PLANNING' ? state : reworkTransition(state);
+        if (!state || !['FAIL', 'BLOCKED'].includes(state.qaStatus) || !['QA', 'PLAN'].includes(state.phase)) return keep(state, { message: 'Rework requires a previous QA FAIL/BLOCKED.' });
+        const next = state.phase === 'PLAN' ? state : reworkTransition(state);
         return keep(next, { context: say(reworkInstruction(next)), message: 'Forge rework planning started. A new native plan approval is required.' });
       }
       case 'delivery': {
-        if (state?.phase === 'DELIVERY_PREP' || state?.phase === 'DELIVERY_BLOCKED') {
-          const next = { ...state, active: true, phase: 'DELIVERY_PREP', deliveryRetries: 0 };
+        if (state?.active && state.phase === 'QA' && state.qaStatus === 'PASS') {
+          const next = { ...state, deliveryRetries: 0 };
           return keep(next, { context: say(deliveryInstruction(next)) });
         }
         if (state?.deliveryPath) return keep(state, { message: `Delivery: ${state.deliveryPath}\nCommit message: ${state.commitMessagePath}\n\n${state.commitMessage ?? ''}` });
@@ -131,7 +132,7 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
 
   /** List Forge workflows saved by other sessions of this project, or adopt one.
    * Adopting never carries an approval across sessions: it re-enters at the safe
-   * gate (approved work → PLANNING, fresh native approval required). Resuming the
+   * gate (approved work → PLAN, fresh native approval required). Resuming the
    * original session with the host's own resume keeps everything. */
   function resumeCommand(state, arg) {
     if (arg && /^current$/i.test(arg)) return keep(state, { message: statusLine(state) });
@@ -139,7 +140,7 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
     if (!arg) {
       if (!list.length) return keep(state, { message: `No other session of this project has a resumable Forge workflow.${state?.active ? ` This session: ${statusLine(state)}` : ''}` });
       const rows = list.map((w, i) => `${i + 1}. ${w.state.phase}${w.state.approved ? ' (approved)' : ''} · ${String(w.state.requirement).replace(/[\r\n]+/g, ' ').slice(0, 60)} · saved ${String(w.savedAt ?? '').replace('T', ' ').slice(0, 16)} · session ${w.sessionId}`);
-      return keep(state, { message: `Forge workflows in other sessions of this project:\n${rows.join('\n')}\n\nKeep everything (incl. approval): exit and run \`claude --resume <session>\`, or use /resume and pick that session.\nAdopt into THIS session instead: /forge-resume <number> — approved work restarts at PLANNING and needs a fresh native approval.` });
+      return keep(state, { message: `Forge workflows in other sessions of this project:\n${rows.join('\n')}\n\nKeep everything (incl. approval): exit and run \`claude --resume <session>\`, or use /resume and pick that session.\nAdopt into THIS session instead: /forge-resume <number> — approved work restarts at PLAN and needs a fresh native approval.` });
     }
     if (state?.active) return keep(state, { message: `This session already has an active Forge workflow (${state.phase}). Use /forge-off first.` });
     const pick = list[Number(arg) - 1];
@@ -151,7 +152,7 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
   }
 
   function approveByCommand(state) {
-    if (!state?.active || state.phase !== 'AWAITING_APPROVAL' || state.planValid !== true || !state.approvedPlanHash) {
+    if (!state?.active || state.phase !== 'PLAN' || !state.planWritten || state.approved || state.planValid !== true || !state.approvedPlanHash) {
       return keep(state, { message: 'Nothing to approve: /forge approve works only after a VALID plan was submitted and is awaiting approval.' });
     }
     const next = approvedExecutionState(state, 'human-typed-forge-approve');
@@ -204,7 +205,7 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
       const executor = agentName === 'forge-executor';
       if (!executor && ['write', 'edit', 'bash'].includes(tool)) return deny(state, 'Forge specialist is read-only. Only forge-executor may edit approved code; no Git writes.');
       if (executor && tool === 'bash') return deny(state, 'forge-executor has no shell. The main orchestrator runs safe build/test commands.');
-      if (executor && ['write', 'edit'].includes(tool) && state.phase !== 'EXECUTING') return deny(state, `Forge ${state.phase}: implementation writes require the approved EXECUTING gate.`);
+      if (executor && ['write', 'edit'].includes(tool) && (state.phase !== 'EXECUTE' || !state.approved)) return deny(state, `Forge ${state.phase}: implementation writes require the approved EXECUTE gate.`);
     }
 
     // A subagent handing its report back through a host coordination tool.
@@ -215,11 +216,12 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
 
     // executionObserved: the first main-agent action after approval.
     let s = state;
-    if (s.phase === 'EXECUTING' && s.approved && !s.executionObserved && actor.kind === 'main') s = { ...s, executionObserved: true };
+    if (s.phase === 'EXECUTE' && s.approved && !s.executionObserved && actor.kind === 'main') s = { ...s, executionObserved: true };
 
     if (tool === 'plan.write') {
       if (!PRE_APPROVAL.has(s.phase)) return deny(s, `Forge ${s.phase}: the plan file can be edited only before approval.`);
-      return keep({ ...s, planDraftPath: ev.planFile ?? s.planDraftPath ?? null });
+      return keep({ ...s, planDraftPath: ev.planFile ?? s.planDraftPath ?? null,
+        ...(s.phase === 'PLAN' ? { planValid: false, approvedPlanHash: null, approved: false } : {}) });
     }
     if (tool === 'agent') return routeAgent(s, input);
     if (tool === 'plan.submit') return preSubmitPlan(s, ev);
@@ -248,12 +250,7 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
       if (tool === 'bash' && isAllowedQaCommand(String(input.command ?? ''))) return keep(s);
       return deny(s, `Forge ${s.phase} is read-only: QA never edits code. Safe test/lint/typecheck commands and git status/diff are allowed.`);
     }
-    if (s.phase === 'DELIVERY_PREP') {
-      if (READ_ONLY.has(tool)) return keep(s);
-      if (tool === 'bash' && isAllowedQaCommand(String(input.command ?? ''))) return keep(s);
-      return deny(s, `Forge delivery is read-only. Use ${toolRef('forge_delivery_submit')} for the commit-message artifact.`);
-    }
-    return keep(s); // EXECUTING and later: Git/publish guards above still apply
+    return keep(s); // Git/publish guards above still apply.
   }
 
   function preApprovalPolicy(s, tool, input) {
@@ -276,7 +273,7 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
       return deny(s, `Forge ${s.phase} requires ${required.map(agentRef).join(', ')}; ${agentRef(name)} is not part of this gate.`);
     }
     if (!required.length && FORGE_AGENTS.has(name)) {
-      return deny(s, `Forge ${s.phase} does not run specialists.${s.phase === 'AWAITING_APPROVAL' ? ' Wait for native plan approval.' : ''}`);
+      return deny(s, `Forge ${s.phase} does not run specialists.`);
     }
     if (required.includes(name)) {
       const key = s.phase;
@@ -297,11 +294,11 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
   }
 
   function preSubmitPlan(s, ev) {
-    if (!['PLANNING', 'REWORK_PLANNING', 'PROPOSAL', 'AWAITING_APPROVAL'].includes(s.phase)) {
+    if (s.phase !== 'PLAN') {
       return deny(s, `Forge ${s.phase}: a plan can be submitted only during planning.`);
     }
-    const plannerGate = s.phase === 'REWORK_PLANNING' ? s : { ...s, phase: 'PLANNING' };
-    if (s.phase !== 'AWAITING_APPROVAL' && !hasGateAgents(plannerGate)) {
+    const plannerGate = s;
+    if (!hasGateAgents(plannerGate)) {
       return deny(s, `Run ${requiredAgentsFor(plannerGate).map(agentRef).join(', ')} through the Agent tool and await its report before submitting the plan.`);
     }
     if (ev.permissionMode && ev.permissionMode !== 'plan') {
@@ -319,7 +316,7 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
     }
     const planPath = deps.savePlan ? deps.savePlan(s, content) : s.planPath;
     const next = {
-      ...s, phase: 'AWAITING_APPROVAL', planWritten: true, planValid: true, approvedPlanHash: contract.hash,
+      ...s, phase: 'PLAN', planWritten: true, planValid: true, approvedPlanHash: contract.hash,
       businessTopics: contract.topics, requirements: contract.requirements, testCases: contract.testCases,
       qualityGates: contract.qualityGates, planPath, planIssues: [], approved: false,
     };
@@ -341,7 +338,7 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
       let applied;
       try { applied = applyRequirementSummary(state, input); } catch (err) { return keep(state, { context: `Forge requirement summary rejected: ${err.message}` }); }
       const next = applied.state;
-      const head = `Forge: requirement summary recorded (${applied.summarizedHigh} CRITICAL/HIGH, ${applied.summary.blockers.length} open blocker(s)) → PLANNING.`;
+      const head = `Forge: requirement summary recorded (${applied.summarizedHigh} CRITICAL/HIGH, ${applied.summary.blockers.length} open blocker(s)) → PLAN.`;
       return keep(next, { context: `${head}\n\n${say(phaseInstruction(next))}` });
     }
     if (tool === 'forge.qa_scope') {
@@ -354,7 +351,7 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
   }
 
   function onToolFail(state, ev) {
-    if (!state?.active || ev.tool !== 'plan.submit' || state.phase !== 'AWAITING_APPROVAL') return keep(state);
+    if (!state?.active || ev.tool !== 'plan.submit' || state.phase !== 'PLAN' || !state.planValid || state.approved) return keep(state);
     return keep({ ...state, approved: false }, { context: 'Forge: the plan was NOT approved. Read the user\'s feedback, revise the plan, and call ExitPlanMode again. Do not implement.' });
   }
 
@@ -394,11 +391,11 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
     if (s.phase === 'REQUIREMENT') {
       return { state: { ...s, requirementSummaryRequested: true }, context: say(requirementSummaryInstruction(s)) };
     }
-    if (s.phase === 'PLANNING' || s.phase === 'REWORK_PLANNING') {
+    if (s.phase === 'PLAN') {
       return { state: s, context: say('[FORGE PLANNER REPORT RECEIVED]\nCompose the complete plan now (all mandatory contract sections) and submit it with ExitPlanMode while in plan mode. Do not implement.') };
     }
-    if (s.phase === 'QA_REVIEW') return { state: s, context: `Forge: both independent QA reports arrived. Run safe checks, then call ${toolRef('forge_qa_submit')} exactly once with evidence-backed results.` };
-    if (s.phase === 'DELIVERY_PREP') return { state: s, context: `Forge: delivery report arrived. Call ${toolRef('forge_delivery_submit')} once, then print the commit message for the user.` };
+    if (s.phase === 'QA' && s.qaStatus !== 'PASS') return { state: s, context: `Forge: both independent QA reports arrived. Run safe checks, then call ${toolRef('forge_qa_submit')} exactly once with evidence-backed results.` };
+    if (s.phase === 'QA' && s.qaStatus === 'PASS') return { state: s, context: `Forge: delivery report arrived. Call ${toolRef('forge_delivery_submit')} once, then print the commit message for the user.` };
     return { state: s };
   }
 
@@ -411,20 +408,20 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
   }
 
   function planApproved(state, ev) {
-    if (state.phase !== 'AWAITING_APPROVAL' || state.planValid !== true) return keep(state);
+    if (state.phase !== 'PLAN' || !state.planWritten || state.approved || state.planValid !== true || !state.approvedPlanHash) return keep(state);
     // The approved text can differ from the submitted one if the user edited it in the approval dialog.
     const content = planText(state, ev);
     const contract = content ? validatePlanContract(content) : null;
     if (contract && contract.hash !== state.approvedPlanHash) {
       if (!contract.valid) {
-        return keep({ ...state, planValid: false, approved: false, planIssues: contract.issues, phase: 'PLANNING' },
+        return keep({ ...state, planValid: false, approved: false, planIssues: contract.issues, phase: 'PLAN' },
           { context: `Forge: the approved plan text no longer satisfies the plan contract, so execution is NOT authorized:\n${contract.issues.join('\n')}\nFix the plan and submit it again with ExitPlanMode.` });
       }
       const planPath = deps.savePlan ? deps.savePlan(state, content) : state.planPath;
       state = { ...state, approvedPlanHash: contract.hash, businessTopics: contract.topics, requirements: contract.requirements, testCases: contract.testCases, qualityGates: contract.qualityGates, planPath };
     }
     const next = approvedExecutionState(state, 'native-plan-approval');
-    return keep(next, { context: say(executionInstruction(next)), message: 'Forge: plan approved (native). EXECUTING 3/5.' });
+    return keep(next, { context: say(executionInstruction(next)), message: 'Forge: plan approved (native). EXECUTE 3/4.' });
   }
 
   function qaSubmitted(state, ev) {
@@ -469,17 +466,17 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
       if (retries >= MAX_STOP_NUDGES) return keep(state);
       return keep({ ...state, agentRetries: { ...(state.agentRetries ?? {}), [key]: retries + 1 } }, { continueReason: reason });
     };
-    if (state.phase === 'EXECUTING' && state.approved && state.executionObserved) {
-      if (!hasGateAgents(state)) return nudge('EXECUTING:stop', say(`Forge: the approved plan must be implemented by ${agentRef('forge-executor')} through the Agent tool. Invoke it now (or report EXECUTION_BLOCKED). Do not claim completion.`));
-      const next = { ...state, phase: 'QA_REVIEW', qaRetries: 0, gateAgents: { ...(state.gateAgents ?? {}), QA_REVIEW: [] } };
+    if (state.phase === 'EXECUTE' && state.approved && state.executionObserved) {
+      if (!hasGateAgents(state)) return nudge('EXECUTE:stop', say(`Forge: the approved plan must be implemented by ${agentRef('forge-executor')} through the Agent tool. Invoke it now (or report execution blocked). Do not claim completion.`));
+      const next = { ...state, phase: 'QA', qaStatus: null, qaRetries: 0, gateAgents: { ...(state.gateAgents ?? {}), QA: [] } };
       return keep(next, { continueReason: say(qaInstruction(next)), message: 'Forge: execution settled → independent QA 4/5.' });
     }
     if (state.phase === 'REQUIREMENT' && hasGateAgents(state)) return nudge('REQUIREMENT:summary', say(requirementSummaryInstruction(state)));
     if (state.phase === 'REQUIREMENT') {
       return nudge('REQUIREMENT:stop', say(`Forge REQUIREMENT: ${missingGateAgentsFor(state).map(agentRef).join(', ')} has not reported. Invoke it once through the Agent tool and await its report, or report the gate BLOCKED. Ask the user only for genuine business decisions.`));
     }
-    if (state.phase === 'QA_REVIEW') return nudge('QA_REVIEW:stop', `Forge QA is incomplete: call ${toolRef('forge_qa_submit')} with evidence-backed results. If checks cannot run, submit BLOCKED/NOT_RUN; never fabricate PASS.`);
-    if (state.phase === 'DELIVERY_PREP') return nudge('DELIVERY_PREP:stop', `Forge delivery is incomplete: run ${agentRef('forge-delivery')} if it has not reported, then call ${toolRef('forge_delivery_submit')}.`);
+    if (state.phase === 'QA' && state.qaStatus !== 'PASS') return nudge('QA:stop', `Forge QA is incomplete: call ${toolRef('forge_qa_submit')} with evidence-backed results. If checks cannot run, submit BLOCKED/NOT_RUN; never fabricate PASS.`);
+    if (state.phase === 'QA' && state.qaStatus === 'PASS') return nudge('QA:delivery', `Forge delivery is incomplete: run ${agentRef('forge-delivery')} if it has not reported, then call ${toolRef('forge_delivery_submit')}.`);
     return keep(state);
   }
 
@@ -495,6 +492,7 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
 
   return {
     handle(state, event) {
+      state = normalizeForgeState(state);
       switch (event?.type) {
         case 'command': return onCommand(state, event.text);
         case 'tool.pre': return onToolPre(state, event);

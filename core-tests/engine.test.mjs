@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createEngine, normalizeAgentName } from '../core/engine.mjs';
-import { requiredAgentsFor } from '../core/core.mjs';
+import { PHASES, requiredAgentsFor } from '../core/core.mjs';
 import { PLAN, SUBMISSION, FAIL_SUBMISSION } from './fixtures.mjs';
-import { reworkTransition } from '../core/transitions.mjs';
+import { assertDeliverySubmittable, qaReportTransition, reworkTransition } from '../core/transitions.mjs';
 
 const SUMMARY = { baseline: 'Goal: bookings with approvals. Scope: create + approve. Acceptance: both flows work.', findings: [{ severity: 'LOW', title: 'naming' }] };
 
@@ -47,15 +47,24 @@ function harness(config = {}, initial = null) {
 async function toApproval(x) {
   x.cmd('Build a booking system');
   x.runGate(); x.summarize();
-  assert.equal(x.state.phase, 'PLANNING');
+  assert.equal(x.state.phase, 'PLAN');
   x.runGate();
   assert.equal(x.pre('plan.submit', { plan: PLAN }).decision, undefined);
-  assert.equal(x.state.phase, 'AWAITING_APPROVAL');
+  assert.equal(x.state.phase, 'PLAN');
+  assert.equal(x.state.planWritten, true);
+  assert.equal(x.state.planValid, true);
+  assert.equal(x.state.approved, false);
 }
 
 test('agent names: plugin-scoped and bare are equivalent', () => {
   assert.equal(normalizeAgentName('forge:forge-planner'), 'forge-planner');
   assert.equal(normalizeAgentName('forge-planner'), 'forge-planner');
+});
+
+test('four persisted phases route QA PASS to delivery without a fifth phase', () => {
+  assert.deepEqual(PHASES, ['REQUIREMENT', 'PLAN', 'EXECUTE', 'QA']);
+  assert.deepEqual(requiredAgentsFor({ phase: 'QA' }), ['forge-qa', 'forge-code-reviewer']);
+  assert.deepEqual(requiredAgentsFor({ phase: 'QA', qaStatus: 'PASS' }), ['forge-delivery']);
 });
 
 test('no workflow → engine never interferes, not even with git', () => {
@@ -68,16 +77,16 @@ test('happy path: one requirement pass + summary → planning → native approva
   const x = harness();
   const start = x.cmd('Build a booking system');
   assert.doesNotMatch(start.message, /thorough/);
-  assert.match(start.context, /GATE 1\/6: REQUIREMENT — single-pass analysis[\s\S]*forge:forge-requirement/);
+  assert.match(start.context, /GATE 1\/4: REQUIREMENT[\s\S]*forge:forge-requirement/);
   assert.deepEqual(requiredAgentsFor(x.state), ['forge-requirement']);
   // planning cannot be skipped: the summary needs the report first
   assert.match(x.pre('forge.requirement_summary', SUMMARY).reason, /requirement report missing/);
   assert.match(x.runGate().context, /^\[FORGE REQUIREMENT — report received\]/);
   assert.equal(x.state.phase, 'REQUIREMENT');
   const planning = x.summarize({ ...SUMMARY, blockers: ['approver role undecided'] });
-  assert.equal(x.state.phase, 'PLANNING');
-  assert.match(planning.context, /^Forge: requirement summary recorded \(0 CRITICAL\/HIGH, 1 open blocker\(s\)\) → PLANNING\./);
-  assert.match(planning.context, /GATE 2\/6: PLANNING[\s\S]*Use this requirement synthesis as the starting point[\s\S]*approver role undecided[\s\S]*ExitPlanMode/);
+  assert.equal(x.state.phase, 'PLAN');
+  assert.match(planning.context, /requirement summary recorded/i);
+  assert.match(planning.context, /GATE 2\/4: PLAN[\s\S]*approver role undecided[\s\S]*ExitPlanMode/);
   // plan before planner → denied
   assert.match(x.pre('plan.submit', { plan: PLAN }).reason, /forge:forge-planner/);
   assert.match(x.runGate().context, /PLANNER REPORT RECEIVED/);
@@ -85,46 +94,48 @@ test('happy path: one requirement pass + summary → planning → native approva
   assert.match(x.pre('plan.submit', { plan: PLAN }, { permissionMode: 'default' }).reason, /plan mode/);
   // invalid contract → denied with issues, still PLANNING
   assert.match(x.pre('plan.submit', { plan: '# empty' }).reason, /plan contract is invalid/);
-  assert.equal(x.state.phase, 'PLANNING');
+  assert.equal(x.state.phase, 'PLAN');
   // valid → awaiting native approval, plan stored
   assert.equal(x.pre('plan.submit', { plan: PLAN }).decision, undefined);
-  assert.equal(x.state.phase, 'AWAITING_APPROVAL'); assert.equal(x.saved.plan, PLAN);
+  assert.equal(x.state.phase, 'PLAN'); assert.equal(x.state.approved, false); assert.equal(x.saved.plan, PLAN);
   // writes still blocked while awaiting approval
   assert.equal(x.pre('write', { file_path: 'src/a.ts' }).decision, 'deny');
   // native approval
   const appr = x.post('plan.submit', { plan: PLAN });
-  assert.equal(x.state.phase, 'EXECUTING'); assert.equal(x.state.approved, true);
+  assert.equal(x.state.phase, 'EXECUTE'); assert.equal(x.state.approved, true);
   assert.match(appr.context, /APPROVED EXECUTION/);
   // first main action marks execution observed; executor spawned
   x.agent('forge-executor', 'Changed booking.ts');
   // stop → QA
   const toQa = x.stop();
-  assert.equal(x.state.phase, 'QA_REVIEW'); assert.match(toQa.continueReason, /POST-EXECUTION QA REVIEW/);
+  assert.equal(x.state.phase, 'QA'); assert.match(toQa.continueReason, /POST-EXECUTION QA REVIEW/);
   assert.equal(x.pre('write', { file_path: 'src/a.ts' }).decision, 'deny');
   assert.equal(x.pre('bash', { command: 'npm test' }).decision, undefined);
   assert.match(x.post('forge.qa_scope', {}).context, /a\.ts/);
+  assert.equal(x.pre('forge.delivery_submit', { subject: 'feat(booking): add approvals' }).decision, 'deny');
   x.runGate();
   assert.equal(x.pre('forge.qa_submit', SUBMISSION).decision, undefined);
   const qa = x.post('forge.qa_submit', SUBMISSION);
-  assert.equal(x.state.phase, 'DELIVERY_PREP'); assert.match(qa.context, /QA GATE: PASS/);
+  assert.equal(x.state.phase, 'QA'); assert.equal(x.state.qaStatus, 'PASS'); assert.match(qa.context, /QA GATE: PASS/);
+  assert.equal(x.pre('forge.delivery_submit', { subject: 'feat(booking): add approvals' }).decision, 'deny');
   x.runGate();
   assert.match(x.pre('forge.delivery_submit', { subject: 'bad subject' }).reason, /Conventional Commits/);
   const d = x.post('forge.delivery_submit', { subject: 'feat(booking): add approvals', body: '- approvals' });
-  assert.equal(x.state.phase, 'DELIVERY'); assert.equal(x.state.active, false);
+  assert.equal(x.state.phase, 'QA'); assert.equal(x.state.active, false);
   assert.match(d.context, /feat\(booking\): add approvals/);
 });
 
 test('rejected plan (tool failure) keeps execution unauthorized', async () => {
   const x = harness(); await toApproval(x);
   assert.match(x.fail('plan.submit', { plan: PLAN }).context, /NOT approved/);
-  assert.equal(x.state.phase, 'AWAITING_APPROVAL'); assert.equal(x.state.approved, false);
+  assert.equal(x.state.phase, 'PLAN'); assert.equal(x.state.approved, false);
   assert.equal(x.pre('write', { file_path: 'a.ts' }).decision, 'deny');
 });
 
 test('plan edited in the approval dialog into an invalid plan does not authorize execution', async () => {
   const x = harness(); await toApproval(x);
   const out = x.post('plan.submit', { plan: '# I deleted everything' });
-  assert.equal(x.state.approved, false); assert.equal(x.state.phase, 'PLANNING');
+  assert.equal(x.state.approved, false); assert.equal(x.state.phase, 'PLAN');
   assert.match(out.context, /NOT authorized/);
 });
 
@@ -135,7 +146,7 @@ test('/forge approve is the human fallback only for a valid awaiting plan', asyn
   await toApproval(harness()); // independent
   const y = harness(); await toApproval(y);
   assert.match(y.cmd('approve').message, /approved by you/);
-  assert.equal(y.state.phase, 'EXECUTING');
+  assert.equal(y.state.phase, 'EXECUTE');
 });
 
 test('QA FAIL → rework requires a NEW different plan and new approval', async () => {
@@ -143,21 +154,44 @@ test('QA FAIL → rework requires a NEW different plan and new approval', async 
   x.post('plan.submit', { plan: PLAN });
   x.agent('forge-executor', 'done'); x.stop(); x.runGate();
   const qa = x.post('forge.qa_submit', FAIL_SUBMISSION);
-  assert.equal(x.state.phase, 'REWORK_PLANNING'); assert.equal(x.state.approved, false);
+  assert.equal(x.state.phase, 'PLAN'); assert.equal(x.state.approved, false); assert.equal(x.state.qaStatus, 'FAIL');
   assert.match(qa.context, /REWORK PLAN/);
   x.runGate();
   assert.match(x.pre('plan.submit', { plan: PLAN }).reason, /identical to the previously approved plan/);
   assert.equal(x.pre('plan.submit', { plan: PLAN + '\n## QA Rework Changes\n- fix 500\n' }).decision, undefined);
-  assert.equal(x.state.phase, 'AWAITING_APPROVAL');
+  assert.equal(x.state.phase, 'PLAN'); assert.equal(x.state.approved, false);
 });
 test('re-entering rework preserves the approved plan as a read-only base', () => {
   const first = reworkTransition({
-    phase: 'QA_FAILED', approvedPlanHash: 'sha256-old',
+    phase: 'QA', qaStatus: 'FAIL', approvedPlanHash: 'sha256-old',
     planPath: 'local://forge-plan.md', reworkCycles: 0,
   });
   const retried = reworkTransition(first);
   assert.equal(retried.reworkBasePlanPath, 'local://forge-plan.md');
   assert.equal(retried.planPath, null);
+});
+
+test('QA status controls delivery without inferring PASS from phase', () => {
+  const base = {
+    active: true, phase: 'QA', approved: true, planValid: true,
+    approvedPlanHash: 'approved-hash', planPath: 'local://forge-plan.md',
+    gateAgents: { QA: [] }, reworkCycles: 0,
+  };
+  const blocked = qaReportTransition(base, { status: 'BLOCKED' });
+  assert.equal(blocked.phase, 'QA');
+  assert.equal(blocked.qaStatus, 'BLOCKED');
+  assert.equal(blocked.approved, true);
+  assert.equal(blocked.qaEvidencePending, true);
+  assert.throws(() => assertDeliverySubmittable(blocked), /PASS QA gate/);
+  assert.throws(() => assertDeliverySubmittable({ ...base, qaStatus: null }), /PASS QA gate/);
+
+  const failed = qaReportTransition(base, { status: 'FAIL' });
+  assert.equal(failed.phase, 'PLAN');
+  assert.equal(failed.approved, false);
+  assert.equal(failed.approvedPlanHash, null);
+  assert.equal(failed.reworkBaseHash, 'approved-hash');
+  assert.equal(failed.reworkBasePlanPath, 'local://forge-plan.md');
+  assert.throws(() => assertDeliverySubmittable(failed), /PASS QA gate/);
 });
 
 
@@ -232,7 +266,7 @@ test('summary cross-check: a report\'s CRITICAL/HIGH cannot vanish from the summ
   assert.match(x.pre('forge.requirement_summary', { ...SUMMARY, baseline: 'short' }).reason, /needs a baseline/);
   assert.match(x.pre('forge.requirement_summary', { ...SUMMARY, findings: [{ severity: 'URGENT', title: 'x' }] }).reason, /Finding 1 needs severity CRITICAL\|HIGH\|MEDIUM\|LOW/);
   const ok = { ...SUMMARY, findings: [{ severity: 'HIGH', title: 'No tenant column' }] };
-  assert.match(x.summarize(ok).context, /recorded \(1 CRITICAL\/HIGH, 0 open blocker\(s\)\) → PLANNING/);
+  assert.match(x.summarize(ok).context, /recorded \(1 CRITICAL\/HIGH, 0 open blocker\(s\)\)/);
   assert.deepEqual(x.state.requirementSummary.specialistSeverities, { critical: 1, high: 1 });
   // a second summary is refused: the gate already moved on
   assert.match(x.pre('forge.requirement_summary', ok).reason, /no Forge REQUIREMENT gate is active/);
@@ -275,7 +309,7 @@ test('legacy v6.0 state with requirementStep still completes the requirement gat
   x.agent('forge-requirement');
   assert.deepEqual(x.state.gateAgents.REQUIREMENT, ['forge-requirement']);
   x.summarize();
-  assert.equal(x.state.phase, 'PLANNING');
+  assert.equal(x.state.phase, 'PLAN');
   assert.equal(x.state.requirementSummary.baseline, SUMMARY.baseline);
 });
 
@@ -291,13 +325,13 @@ test('plan written to the host plan file (no inline plan) is validated and appro
   } };
   runGate();
   h({ type: 'tool.post', tool: 'forge.requirement_summary', input: SUMMARY, actor: main });
-  assert.equal(st.phase, 'PLANNING');
+  assert.equal(st.phase, 'PLAN');
   runGate();
   assert.equal(h({ type: 'tool.pre', tool: 'plan.write', input: { file_path: '/home/u/.claude/plans/p.md' }, planFile: '/home/u/.claude/plans/p.md', actor: main }).decision, undefined);
   assert.equal(h({ type: 'tool.pre', tool: 'plan.submit', input: {}, actor: main, permissionMode: 'plan' }).decision, undefined);
-  assert.equal(st.phase, 'AWAITING_APPROVAL');
+  assert.equal(st.phase, 'PLAN'); assert.equal(st.approved, false);
   h({ type: 'tool.post', tool: 'plan.submit', input: {}, actor: main });
-  assert.equal(st.phase, 'EXECUTING');
+  assert.equal(st.phase, 'EXECUTE');
   assert.equal(h({ type: 'tool.pre', tool: 'plan.write', input: {}, planFile: '/x/plans/p.md', actor: main }).decision, 'deny'); // not after approval
 });
 

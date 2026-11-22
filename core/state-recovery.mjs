@@ -3,6 +3,7 @@
  * transitions. Never manufacture an approval or a QA PASS from a phase name.
  */
 import { createHash } from 'node:crypto';
+import { normalizeForgeState } from './forge-state.mjs';
 
 // Checkpoints are JSON data. Sort object keys so equivalent snapshots have the
 // same identity regardless of property insertion order.
@@ -14,7 +15,6 @@ function checkpointFingerprint(state) {
   return createHash('sha256').update(json).digest('hex');
 }
 
-const PLAN_STAGES = new Set(['PLANNING', 'PROPOSAL', 'REWORK_PLANNING']);
 
 /** Same pinning as `/forge rework`: the superseded approved plan becomes the
  * read-only base, and a NEW local:// plan must be written and re-approved. */
@@ -27,65 +27,49 @@ function reworkPin(state) {
   };
 }
 
-export function recoveryProposal(state, nativePlan = 'unknown') {
+export function recoveryProposal(input, nativePlan = 'unknown') {
+  const state = normalizeForgeState(input);
   if (!state || typeof state.phase !== 'string' || !state.active) return null;
   const phase = state.phase;
   const hasApprovedEvidence = state.approved === true && state.planValid === true &&
     typeof state.approvedPlanHash === 'string' && state.approvedPlanHash.length > 0;
-  const written = state.planWritten === true && /^local:\/\/[a-zA-Z0-9][a-zA-Z0-9._-]*-plan\.md$/.test(state.planPath ?? '');
+  const written = state.planWritten === true && (
+    (typeof state.planPath === 'string' && state.planPath.trim().length > 0) ||
+    (state.planValid === true && typeof state.approvedPlanHash === 'string' && state.approvedPlanHash.length > 0)
+  );
   const issue = (key, target, explanation, patch, category = 'mismatch') => ({
     key, current: phase, target, explanation, patch, category,
-    checkpointFingerprint: checkpointFingerprint(state),
+    checkpointFingerprint: checkpointFingerprint(input),
   });
 
-  if (phase === 'EXECUTING' && !hasApprovedEvidence) {
-    return issue('execution-without-approved-plan', written && state.planValid ? 'AWAITING_APPROVAL' : 'PLANNING',
-      'Execution has no verified approved-plan snapshot. Return to the plan/approval gate; do not infer human consent.',
-      { phase: written && state.planValid ? 'AWAITING_APPROVAL' : 'PLANNING', approved: false,
-        executionObserved: false, approvedPlanHash: null }, 'safety');
+  if (phase === 'EXECUTE' && !hasApprovedEvidence) {
+    return issue('execution-without-approved-plan', 'PLAN',
+      'Execution has no verified approved-plan snapshot. Return to the plan gate; do not infer human consent.',
+      { phase: 'PLAN', approved: false, executionObserved: false, approvedPlanHash: null }, 'safety');
   }
-  if (['QA_REVIEW', 'QA_EVIDENCE_PENDING'].includes(phase) && !hasApprovedEvidence) {
-    return issue('qa-without-approved-plan', written && state.planValid ? 'AWAITING_APPROVAL' : 'PLANNING',
+  if (phase === 'QA' && !hasApprovedEvidence) {
+    return issue('qa-without-approved-plan', 'PLAN',
       'QA cannot verify against an approved plan without recorded approval evidence.',
-      { phase: written && state.planValid ? 'AWAITING_APPROVAL' : 'PLANNING', approved: false,
-        approvedPlanHash: null, qaEvidencePending: false }, 'safety');
+      { phase: 'PLAN', approved: false, approvedPlanHash: null, qaEvidencePending: false }, 'safety');
   }
-  if (phase === 'DELIVERY_PREP' && (state.qaStatus !== 'PASS' || !hasApprovedEvidence)) {
-    const target = hasApprovedEvidence && state.qaStatus !== 'FAIL' ? 'QA_EVIDENCE_PENDING' : 'REWORK_PLANNING';
-    return issue('delivery-without-qa-pass', target,
-      'Delivery requires a verifiable QA PASS and existing approved plan.',
-      target === 'QA_EVIDENCE_PENDING'
-        ? { phase: target, approved: true, qaEvidencePending: true }
-        : { phase: target, approved: false, qaEvidencePending: false, ...reworkPin(state) }, 'safety');
-  }
-  if (phase === 'REWORK_PLANNING' && state.approved === true && state.qaStatus === 'BLOCKED' && hasApprovedEvidence) {
-    return issue('evidence-qa-misrouted-to-rework', 'QA_EVIDENCE_PENDING',
-      'QA was blocked by missing evidence rather than a confirmed code failure; the approved plan should remain pinned.',
-      {phase: 'QA_EVIDENCE_PENDING', qaEvidencePending: true}, 'safe-qa');
-  }
-  if (phase === 'REWORK_PLANNING' && state.approved === true) {
-    return issue('rework-still-approved', 'REWORK_PLANNING',
+  if (phase === 'PLAN' && state.approved === true && state.qaStatus === 'FAIL') {
+    return issue('rework-still-approved', 'PLAN',
       'Rework must not inherit permission to execute under a superseded approval.',
-      {phase:'REWORK_PLANNING', approved: false, ...reworkPin(state)}, 'safety');
+      { phase: 'PLAN', approved: false, ...reworkPin(state) }, 'safety');
   }
-  if (phase === 'REWORK_PLANNING' && written) {
-    return issue('saved-rework-plan-stuck', 'PROPOSAL',
-      'A new session-local plan write is recorded. The next step is a fresh native human review, not implementation.',
-      { phase: 'PROPOSAL', proposalDeferred: true }, 'plan');
-  }
-  if (phase === 'PROPOSAL' && !written) {
-    return issue('proposal-without-plan', 'PLANNING',
-      'Forge shows Proposal but has no successfully recorded canonical plan write.',
-      {phase: 'PLANNING', proposalDeferred: false, planWritten: false}, 'plan');
+  if (phase === 'PLAN' && state.planWritten === true && !written) {
+    return issue('proposal-without-plan', 'PLAN',
+      'Forge has no successfully recorded canonical plan write.',
+      { phase: 'PLAN', proposalDeferred: false, planWritten: false, planValid: false, approved: false, approvedPlanHash: null }, 'plan');
   }
   if (phase === 'REQUIREMENT' && state.approved === true) {
     // An inconsistent record is not proof that the implementation gate can
     // resume. Deliberately revoke executable privileges; require new review.
-    return issue('requirement-still-approved', 'PLANNING',
+    return issue('requirement-still-approved', 'PLAN',
       'Requirement state and an approval flag conflict. A prior approval cannot be replayed without matching native review evidence.',
-      {phase:'PLANNING', approved:false, approvedPlanHash:null, planValid:false, planWritten:false}, 'safety');
+      {phase:'PLAN', approved:false, approvedPlanHash:null, planValid:false, planWritten:false}, 'safety');
   }
-  if (PLAN_STAGES.has(phase) && nativePlan === 'inactive') {
+  if (phase === 'PLAN' && nativePlan === 'inactive') {
     return issue('native-plan-mode-inactive', phase,
       'Forge is planning, but native OMP Plan Mode is inactive. Activate Plan Mode before saving/submitting the plan; keep the same Gate.',
       {}, 'native-mode');
@@ -95,15 +79,15 @@ export function recoveryProposal(state, nativePlan = 'unknown') {
 
 /** Only mutate the exact candidate derived from the CURRENT checkpoint. */
 export function applyRecoveryProposal(state, proposal) {
-  if (!state || !proposal || !state.active) throw new Error('No active state to recover');
+  if (!state || !proposal || !normalizeForgeState(state).active) throw new Error('No active state to recover');
   const current = recoveryProposal(state, proposal.category === 'native-mode' ? 'inactive' : 'unknown');
   if (!current || current.key !== proposal.key || current.current !== proposal.current ||
       current.target !== proposal.target || current.category !== proposal.category ||
       current.checkpointFingerprint !== proposal.checkpointFingerprint) {
     throw new Error('Recovery suggestion expired; re-check state');
   }
-  if (proposal.category === 'native-mode') return state;
-  return { ...state, ...current.patch, recoveryAudit: [ ...(state.recoveryAudit ?? []), {
+  if (proposal.category === 'native-mode') return normalizeForgeState(state);
+  return { ...normalizeForgeState(state), ...current.patch, recoveryAudit: [ ...(state.recoveryAudit ?? []), {
     from: current.current, to: current.target, reason: current.key,
     reviewedBy: 'human', at: new Date().toISOString(),
   } ], version: Math.max(Number(state.version) || 8, 9) };

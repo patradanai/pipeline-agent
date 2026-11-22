@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { recoveryProposal, applyRecoveryProposal } from '../core/state-recovery.mjs';
+import { isResumableForgeState, normalizeForgeState } from '../core/forge-state.mjs';
 
 const rework = {
-  active: true, phase: 'REWORK_PLANNING', approved: true, planValid: true,
+  active: true, phase: 'PLAN', approved: true, planValid: true,
   planWritten: true, approvedPlanHash: 'new-hash', planPath: 'local://new-plan.md',
   qaStatus: 'FAIL',
 };
@@ -53,4 +54,71 @@ test('partial rework base remains partial rather than borrowing a different plan
 test('proposal category cannot be changed to bypass recovery', () => {
   const proposal = recoveryProposal(rework);
   assert.throws(() => applyRecoveryProposal(rework, { ...proposal, category: 'native-mode' }), /suggestion expired/);
+});
+
+test('legacy approval checkpoints never manufacture approval', () => {
+  for (const phase of ['PLANNING', 'PROPOSAL', 'AWAITING_APPROVAL', 'PLAN_MODE_PENDING']) {
+    const migrated = normalizeForgeState({ active: true, phase, planWritten: true, planValid: true, approved: false });
+    assert.equal(migrated.phase, 'PLAN');
+    assert.equal(migrated.approved, false);
+    assert.equal(migrated.planWritten, true);
+    assert.equal(migrated.planValid, true);
+  }
+  const approved = normalizeForgeState({ active: true, phase: 'EXECUTING', approved: true, approvedPlanHash: 'hash' });
+  assert.equal(approved.phase, 'EXECUTE');
+  assert.equal(approved.approved, true);
+  assert.equal(approved.approvedPlanHash, 'hash');
+});
+
+test('legacy delivery phase does not imply QA PASS', () => {
+  for (const phase of ['QA_REVIEW', 'QA_EVIDENCE_PENDING', 'DELIVERY_PREP', 'DELIVERY_BLOCKED']) {
+    const migrated = normalizeForgeState({ active: true, phase, approved: true });
+    assert.equal(migrated.phase, 'QA');
+    assert.equal(migrated.qaStatus, undefined);
+  }
+  const passed = normalizeForgeState({ active: true, phase: 'DELIVERY_PREP', qaStatus: 'PASS', workingTreeAtQa: { hash: 'h' } });
+  assert.equal(passed.qaStatus, 'PASS');
+  assert.deepEqual(passed.workingTreeAtQa, { hash: 'h' });
+});
+
+test('legacy gate records merge into four phases without losing specialists', () => {
+  const migrated = normalizeForgeState({
+    active: true, phase: 'DELIVERY_PREP',
+    gateAgents: { PLANNING: ['planner'], QA_REVIEW: ['qa', 'reviewer'], DELIVERY_PREP: ['delivery'], QA: ['qa'] },
+    gateAgentsSpawned: { QA_REVIEW: ['qa'], DELIVERY_PREP: ['delivery'] },
+    agentRetries: { QA_REVIEW: 2, DELIVERY_PREP: 1 },
+  });
+  assert.deepEqual(migrated.gateAgents, { PLAN: ['planner'], QA: ['qa', 'reviewer', 'delivery'] });
+  assert.deepEqual(migrated.gateAgentsSpawned, { QA: ['qa', 'delivery'] });
+  assert.deepEqual(migrated.agentRetries, { QA: 2 });
+});
+
+test('legacy rework clears approval and superseded planning agents', () => {
+  const migrated = normalizeForgeState({
+    active: true, phase: 'REWORK_PLANNING', approved: true, planWritten: true, planValid: true,
+    approvedPlanHash: 'old-hash', planPath: 'local://old-plan.md',
+    gateAgents: { PLANNING: ['old-planner'], REWORK_PLANNING: ['new-planner'] },
+  });
+  assert.equal(migrated.phase, 'PLAN');
+  assert.equal(migrated.approved, false);
+  assert.equal(migrated.approvedPlanHash, null);
+  assert.equal(migrated.planPath, null);
+  assert.equal(migrated.reworkBaseHash, 'old-hash');
+  assert.equal(migrated.reworkBasePlanPath, 'local://old-plan.md');
+  assert.deepEqual(migrated.gateAgents, { PLAN: ['new-planner'] });
+});
+
+test('completed legacy delivery stays inactive and cannot resume', () => {
+  const completed = normalizeForgeState({ active: false, phase: 'DELIVERY', qaStatus: 'PASS' });
+  assert.equal(completed.phase, 'QA');
+  assert.equal(completed.active, false);
+  assert.equal(completed.qaStatus, 'PASS');
+  assert.equal(isResumableForgeState(completed), false);
+});
+
+test('plan recovery accepts native filesystem paths and validated inline plans', () => {
+  const plan = { active: true, phase: 'PLAN', approved: false, planWritten: true, planValid: true, approvedPlanHash: 'plan-hash' };
+  assert.equal(recoveryProposal({ ...plan, planPath: '/Users/example/.claude/plans/plan.md' }), null);
+  assert.equal(recoveryProposal({ ...plan, planPath: null }), null);
+  assert.equal(recoveryProposal({ ...plan, planPath: null, approvedPlanHash: null }).key, 'proposal-without-plan');
 });

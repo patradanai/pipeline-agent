@@ -174,7 +174,9 @@ function traceEvent(hookEvent, input, event, before, after, out) {
       responseKeys: input.tool_response && typeof input.tool_response === 'object' ? Object.keys(input.tool_response).slice(0, 8) : null,
       phaseBefore: before?.phase ?? null, phaseAfter: after?.phase ?? null,
       summaryRequested: after?.requirementSummaryRequested ? true : null,
-      approvedAfter: after?.approved ?? null, qaStatus: after?.qaStatus ?? null,
+      approvedAfter: after?.approved ?? null, planValidAfter: after?.planValid ?? null,
+      activeAfter: after?.active ?? null, qaStatus: after?.qaStatus ?? null,
+      reworkCycles: after?.reworkCycles ?? null,
       decision: out?.decision ?? (out?.continueReason ? 'continue' : null), reason: out?.reason ? String(out.reason).slice(0, 160) : null,
       context: Boolean(out?.context || out?.continueReason), carried: after?.carriedFromSession ? true : null, adopted: after?.adoptedFromSession ? true : null,
     };
@@ -194,12 +196,14 @@ function listProjectWorkflows(cwd, currentSid) {
 }
 
 /** Claude Code may start a fresh session when the user approves a plan with "clear context". */
-function carryAcrossClear(input) {
+function carryAcrossClear(input, normalizeForgeState) {
   if (input.source !== 'clear' || existsSync(sessionFile(input.session_id))) return null;
   const pointer = readJson(projectPointer(input.cwd));
   if (!pointer || pointer.sessionId === input.session_id || Date.now() - Date.parse(pointer.at) > 120_000) return null;
-  const prev = readJson(sessionFile(pointer.sessionId))?.state;
-  if (!prev?.active || !['AWAITING_APPROVAL', 'EXECUTING'].includes(prev.phase) || prev.slug !== pointer.slug) return null;
+  const prev = normalizeForgeState(readJson(sessionFile(pointer.sessionId))?.state);
+  const reviewing = prev?.phase === 'PLAN' && prev.planWritten && prev.planValid && !prev.approved;
+  const executing = prev?.phase === 'EXECUTE' && prev.approved && prev.planValid && prev.approvedPlanHash;
+  if (!prev?.active || (!reviewing && !executing) || prev.slug !== pointer.slug) return null;
   return { ...prev, carriedFromSession: pointer.sessionId, recoveryAudit: [...(prev.recoveryAudit ?? []), { from: prev.phase, to: prev.phase, reason: 'claude-code-clear-context-handoff', reviewedBy: 'native-plan-review', at: new Date().toISOString() }].slice(-20) };
 }
 
@@ -212,15 +216,16 @@ export async function main(hookEvent, raw) {
   const forgeChild = event.actor?.kind === 'sub' && /(?:^|:)forge-[a-z-]+$/.test(String(event.actor.agent ?? ''));
   if (!existsSync(sessionFile(sid)) && event.type !== 'command' && !forgeChild && !(event.type === 'session.start' && ['clear', 'resume', 'fork', 'startup'].includes(input.source))) return {};
 
-  const [{ createEngine }, workspace] = await Promise.all([
+  const [{ createEngine }, workspace, { normalizeForgeState }] = await Promise.all([
     import(pathToFileURL(join(CORE, 'engine.mjs')).href),
     import(pathToFileURL(join(CORE, 'workspace.mjs')).href),
+    import(pathToFileURL(join(CORE, 'forge-state.mjs')).href),
   ]);
   return withLock(sid, async () => {
     const config = readJson(join(DATA, 'config.json')) ?? {};
     const record = readJson(sessionFile(sid));
-    let state = record?.state ?? null;
-    if (event.type === 'session.start' && !state) state = carryAcrossClear(input);
+    let state = normalizeForgeState(record?.state ?? null);
+    if (event.type === 'session.start' && !state) state = carryAcrossClear(input, normalizeForgeState);
     if (event.type === 'session.start' && !state) {
       // A forked/new session of a project with saved Forge work: point to /forge-resume (no state change).
       const others = listProjectWorkflows(input.cwd, sid).filter(w => w.state?.active || /_BLOCKED$|QA_FAILED/.test(w.state?.phase ?? ''));
@@ -256,13 +261,14 @@ export async function main(hookEvent, raw) {
       if (rec) writeJson(other, { ...rec, savedAt: new Date().toISOString(), state: { active: false, version: 9, cancelledSlug: rec.state?.slug, movedToSession: sid } });
     }
     if (out.configUpdate) writeJson(join(DATA, 'config.json'), { ...config, ...out.configUpdate });
-    if (next !== state || (event.type === 'session.start' && next)) {
+    if (next !== state || state !== (record?.state ?? null) || (event.type === 'session.start' && next)) {
       writeJson(sessionFile(sid), { schema: 1, sessionId: sid, cwd: input.cwd, savedAt: new Date().toISOString(), state: next });
-      if (next?.active && ['AWAITING_APPROVAL', 'EXECUTING'].includes(next.phase)) {
+      if (next?.active && ((next.phase === 'PLAN' && next.planWritten && next.planValid && !next.approved) ||
+          (next.phase === 'EXECUTE' && next.approved && next.planValid && next.approvedPlanHash))) {
         writeJson(projectPointer(input.cwd), { sessionId: sid, slug: next.slug, phase: next.phase, at: new Date().toISOString() });
       }
     }
-    if (event.type === 'session.start' && next?.carriedFromSession && next.phase === 'AWAITING_APPROVAL') {
+    if (event.type === 'session.start' && next?.carriedFromSession && next.phase === 'PLAN' && !next.approved) {
       out.context = `${out.context ?? ''}\nThe context was cleared right after this plan was submitted, so Forge could not observe the approval. If the user approved the plan, ask them to type /forge approve; otherwise wait.`;
     }
     return render(hookEvent, out, sid);

@@ -2,7 +2,7 @@
 import { createReadStream } from 'node:fs';
 import { createInterface } from 'node:readline';
 
-import { FORGE_STATE_ENTRY, isResumableForgeState } from './forge-state.mjs';
+import { FORGE_STATE_ENTRY, isResumableForgeState, normalizeForgeState } from './forge-state.mjs';
 export { FORGE_STATE_ENTRY, isResumableForgeState };
 
 export async function readLatestForgeState(sessionPath) {
@@ -62,7 +62,7 @@ export async function discoverForgeSessions(sessions, { readState=readLatestForg
     while (next < unique.length) {
       const i = next++;
       try {
-        const state = await readState(unique[i].path);
+        const state = normalizeForgeState(await readState(unique[i].path));
         if (isResumableForgeState(state)) results[i] = { info: unique[i], state };
       } catch { /* unreadable session cannot be presented as safe to resume */ }
     }
@@ -85,11 +85,18 @@ export function forgeSessionLabel(item, index, { showCwd=false }={}) {
  * of treating an unrelated REQUIREMENT as the intended EXECUTING checkpoint.
  */
 export function sameResumeCheckpoint(selected, restored) {
+  selected = normalizeForgeState(selected);
+  restored = normalizeForgeState(restored);
   if (!isResumableForgeState(selected) || !isResumableForgeState(restored)) return false;
   if (selected.phase !== restored.phase) return false;
   if (selected.slug && restored.slug && selected.slug !== restored.slug) return false;
   if (selected.requirement && restored.requirement && selected.requirement !== restored.requirement) return false;
   if (Boolean(selected.approved) !== Boolean(restored.approved)) return false;
-  if (selected.approvedPlanHash && restored.approvedPlanHash && selected.approvedPlanHash !== restored.approvedPlanHash) return false;
+  if ((selected.approvedPlanHash ?? null) !== (restored.approvedPlanHash ?? null)) return false;
+  if ((selected.qaStatus ?? null) !== (restored.qaStatus ?? null)) return false;
+  if (Boolean(selected.qaEvidencePending) !== Boolean(restored.qaEvidencePending)) return false;
+  if (Boolean(selected.planWritten) !== Boolean(restored.planWritten) || Boolean(selected.planValid) !== Boolean(restored.planValid)) return false;
+  if ((selected.reworkCycles ?? 0) !== (restored.reworkCycles ?? 0)) return false;
+  if ((selected.deliveryPath ?? null) !== (restored.deliveryPath ?? null)) return false;
   return true;
 }

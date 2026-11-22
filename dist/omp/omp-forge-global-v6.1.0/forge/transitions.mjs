@@ -17,11 +17,11 @@ export function markGateAgent(state, agentName) {
 
 /** Human approved the plan through the platform's native approval. */
 export function approvedExecutionState(state, auditReason) {
-  return { ...state, phase: 'EXECUTING', approved: true, reworkBaseHash: null, executionObserved: false,
+  return { ...state, phase: 'EXECUTE', approved: true, reworkBaseHash: null, executionObserved: false,
     nativeApprovalPending: null,
-    gateAgents: { ...(state.gateAgents ?? {}), EXECUTING: [] }, agentRetries: { ...(state.agentRetries ?? {}), EXECUTING: 0 },
+    gateAgents: { ...(state.gateAgents ?? {}), EXECUTE: [] }, agentRetries: { ...(state.agentRetries ?? {}), EXECUTE: 0 },
     ...(auditReason ? { recoveryAudit: [ ...(state.recoveryAudit ?? []), {
-      from: state.phase, to: 'EXECUTING', reason: auditReason, reviewedBy: 'native-plan-review', at: new Date().toISOString(),
+      from: state.phase, to: 'EXECUTE', reason: auditReason, reviewedBy: 'native-plan-review', at: new Date().toISOString(),
     } ].slice(-20) } : {}) };
 }
 
@@ -31,7 +31,7 @@ export function qaReportTransition(state, report, { reportPath, workingTree = nu
   const evidencePending = report.status === 'BLOCKED';
   return {
     ...state,
-    phase: failed ? 'REWORK_PLANNING' : evidencePending ? 'QA_EVIDENCE_PENDING' : 'DELIVERY_PREP',
+    phase: failed ? 'PLAN' : 'QA',
     reworkBasePlanPath: failed ? state.planPath : state.reworkBasePlanPath,
     planPath: failed ? null : state.planPath,
     planWritten: failed ? false : state.planWritten,
@@ -39,30 +39,30 @@ export function qaReportTransition(state, report, { reportPath, workingTree = nu
     approvedPlanHash: failed ? null : state.approvedPlanHash,
     reworkBaseHash: failed ? state.approvedPlanHash : state.reworkBaseHash,
     active: true,
-    approved: !failed,
+    approved: failed ? false : state.approved,
     qaStatus: report.status,
     qaEvidencePending: evidencePending,
     qaReportPath: reportPath,
     workingTreeAtQa: workingTree,
     reworkCycles: failed ? (state.reworkCycles ?? 0) + 1 : (state.reworkCycles ?? 0),
-    gateAgents: { ...(state.gateAgents ?? {}), ...(failed ? { PLANNING: [], EXECUTING: [], QA_REVIEW: [] } : report.status === 'PASS' ? { DELIVERY_PREP: [] } : {}) },
-    agentRetries: { ...(state.agentRetries ?? {}), ...(failed ? { PLANNING: 0, EXECUTING: 0, QA_REVIEW: 0 } : report.status === 'PASS' ? { DELIVERY_PREP: 0 } : {}) },
+    gateAgents: { ...(state.gateAgents ?? {}), ...(failed ? { PLAN: [], EXECUTE: [], QA: [] } : {}) },
+    agentRetries: { ...(state.agentRetries ?? {}), ...(failed ? { PLAN: 0, EXECUTE: 0, QA: 0 } : {}) },
   };
 }
 
 /** Preconditions shared by adapters before accepting a QA submission. Throws with an actionable message. */
 export function assertQaSubmittable(state, submission) {
-  if (!state || state.phase !== 'QA_REVIEW' || !state.approved || !state.planValid || !state.approvedPlanHash) {
-    throw new Error('Forge QA report can be submitted only during approved QA_REVIEW.');
+  if (!state?.active || state.phase !== 'QA' || state.qaStatus === 'PASS' || !state.approved || !state.planValid || !state.approvedPlanHash) {
+    throw new Error('Forge QA report can be submitted only during approved QA review.');
   }
-  if (!hasGateAgents(state, 'QA_REVIEW') && (submission?.codeReview?.status === 'PASS')) {
+  if (!hasGateAgents(state) && (submission?.codeReview?.status === 'PASS')) {
     throw new Error(`Independent QA specialists ${requiredAgentsFor(state).join(' and ')} must both run before PASS.`);
   }
 }
 
 export function assertDeliverySubmittable(state, workingTreeNow) {
-  if (!state || state.phase !== 'DELIVERY_PREP' || state.qaStatus !== 'PASS') throw new Error('Delivery requires a PASS QA gate.');
-  if (!hasGateAgents(state, 'DELIVERY_PREP')) throw new Error(`Independent ${requiredAgentsFor(state).join(', ')} agent must run before delivery submission.`);
+  if (!state?.active || state.phase !== 'QA' || state.qaStatus !== 'PASS' || !state.approved || !state.planValid || !state.approvedPlanHash) throw new Error('Delivery requires a PASS QA gate.');
+  if (!hasGateAgents(state)) throw new Error(`Independent ${requiredAgentsFor(state).join(', ')} agent must run before delivery submission.`);
   const qa = state.workingTreeAtQa;
   if (qa?.available && (!workingTreeNow?.available || workingTreeNow.hash !== qa.hash || workingTreeNow.root !== qa.root)) {
     throw new Error('Working tree changed after QA PASS. Delivery blocked; rerun QA against the current diff.');
@@ -70,17 +70,17 @@ export function assertDeliverySubmittable(state, workingTreeNow) {
 }
 
 export function deliveryTransition(state, { deliveryPath, commitMessagePath, commitMessage }) {
-  return { ...state, phase: 'DELIVERY', active: false, deliveryPath, commitMessagePath, commitMessage };
+  return { ...state, phase: 'QA', active: false, deliveryPath, commitMessagePath, commitMessage };
 }
 
 /** Explicit human request for a new plan after QA FAIL/BLOCKED. */
 export function reworkTransition(state) {
   const previousHash = state.approvedPlanHash ?? state.reworkBaseHash ?? null;
-  return { ...state, active: true, approved: false, qaEvidencePending: false, phase: 'REWORK_PLANNING', planWritten: false, planValid: false, approvedPlanHash: null,
+  return { ...state, active: true, approved: false, qaEvidencePending: false, phase: 'PLAN', planWritten: false, planValid: false, approvedPlanHash: null,
     reworkBaseHash: previousHash, reworkBasePlanPath: state.reworkBasePlanPath ?? state.planPath, planPath: null,
 
-    reworkCycles: (state.reworkCycles ?? 0) + (state.phase === 'QA_EVIDENCE_PENDING' ? 1 : 0),
-    gateAgents: { ...(state.gateAgents ?? {}), REWORK_PLANNING: [] }, agentRetries: { ...(state.agentRetries ?? {}), REWORK_PLANNING: 0 } };
+    reworkCycles: (state.reworkCycles ?? 0) + (state.qaStatus === 'BLOCKED' ? 1 : 0),
+    gateAgents: { ...(state.gateAgents ?? {}), PLAN: [] }, agentRetries: { ...(state.agentRetries ?? {}), PLAN: 0 } };
 }
 
 /** Validate and apply forge_requirement_summary: the requirement gate then opens PLANNING.
@@ -99,7 +99,7 @@ export function applyRequirementSummary(state, params) {
     throw new Error(`the requirement report contains ${reported.critical} CRITICAL and ${reported.high} HIGH label(s), but the summary lists no CRITICAL/HIGH finding. Keep the report's original severity (merge duplicates only) and resubmit.`);
   }
   return {
-    state: { ...state, phase: 'PLANNING', planWritten: false, requirementSummary: { ...summary, specialistSeverities: reported } },
+    state: { ...state, phase: 'PLAN', planWritten: false, requirementSummary: { ...summary, specialistSeverities: reported } },
     summarizedHigh, summary,
   };
 }

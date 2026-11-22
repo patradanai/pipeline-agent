@@ -12,19 +12,23 @@ test('chain advances in order without user commands', () => {
   const phases = ['REQUIREMENT'];
   let next;
   while ((next = nextPhase(phases.at(-1)))) phases.push(next);
-  assert.deepEqual(phases, ['REQUIREMENT','PLANNING','PROPOSAL']);
+  assert.deepEqual(phases, ['REQUIREMENT','PLAN','EXECUTE','QA']);
 });
 test('each phase has domain-independent instructions', () => {
   const s = initialState('A cross-platform note-taking app', 'forge-test');
-  for (const phase of ['REQUIREMENT','PLANNING','PROPOSAL']) {
+  for (const phase of ['REQUIREMENT','PLAN']) {
     const prompt = phaseInstruction({ ...s, phase });
     assert.match(prompt, /OMP FORGE — GLOBAL REQUIREMENT HARNESS/);
     assert.match(prompt, /Do not edit the project/);
   }
   const req = phaseInstruction(s);
-  assert.match(req, /\[GATE 1\/6: REQUIREMENT — single-pass analysis\]/);
+  assert.match(req, /\[GATE 1\/4: REQUIREMENT — single-pass analysis\]/);
   assert.doesNotMatch(req, /forge-critic|forge-architect|forge-qa-strategist/);
-  assert.match(phaseInstruction({ ...s, phase:'PROPOSAL' }), /xd:\/\/propose/);
+  assert.match(phaseInstruction({ ...s, phase:'PLAN', planWritten:true }), /xd:\/\/propose/);
+  assert.match(phaseInstruction({ ...s, phase:'PLAN', planWritten:true, planValid:true }), /awaiting explicit operator approval/);
+  assert.match(phaseInstruction({ ...s, phase:'EXECUTE', approved:true }), /forge-executor/);
+  assert.match(phaseInstruction({ ...s, phase:'QA' }), /forge-qa/);
+  assert.match(phaseInstruction({ ...s, phase:'QA', qaStatus:'PASS' }), /forge-delivery/);
 });
 test('auto routing excludes commands, images and active workflows', () => {
   assert.equal(isAutoEligible('Build a CRM', 'interactive', false), true);
@@ -165,7 +169,7 @@ test('rework and delivery prompts never authorize Git writes', () => {
 test('rework planning uses a separate revision path and preserves it through Refine', () => {
   const base = {
     ...initialState('Manage bookings', 'forge-test'),
-    phase: 'REWORK_PLANNING',
+    phase: 'PLAN',
     reworkBaseHash: 'sha256-old',
     reworkBasePlanPath: 'local://forge-test-plan.md',
     reworkCycles: 1,
@@ -175,13 +179,13 @@ test('rework planning uses a separate revision path and preserves it through Ref
   assert.match(firstPrompt, /Save a revised plan to local:\/\/forge-test-rework-1-plan\.md/);
   assert.doesNotMatch(firstPrompt, /Save a revised plan to local:\/\/forge-test-plan\.md/);
   const legacyPrompt = phaseInstruction({
-    ...base, phase: 'PLANNING', reworkBasePlanPath: null, planPath: 'local://forge-test-plan.md',
+    ...base, reworkBasePlanPath: null, planPath: 'local://forge-test-plan.md',
   });
   assert.match(legacyPrompt, /keep editing the same rework revision at local:\/\/forge-test-rework-1-plan\.md/);
 
 
   const refinedPrompt = phaseInstruction({
-    ...base, phase: 'PLANNING', planPath: 'local://forge-test-rework-1-plan.md',
+    ...base, planPath: 'local://forge-test-rework-1-plan.md',
   });
   assert.match(refinedPrompt, /QA FAILED: REWORK PLAN/);
   assert.match(refinedPrompt, /keep editing the same rework revision at local:\/\/forge-test-rework-1-plan\.md/);
@@ -189,12 +193,13 @@ test('rework planning uses a separate revision path and preserves it through Ref
 
 
 test('global gate contract identifies exact agent ownership', async () => {
-  const {GATE_AGENTS,missingGateAgents}=await import('../forge/core.mjs');
+  const {GATE_AGENTS,missingGateAgents,missingGateAgentsFor}=await import('../forge/core.mjs');
   assert.deepEqual(GATE_AGENTS.REQUIREMENT,['forge-requirement']);
   assert.deepEqual(missingGateAgents('REQUIREMENT',[]),['forge-requirement']);
-  assert.deepEqual(missingGateAgents('QA_REVIEW',['forge-qa']),['forge-code-reviewer']);
-  assert.deepEqual(missingGateAgents('DELIVERY_PREP',['forge-delivery']),[]);
-  assert.deepEqual(missingGateAgents('AWAITING_APPROVAL',[]),[]);
+  const state=initialState('Build feature','forge-test');
+  assert.deepEqual(missingGateAgentsFor({...state,phase:'QA',gateAgents:{QA:['forge-qa']}}),['forge-code-reviewer']);
+  assert.deepEqual(missingGateAgentsFor({...state,phase:'QA',qaStatus:'PASS',gateAgents:{QA:['forge-delivery']}}),[]);
+  assert.deepEqual(missingGateAgentsFor({...state,phase:'QA',qaStatus:'PASS',gateAgents:{QA:['forge-qa','forge-code-reviewer']}}),['forge-delivery']);
 });
 
 test('v5 rejects plan without exact parseable Test Case IDs', () => {
@@ -244,23 +249,29 @@ test('v6.1: summary normalization caps and validates', () => {
   const s=normalizeRequirementSummary({baseline:'Goal and scope and acceptance criteria here',findings:Array.from({length:60},(_,i)=>({severity:'low',title:'t'+i}))});
   assert.equal(s.findings.length,40); assert.equal(s.findings[0].severity,'LOW'); assert.equal(s.findings[0].id,'F-001');
 });
-test('v6.1: v5 requirement sub-phases migrate to REQUIREMENT; other states unchanged', () => {
+test('legacy phases migrate without inventing gate evidence', () => {
   for (const phase of ['DISCOVERY','COOKING','CHALLENGE']) {
     const legacy={active:true,phase,gateAgents:{COOKING:['forge-critic']},requirement:'x'};
     const m=migrateLegacyRequirementState(legacy);
-    assert.equal(m.phase,'REQUIREMENT'); assert.equal(m.version,6);
-    assert.deepEqual(m.gateAgents,legacy.gateAgents);
+    assert.equal(m.phase,'REQUIREMENT');
+    assert.deepEqual(m.gateAgents,{});
   }
-  const planning={active:true,phase:'PLANNING'};
+  for (const [legacy, phase] of [['PLANNING','PLAN'],['EXECUTING','EXECUTE'],['QA_REVIEW','QA'],['DELIVERY_PREP','QA']]) {
+    const m=migrateLegacyRequirementState({active:true,phase:legacy});
+    assert.equal(m.phase,phase);
+    assert.notEqual(m.approved,true);
+    assert.notEqual(m.qaStatus,'PASS');
+  }
+  const planning={active:true,phase:'PLAN'};
   assert.equal(migrateLegacyRequirementState(planning),planning);
 });
-test('v6.1: summary prompt and PLANNING instruction carry the synthesis', () => {
+test('summary prompt and PLAN instruction carry the synthesis', () => {
   const s=init61('Req','forge-x');
   assert.match(requirementSummaryInstruction(s),/^\[FORGE REQUIREMENT — report received\]/);
   assert.match(requirementSummaryInstruction(s),/forge_requirement_summary/);
   const summary=normalizeRequirementSummary({baseline:'Goal: export CSV; scope: reports only',findings:[{severity:'medium',title:'Encoding unspecified'}],blockers:['Max rows?']});
-  const planning=phaseInstruction({...s,phase:'PLANNING',requirementSummary:summary});
-  assert.match(planning,/\[GATE 2\/6: PLANNING\]/);
+  const planning=phaseInstruction({...s,phase:'PLAN',requirementSummary:summary});
+  assert.match(planning,/\[GATE 2\/4: PLANNING\]/);
   assert.match(planning,/Use this requirement synthesis as the starting point[\s\S]*Goal: export CSV[\s\S]*\[MEDIUM\] Encoding unspecified[\s\S]*Max rows\?/);
 });
 

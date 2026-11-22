@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync, copyFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import forgeExtension from '../forge/index.ts';
@@ -10,6 +10,11 @@ const fakeZ = new Proxy({}, { get:()=> (..._args)=>({ optional(){return this;} }
 const tmp = mkdtempSync(join(tmpdir(), 'forge-session-picker-'));
 const agentDir = join(tmp, 'agents'); mkdirSync(agentDir, {recursive:true});
 process.env.PI_CODING_AGENT_DIR = tmp;
+for (const name of ['forge-requirement-gate','forge-plan-gate','forge-execute-gate','forge-qa-gate']) {
+  const dir = join(tmp, 'skills', name);
+  mkdirSync(dir, {recursive:true});
+  copyFileSync(new URL(`../skills/${name}/SKILL.md`, import.meta.url), join(dir, 'SKILL.md'));
+}
 process.env.FORGE_CONFIG_PATH = join(tmp,'config.json');
 process.env.FORGE_REPORT_DIR = join(tmp,'reports');
 writeFileSync(process.env.FORGE_CONFIG_PATH, JSON.stringify({ autoStart:false }));
@@ -24,7 +29,7 @@ function session(name, states) {
   return path;
 }
 
-const active = {active:true,phase:'PLANNING',slug:'booking',planWritten:false,approved:false};
+const active = {active:true,phase:'PLAN',slug:'booking',planWritten:false,approved:false};
 const blocked = {active:false,phase:'PLAN_MODE_BLOCKED',blockedFrom:'PROPOSAL',slug:'billing',planWritten:true,planValid:false,approved:false};
 const finished = {active:false,phase:'DELIVERY',slug:'old'};
 
@@ -39,8 +44,8 @@ test('lists active and explicitly blocked Forge sessions, never cancelled ones',
   const c=session('cancelled',[active,{active:false,version:8}]);
   const entries=await discoverForgeSessions([{path:a,title:'Booking'},{path:b,title:'Billing'},{path:c,title:'Cancelled'}]);
   assert.equal(entries.length,2);
-  assert.match(forgeSessionLabel(entries[0],0),/PLANNING.*Booking/);
-  assert.match(forgeSessionLabel(entries[1],1),/PLAN MODE BLOCKED.*Billing/);
+  assert.match(forgeSessionLabel(entries[0],0),/PLAN.*Booking/);
+  assert.match(forgeSessionLabel(entries[1],1),/PLAN.*Billing/);
 });
 
 test('OMP v19 PickerListing resolves the complete scan rather than its indexed preview',async()=>{
@@ -85,7 +90,7 @@ test('/forge resume offers past Forge session, switches natively and continues w
   assert.equal(calls[1][1],savedPath);
   assert.equal(calls[2][0],'message');
   assert.match(calls[2][1],/PLANNING/);
-  assert.equal(branch.at(-1).data.phase,'PLANNING');
+  assert.equal(branch.at(-1).data.phase,'PLAN');
   assert.equal(branch.at(-1).data.approved,false);
 });
 
@@ -139,7 +144,7 @@ test('checkpoint matcher rejects a stale EXECUTING preview if OMP selected branc
 });
 
 test('/forge resume recovers selected EXECUTING workflow while another REQUIREMENT auto is active',async()=>{
-  const executing={active:true,phase:'EXECUTING',requirement:'Add cart validation',slug:'forge-cart',approved:true,planValid:true,approvedPlanHash:'approved-hash',executionObserved:false};
+  const executing={active:true,phase:'EXECUTE',requirement:'Add cart validation',slug:'forge-cart',approved:true,planValid:true,approvedPlanHash:'approved-hash',executionObserved:false};
   const wrong={active:true,phase:'REQUIREMENT',requirement:'auto',slug:'forge-auto',approved:false};
   const file=session('execution-saved',[executing]);
   const calls=[]; const notifications=[]; const commands=new Map(); const events=new Map();
@@ -154,18 +159,18 @@ test('/forge resume recovers selected EXECUTING workflow while another REQUIREME
   const pi={zod:fakeZ,setLabel(){},on(n,fn){events.set(n,fn)},registerCommand(n,c){commands.set(n,c)},registerTool(){},appendEntry(n,d){branch.push({type:'custom',customType:n,data:d})},sendUserMessage(text){calls.push(['send',text])}};
   forgeExtension(pi);
   const ctx={agent:{kind:'main'},mode:'tui',cwd:tmp,sessionManager:new Manager(),
-    ui:{setWidget(){},notify(message){notifications.push(message)},async select(_title,options){calls.push(['select',options]);return options.find(x=>x.includes('EXECUTING'))}},
+    ui:{setWidget(){},notify(message){notifications.push(message)},async select(_title,options){calls.push(['select',options]);return options.find(x=>x.includes('EXECUTE'))}},
     sessionModes:{getState(){return {plan:'inactive'}}},
     async switchSession(path){calls.push(['switch',path]);currentFile=path;branch=[{type:'custom',customType:FORGE_STATE_ENTRY,data:executing}];await events.get('session_switch')({},ctx);return {cancelled:false}}};
   await events.get('session_start')({},ctx);
   await commands.get('forge').handler('resume',ctx);
   assert.ok(calls.some(x=>x[0]==='switch'&&x[1]===file));
-  assert.ok(notifications.some(x=>x.includes('Restored EXECUTING')));
-  assert.equal(branch.at(-1).data.phase,'EXECUTING');
+  assert.ok(notifications.some(x=>x.includes('Restored EXECUTE')));
+  assert.equal(branch.at(-1).data.phase,'EXECUTE');
   assert.equal(branch.at(-1).data.approved,true);
   assert.equal(calls.some(x=>x[0]==='send'),false,'must not silently rerun executor');
   await commands.get('forge').handler('status',ctx);
-  assert.ok(notifications.at(-1).includes('Forge: EXECUTING'));
+  assert.ok(notifications.at(-1).includes('Forge: EXECUTE'));
   assert.ok(notifications.at(-1).includes('approved: yes'));
 });
 
@@ -214,8 +219,8 @@ test('resume picker lets user choose current rather than silently using current 
 
 test('v5.18: evidence-pending QA session is resumable without losing approved checkpoint', async () => {
   const {isResumableForgeState} = await import('../forge/session-resume.mjs');
-  assert.equal(isResumableForgeState({phase:'QA_EVIDENCE_PENDING',active:true,approved:true,approvedPlanHash:'approved-hash'}),true);
-  assert.equal(isResumableForgeState({phase:'QA_EVIDENCE_PENDING',active:false}),false);
+  assert.equal(isResumableForgeState({phase:'QA',active:true,approved:true,approvedPlanHash:'approved-hash',qaStatus:'BLOCKED',qaEvidencePending:true}),true);
+  assert.equal(isResumableForgeState({phase:'QA',active:false,qaStatus:'BLOCKED'}),false);
 });
 
 test('v5.23: session discovery reads in parallel but keeps picker order', async () => {
@@ -226,4 +231,13 @@ test('v5.23: session discovery reads in parallel but keeps picker order', async 
   const found=await discoverForgeSessions(sessions,{readState,concurrency:4});
   assert.deepEqual(found.map(f=>f.info.path),sessions.map(s=>s.path));
   assert.ok(peak>1 && peak<=4);
+});
+
+test('session discovery normalizes legacy phases without granting approval', async () => {
+  const found = await discoverForgeSessions([{path:'/legacy'}], {
+    readState: async () => ({active:true,phase:'AWAITING_APPROVAL',slug:'legacy',planWritten:true,planValid:true,approved:false}),
+  });
+  assert.equal(found[0].state.phase,'PLAN');
+  assert.equal(found[0].state.approved,false);
+  assert.equal(sameResumeCheckpoint(found[0].state,{...found[0].state,phase:'AWAITING_APPROVAL'}),true);
 });

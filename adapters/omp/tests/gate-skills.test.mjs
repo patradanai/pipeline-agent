@@ -6,24 +6,29 @@ import {
   formatGateSkills, validateSkillMarkdown,
 } from '../forge/core.mjs';
 
-test('new workflows have five separate empty skill lists, no sixth approval gate', () => {
+test('new workflows use bundled gate skills across four phases', () => {
   const mapping=cloneGateSkills();
-  assert.deepEqual(Object.keys(mapping), ['requirement','planning','execution','qa','delivery']);
-  assert.deepEqual(mapping.qa,[]);
-  assert.equal(currentSkillGate('AWAITING_APPROVAL'),'planning');
+  assert.deepEqual(mapping, {
+    requirement:['forge-requirement-gate'], planning:['forge-plan-gate'],
+    execution:['forge-execute-gate'], qa:['forge-qa-gate'], delivery:[],
+  });
   assert.equal(currentSkillGate('REQUIREMENT'),'requirement');
+  assert.equal(currentSkillGate('PLAN'),'planning');
+  assert.equal(currentSkillGate('EXECUTE'),'execution');
+  assert.equal(currentSkillGate('QA'),'qa');
+  assert.equal(currentSkillGate('AWAITING_APPROVAL'),null);
 });
 test('gate skills can be added, removed and reset without mutating input', () => {
   const empty=cloneGateSkills();
   let next=addGateSkill(empty,'qa','go-testing');
   next=addGateSkill(next,'qa','go-testing');
   next=addGateSkill(next,'requirement','security-review');
-  assert.deepEqual(next.qa,['go-testing']);
-  assert.deepEqual(empty.qa,[]);
+  assert.deepEqual(next.qa,['forge-qa-gate','go-testing']);
+  assert.deepEqual(empty.qa,['forge-qa-gate']);
   assert.match(formatGateSkills(next),/go-testing/);
-  assert.deepEqual(removeGateSkill(next,'qa','go-testing').qa,[]);
+  assert.deepEqual(removeGateSkill(next,'qa','go-testing').qa,['forge-qa-gate']);
   assert.deepEqual(resetGateSkills(next,'qa').qa,[]);
-  assert.deepEqual(resetGateSkills(next,'qa').requirement,['security-review']);
+  assert.deepEqual(resetGateSkills(next,'qa').requirement,['forge-requirement-gate','security-review']);
   assert.deepEqual(resetGateSkills(next,'all'),empty);
   assert.throws(()=>removeGateSkill(next,'qa','unknown'),/not attached/);
 });
@@ -37,26 +42,26 @@ test('invalid skill identifiers, duplicates, unknown gates and excessive packs f
 test('each run freezes its assigned gate skills independent of future settings',()=>{
   const config=addGateSkill(null,'planning','api-design');
   const state=initialState('Build API','test',null,config,{'api-design':{path:'/tmp/api-design/SKILL.md',sha256:'abc'}});
-  assert.deepEqual(state.gateSkills.planning,['api-design']);
+  assert.deepEqual(state.gateSkills.planning,['forge-plan-gate','api-design']);
   assert.equal(state.skillPins['api-design'].sha256,'abc');
   const later=addGateSkill(config,'planning','security-review');
-  assert.deepEqual(state.gateSkills.planning,['api-design']);
-  assert.deepEqual(later.planning,['api-design','security-review']);
+  assert.deepEqual(state.gateSkills.planning,['forge-plan-gate','api-design']);
+  assert.deepEqual(later.planning,['forge-plan-gate','api-design','security-review']);
 });
 test('inject skill content in individual flat and batched task prompts without dropping metadata',()=>{
   const original={agent:'forge-planner',task:'Write plan',solutionSpace:'fixed',effort:'high'};
-  const injected=injectGateSkillsIntoTask(original,'PLANNING','Skill: API contract\nNo hidden assumptions');
+  const injected=injectGateSkillsIntoTask(original,'PLAN','Skill: API contract\nNo hidden assumptions');
   assert.notStrictEqual(injected,original);
   assert.match(injected.task,/VERIFIED SNAPSHOT/);
   assert.match(injected.task,/No hidden assumptions/);
   assert.equal(injected.solutionSpace,'fixed');
   assert.equal(original.task,'Write plan');
-  assert.equal(injectGateSkillsIntoTask(injected,'PLANNING','Skill: API contract').task,injected.task);
+  assert.equal(injectGateSkillsIntoTask(injected,'PLAN','Skill: API contract').task,injected.task);
   const batch={context:'Shared brief', tasks:[{agent:'forge-qa',task:'Check business'},{agent:'forge-code-reviewer',task:'Review diff'}]};
-  const result=injectGateSkillsIntoTask(batch,'QA_REVIEW','security baseline');
+  const result=injectGateSkillsIntoTask(batch,'QA','security baseline');
   assert.equal(result.context,'Shared brief');
   assert.ok(result.tasks.every(t=>t.task.includes('security baseline')));
-  assert.equal(injectGateSkillsIntoTask({tasks:[{agent:'qa',steps:['do this']} ]},'QA_REVIEW','skill'),null);
+  assert.equal(injectGateSkillsIntoTask({tasks:[{agent:'qa',steps:['do this']} ]},'QA','skill'),null);
 });
 test('skill commands are not parsed as user requirements',()=>{
   assert.deepEqual(parseCommand('skills'),{type:'skills'});

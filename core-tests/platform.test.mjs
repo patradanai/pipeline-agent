@@ -10,14 +10,13 @@ function allRenderings() {
   return [
     ['REQUIREMENT', phaseInstruction(s)],
     ['REQUIREMENT:summary', requirementSummaryInstruction(s)],
-    ['PLANNING', phaseInstruction({ ...s, phase: 'PLANNING', requirementSummary: null })],
-    ['PLANNING:synthesis', phaseInstruction({ ...s, phase: 'PLANNING', requirementSummary: SUMMARY })],
-    ['PROPOSAL', phaseInstruction({ ...s, phase: 'PROPOSAL' })],
-    ['AWAITING', phaseInstruction({ ...s, phase: 'AWAITING_APPROVAL' })],
-    ['EXEC', executionInstruction({ ...s, phase: 'EXECUTING' })],
-    ['QA', qaInstruction({ ...s, phase: 'QA_REVIEW' })],
-    ['REWORK', reworkInstruction({ ...s, phase: 'REWORK_PLANNING', qaStatus: 'FAIL', reworkCycles: 1 })],
-    ['DELIVERY', deliveryInstruction({ ...s, phase: 'DELIVERY_PREP' })],
+    ['PLAN', phaseInstruction({ ...s, phase: 'PLAN', requirementSummary: null })],
+    ['PLAN:synthesis', phaseInstruction({ ...s, phase: 'PLAN', requirementSummary: SUMMARY })],
+    ['AWAITING', phaseInstruction({ ...s, phase: 'PLAN', planWritten: true, planValid: true, approved: false })],
+    ['EXEC', executionInstruction({ ...s, phase: 'EXECUTE' })],
+    ['QA', qaInstruction({ ...s, phase: 'QA' })],
+    ['REWORK', reworkInstruction({ ...s, phase: 'PLAN', qaStatus: 'FAIL', reworkCycles: 1 })],
+    ['DELIVERY', deliveryInstruction({ ...s, phase: 'QA', qaStatus: 'PASS' })],
   ];
 }
 
@@ -30,9 +29,9 @@ test('Claude Code wording never leaks OMP-only concepts (every gate instruction)
 
 test('planning and rework tell Claude Code to use ExitPlanMode', () => {
   const r = Object.fromEntries(allRenderings());
-  assert.match(adaptInstruction(r.PLANNING, 'claude-code'), /ExitPlanMode/);
+  assert.match(adaptInstruction(r.PLAN, 'claude-code'), /ExitPlanMode/);
   assert.match(adaptInstruction(r.REWORK, 'claude-code'), /ExitPlanMode/);
-  assert.match(adaptInstruction(r.PROPOSAL, 'claude-code'), /ExitPlanMode/);
+  assert.match(adaptInstruction(r.AWAITING, 'claude-code'), /ExitPlanMode/);
 });
 
 test('OMP wording is passed through unchanged', () => {

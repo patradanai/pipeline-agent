@@ -63,7 +63,7 @@ test('full workflow through real hook processes: /forge → specialists → Exit
   const x = env();
   const start = x.forge('Build a booking system');
   assert.match(ctx(start), /Forge started\. Gates: requirement \(one forge-requirement pass\)/);
-  assert.match(ctx(start), /GATE 1\/6: REQUIREMENT — single-pass analysis/);
+  assert.match(ctx(start), /GATE 1\/4: REQUIREMENT — single-pass analysis/);
   assert.match(ctx(start), /forge:forge-requirement/); // footer mapping
   assert.equal(x.state().phase, 'REQUIREMENT');
   // pre-approval guards
@@ -76,34 +76,35 @@ test('full workflow through real hook processes: /forge → specialists → Exit
   assert.ok(denied(x.pre('Agent', { subagent_type: 'forge:forge-requirement', prompt: 'again' }))); // one counted pass
   assert.equal(x.state().phase, 'REQUIREMENT');
   const toPlan = x.summary();
-  assert.match(ctx(toPlan), /requirement summary recorded[\s\S]*GATE 2\/6: PLANNING[\s\S]*Use this requirement synthesis[\s\S]*ExitPlanMode/);
-  assert.equal(x.state().phase, 'PLANNING');
+  assert.match(ctx(toPlan), /requirement summary recorded[\s\S]*GATE 2\/4: PLAN[\s\S]*Use this requirement synthesis[\s\S]*ExitPlanMode/);
+  assert.equal(x.state().phase, 'PLAN');
   x.agent('forge-planner');
   // ExitPlanMode outside plan mode / invalid / valid
   assert.ok(denied(x.pre('ExitPlanMode', { plan: PLAN }, { permission_mode: 'default' })));
   const bad = x.pre('ExitPlanMode', { plan: '# nope' });
   assert.ok(denied(bad)); assert.match(bad.hookSpecificOutput.permissionDecisionReason, /plan contract is invalid/);
   assert.deepEqual(x.pre('ExitPlanMode', { plan: PLAN }), {});
-  assert.equal(x.state().phase, 'AWAITING_APPROVAL');
+  assert.equal(x.state().phase, 'PLAN');
   assert.ok(readFileSync(x.state().planPath, 'utf8').includes('BIZ-001'));
   // native approval = ExitPlanMode succeeded
   const approved = x.post('ExitPlanMode', { plan: PLAN }, { result: 'User approved' });
   assert.match(ctx(approved), /APPROVED EXECUTION/);
-  assert.equal(x.state().phase, 'EXECUTING');
+  assert.equal(x.state().phase, 'EXECUTE');
   x.agent('forge-executor', 'Implemented booking.ts');
   const stop = x.run('Stop', { stop_hook_active: false, last_assistant_message: 'done' });
   assert.equal(stop.decision, 'block'); assert.match(stop.reason, /QA REVIEW|POST-EXECUTION|READ THIS FILE/);
-  assert.equal(x.state().phase, 'QA_REVIEW');
+  assert.equal(x.state().phase, 'QA');
   assert.ok(denied(x.pre('Edit', { file_path: 'a.ts' })));
   assert.match(ctx(x.post(`${P}forge_qa_scope`, {}, {})), /QA scope/);
   x.agent('forge-qa'); x.agent('forge-code-reviewer');
   assert.deepEqual(x.pre(`${P}forge_qa_submit`, SUBMISSION), {});
   assert.match(ctx(x.post(`${P}forge_qa_submit`, SUBMISSION, {})), /QA GATE: PASS/);
-  assert.equal(x.state().phase, 'DELIVERY_PREP');
+  assert.equal(x.state().phase, 'QA');
   x.agent('forge-delivery');
   const delivered = x.post(`${P}forge_delivery_submit`, { subject: 'feat(booking): add approvals', body: '- approvals' }, {});
   assert.match(ctx(delivered), /COPY THIS COMMIT MESSAGE/);
-  assert.equal(x.state().phase, 'DELIVERY');
+  assert.equal(x.state().phase, 'QA');
+  assert.equal(x.state().active, false);
   assert.ok(readdirSync(join(x.data, 'reports', x.sid)).length > 0);
 });
 
@@ -112,7 +113,7 @@ test('parallel Agent hooks do not lose updates (state lock)', async () => {
   toApproved(x, x.sid);
   x.agent('forge-executor', 'Implemented booking.ts');
   x.run('Stop', { stop_hook_active: false, last_assistant_message: 'done' });
-  assert.equal(x.state().phase, 'QA_REVIEW'); // QA: 2 independent specialists in one batch
+  assert.equal(x.state().phase, 'QA'); // QA: 2 independent specialists in one batch
   const names = ['forge-qa', 'forge-code-reviewer'];
   const runAsync = (event, payload) => new Promise((resolve, reject) => {
     const child = spawn('node', [HOOK, event], { env: { ...process.env, FORGE_DATA_DIR: x.data } });
@@ -121,9 +122,9 @@ test('parallel Agent hooks do not lose updates (state lock)', async () => {
     child.stdin.end(JSON.stringify({ session_id: x.sid, cwd: x.cwd, hook_event_name: event, permission_mode: 'plan', ...payload }));
   });
   await Promise.all(names.map((n, i) => runAsync('PreToolUse', { tool_name: 'Agent', tool_input: { subagent_type: `forge:${n}` }, tool_use_id: `p${i}` })));
-  assert.deepEqual([...x.state().gateAgentsSpawned.QA_REVIEW].sort(), [...names].sort());
+  assert.deepEqual([...x.state().gateAgentsSpawned.QA].sort(), [...names].sort());
   await Promise.all(names.map((n, i) => runAsync('SubagentStop', { agent_id: `bg${i}`, agent_type: `forge:${n}`, last_assistant_message: 'ok report' })));
-  assert.deepEqual([...x.state().gateAgents.QA_REVIEW].sort(), [...names].sort());
+  assert.deepEqual([...x.state().gateAgents.QA].sort(), [...names].sort());
 });
 
 test('specialist subagents are read-only; executor has no shell', () => {
@@ -195,7 +196,7 @@ test('native resume (same session id) keeps the workflow and tells Claude where 
   const x = env();
   toApproved(x, x.sid);
   const out = x.run('SessionStart', { source: 'resume' });
-  assert.match(ctx(out), /Forge workflow in this session: Forge: EXECUTING/);
+  assert.match(ctx(out), /Forge workflow in this session: Forge: EXECUTE/);
   assert.equal(x.state().approved, true);
 });
 
@@ -206,12 +207,12 @@ test('/forge-resume lists other sessions of the project and adopts one safely', 
   // a new session in the same project gets a hint, not state
   assert.match(ctx(x.run('SessionStart', { source: 'startup' })), /forge-resume/);
   const list = ctx(cmd('forge-resume'));
-  assert.match(list, /1\. EXECUTING \(approved\) · Build a booking system/);
+  assert.match(list, /1\. EXECUTE \(approved\) · Build a booking system/);
   assert.match(list, /claude --resume <session>/);
   const adopt = ctx(cmd('forge-resume', '1'));
-  assert.match(adopt, /Adopted EXECUTING from session old-session as PLANNING/);
+  assert.match(adopt, /Adopted EXECUTE from session old-session as PLAN/);
   assert.match(adopt, /fresh native plan approval is required/);
-  assert.equal(x.state().phase, 'PLANNING'); assert.equal(x.state().approved, false);
+  assert.equal(x.state().phase, 'PLAN'); assert.equal(x.state().approved, false);
   assert.equal(x.state('old-session').active, false); // retired: never two live copies
   assert.equal(x.state('old-session').movedToSession, x.sid);
   assert.match(ctx(cmd('forge-resume')), /No other session/);
@@ -277,9 +278,9 @@ test('plan mode plan file: writing it is allowed, project files stay blocked, Ex
   assert.ok(denied(runCfg('PreToolUse', { tool_name: 'Write', tool_input: { file_path: join(x.cwd, 'src', 'a.js'), content: 'x' }, permission_mode: 'plan' })));
   assert.ok(denied(runCfg('PreToolUse', { tool_name: 'Write', tool_input: { file_path: planFile, content: PLAN }, permission_mode: 'default' })));
   assert.deepEqual(runCfg('PreToolUse', { tool_name: 'ExitPlanMode', tool_input: {}, permission_mode: 'plan' }), {});
-  assert.equal(x.state().phase, 'AWAITING_APPROVAL');
+  assert.equal(x.state().phase, 'PLAN');
   runCfg('PostToolUse', { tool_name: 'ExitPlanMode', tool_input: {}, tool_response: {}, permission_mode: 'plan' });
-  assert.equal(x.state().phase, 'EXECUTING');
+  assert.equal(x.state().phase, 'EXECUTE');
 });
 
 test('trace is off by default', () => {
@@ -297,7 +298,7 @@ test('long instructions are written to a file instead of being truncated', () =>
   const out = x.forge('Build a booking system ' + 'with many detailed requirements. '.repeat(400));
   assert.match(ctx(out), /READ THIS FILE COMPLETELY/);
   const file = ctx(out).match(/: (\/\S+\.md)/)[1];
-  assert.match(readFileSync(file, 'utf8'), /GATE 1\/6/);
+  assert.match(readFileSync(file, 'utf8'), /GATE 1\/4/);
 });
 
 test('plan approved with "clear context": a new session inherits EXECUTING within 2 minutes', () => {
@@ -308,8 +309,8 @@ test('plan approved with "clear context": a new session inherits EXECUTING withi
   x.post('ExitPlanMode', { plan: PLAN }, {});
   const fresh = 'sess-after-clear';
   const start = x.run('SessionStart', { source: 'clear' }, fresh);
-  assert.match(ctx(start), /Forge workflow in this session: Forge: EXECUTING/);
-  assert.equal(x.state(fresh).phase, 'EXECUTING');
+  assert.match(ctx(start), /Forge workflow in this session: Forge: EXECUTE/);
+  assert.equal(x.state(fresh).phase, 'EXECUTE');
   assert.equal(x.state(fresh).recoveryAudit.at(-1).reason, 'claude-code-clear-context-handoff');
   // a plain new session (startup) never inherits state; it only gets a /forge-resume hint
   assert.match(ctx(x.run('SessionStart', { source: 'startup' }, 'sess-unrelated')), /forge-resume/);
@@ -320,9 +321,9 @@ test('hook fails closed for an active workflow when its state is corrupt', () =>
   const x = env();
   x.forge('Build a booking system');
   const f = join(x.data, 'sessions', `${x.sid}.json`);
-  const corrupt = readFileSync(f, 'utf8').replace('"phase": "REQUIREMENT"', '"phase": "EXECUTING", "approved": true');
+  const corrupt = readFileSync(f, 'utf8').replace('"phase": "REQUIREMENT"', '"phase": "EXECUTE", "approved": true');
   require_write(f, corrupt);
-  // EXECUTING without approval evidence → safety conflict → mutation denied
+  // EXECUTE without approval evidence → safety conflict → mutation denied
   assert.ok(denied(x.pre('Write', { file_path: 'a.ts' })));
 });
 function require_write(f, s) { spawnSync('node', ['-e', `require('fs').writeFileSync(${JSON.stringify(f)}, ${JSON.stringify(s)})`]); }

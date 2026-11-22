@@ -13,7 +13,7 @@ import {
   readdirSync, renameSync, unlinkSync, writeSync,
 } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
-import { FORGE_STATE_ENTRY, isResumableForgeState } from './forge-state.mjs';
+import { FORGE_STATE_ENTRY, isResumableForgeState, normalizeForgeState } from './forge-state.mjs';
 
 const MAX_BYTES = 1024 * 1024;
 const MAX_SESSION_PATH = 4096;
@@ -133,7 +133,7 @@ export function persistForgeCheckpoint(root, identity, state) {
 
 /** Latest written state of this exact session (any validity). */
 export function loadForgeCheckpointRecord(root, identity) {
-  return readDoc(root, identity)?.state ?? null;
+  return normalizeForgeState(readDoc(root, identity)?.state ?? null);
 }
 
 export function loadForgeCheckpoint(root, identity) {
@@ -150,7 +150,7 @@ export function loadForgeCheckpointCandidates(root, identity) {
   if (doc.state.active === false && !isValidRestoreCandidate(doc.state)) return [];
   return recentOf(doc)
     .filter(r => isValidRestoreCandidate(r.state) && r.state.slug === r.slug)
-    .map(r => ({ state: r.state, savedAt: typeof r.savedAt === 'string' ? r.savedAt : null }));
+    .map(r => ({ state: normalizeForgeState(r.state), savedAt: typeof r.savedAt === 'string' ? r.savedAt : null }));
 }
 
 export function isValidRestoreCandidate(state) {
@@ -191,7 +191,7 @@ export function candidateFromSessionEntries(entries) {
   const candidates = new Map();
   for (const entry of entries) {
     if (entry?.type !== 'custom' || entry.customType !== FORGE_STATE_ENTRY) continue;
-    const state = entry.data;
+    const state = normalizeForgeState(entry.data);
     if (isTombstone(state)) {
       if (typeof state.cancelledSlug === 'string') candidates.delete(state.cancelledSlug);
       else candidates.clear();
@@ -205,21 +205,19 @@ export function candidateFromSessionEntries(entries) {
 
 /** Safe, human-confirmed recovery. Prior approval is recorded in the audit,
  * but never inherited when the approved branch's history is not present.
- * The user must obtain a fresh native plan approval before EXECUTING.
+ * The user must obtain a fresh native plan approval before EXECUTE.
  */
 export function prepareHumanRecovery(candidate) {
   if (!isValidRestoreCandidate(candidate)) throw new Error('Invalid Forge recovery checkpoint');
   const prior = candidate.phase;
-  const needsFreshApproval = Boolean(candidate.approved) ||
-    ['EXECUTING','QA_REVIEW','QA_EVIDENCE_PENDING','QA_FAILED','DELIVERY_PREP','DELIVERY_BLOCKED','EXECUTION_BLOCKED'].includes(prior);
-  const stage = needsFreshApproval ? 'PLANNING' :
-    ['REWORK_PLANNING','PLAN_MODE_PENDING','PLAN_MODE_BLOCKED','PROPOSAL','AWAITING_APPROVAL'].includes(prior) ? 'PLANNING' :
-    prior === 'AGENTS_BLOCKED' ? 'REQUIREMENT' : prior;
+  candidate = normalizeForgeState(candidate);
+  const stage = candidate.approved === true || ['EXECUTE', 'QA'].includes(candidate.phase)
+    ? 'PLAN' : candidate.phase;
   return {
     ...candidate,
     active: true,
     phase: stage,
-    ...(stage === 'PLANNING' ? {planWritten: false, planValid: false, planPath: null, proposalDeferred: false} : {}),
+    ...(stage === 'PLAN' ? {planWritten: false, planValid: false, planPath: null, proposalDeferred: false} : {}),
     approved: false, approvedPlanHash: null, qaStatus: 'pending', qaEvidencePending: false,
     executionObserved: false, blockedFrom: null,
     gateAgents: { ...(candidate.gateAgents ?? {}), [stage]: [] },

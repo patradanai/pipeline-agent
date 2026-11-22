@@ -21,6 +21,17 @@
   is self-contained (Claude Code copies only the plugin directory; OMP loads
   only `~/.omp/agent/extensions/forge`).
 
+## Workflow state
+
+Persisted phases are `REQUIREMENT`, `PLAN`, `EXECUTE`, and `QA`. Native plan
+review remains inside `PLAN` and requires explicit human approval before
+`EXECUTE`. QA failures return to `PLAN` with approval revoked. QA PASS and
+delivery remain in `QA`; completed delivery sets the workflow inactive.
+
+Each gate has a bundled skill. Skills guide the work; runtime guards still
+enforce approval, read-only review, and evidence-backed QA. Legacy checkpoints
+are normalized on restore without deriving approval or QA PASS from a phase.
+
 ## What is shared today
 
 | Concern | Shared in core | OMP | Claude Code |

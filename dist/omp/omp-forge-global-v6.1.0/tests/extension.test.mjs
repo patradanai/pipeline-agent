@@ -14,6 +14,11 @@ mkdirSync(join(process.env.PI_CODING_AGENT_DIR, 'agents'), {recursive:true});
 for (const name of ['forge-requirement','forge-planner','forge-executor','forge-qa','forge-code-reviewer','forge-delivery','my-planner']) {
   writeFileSync(join(process.env.PI_CODING_AGENT_DIR,'agents',`${name}.md`),'---\nname: '+name+'\ndescription: Custom specialist\n---\nTest specialist\n');
 }
+for (const name of ['forge-requirement-gate','forge-plan-gate','forge-execute-gate','forge-qa-gate']) {
+  const dir = join(process.env.PI_CODING_AGENT_DIR, 'skills', name);
+  mkdirSync(dir, {recursive:true});
+  copyFileSync(new URL(`../skills/${name}/SKILL.md`, import.meta.url), join(dir, 'SKILL.md'));
+}
 writeFileSync(process.env.FORGE_CONFIG_PATH, JSON.stringify({autoStart:false})+'\n');
 process.on('exit',()=>rmSync(tmp,{recursive:true,force:true}));
 
@@ -88,7 +93,7 @@ async function writeCanonicalPlan(x, targetPath = null) {
   const id = `write-${++agentCallSeq}`;
   assert.equal(await x.events.get('tool_call')({toolName:'write',toolCallId:id,input:{path,content:PLAN}},x.ctx),undefined);
   const result = await x.events.get('tool_result')({toolName:'write',toolCallId:id,isError:false,content:[{type:'text',text:`Wrote ${path}`}]},x.ctx);
-  assert.equal(x.entries.at(-1).data.phase,'PROPOSAL');
+  assert.equal(x.entries.at(-1).data.phase,'PLAN');
   assert.match(result.additionalContext,/FORGE PLAN SAVED/);
   return path;
 }
@@ -128,11 +133,11 @@ async function advanceToReview(x) {
   await x.events.get('session_start')({},x.ctx);
   await x.commands.get('forge').handler('Create a CRM',x.ctx);
   assert.equal(x.getPlan(),'active');
-  assert.match(x.sent[0].content,/GATE 1\/6: REQUIREMENT — single-pass analysis/);
+  assert.match(x.sent[0].content,/GATE 1\/4: REQUIREMENT — single-pass analysis/);
   const result = await completeRequirement(x);
-  assert.equal(x.entries.at(-1).data.phase,'PLANNING');
+  assert.equal(x.entries.at(-1).data.phase,'PLAN');
   assert.match(result.content[0].text,/^Forge: requirement summary recorded \(0 CRITICAL\/HIGH, 0 open blocker\(s\)\) → Planning\./);
-  assert.match(result.content[0].text,/GATE 2\/6: PLANNING/);
+  assert.match(result.content[0].text,/GATE 2\/4: PLANNING/);
   await runCompletedAgent(x,'forge-planner');
   await writeCanonicalPlan(x);
   await x.events.get('plan_review_requested')({planContent:PLAN,planPath:`local://${x.entries.at(-1).data.slug}-plan.md`},x.ctx);
@@ -149,14 +154,14 @@ test('native review resolution ignores mismatched IDs and duplicate late events'
   await x.events.get('plan_review_resolved')({reviewId:'review-old',choice:'execute'},x.ctx);
   await x.events.get('plan_review_resolved')({choice:'execute'},x.ctx);
   assert.equal(x.entries.length,before);
-  assert.equal(x.entries.at(-1).data.phase,'AWAITING_APPROVAL');
+  assert.equal(x.entries.at(-1).data.phase,'PLAN');
   await x.events.get('plan_review_resolved')({reviewId:'review-current',choice:'execute'},x.ctx);
-  assert.equal(x.entries.at(-1).data.phase,'EXECUTING');
+  assert.equal(x.entries.at(-1).data.phase,'EXECUTE');
   x.setPlan('inactive');
   await x.events.get('agent_start')({},x.ctx);
   await runCompletedAgent(x,'forge-executor');
   await x.events.get('session_stop')({},x.ctx);
-  assert.equal(x.entries.at(-1).data.phase,'QA_REVIEW');
+  assert.equal(x.entries.at(-1).data.phase,'QA');
   const qaState=structuredClone(x.entries.at(-1).data), count=x.entries.length;
   for (const choice of ['execute','refine',undefined]) {
     await x.events.get('plan_review_resolved')({reviewId:'review-current',choice},x.ctx);
@@ -178,7 +183,7 @@ test('a review resolution cannot approve a different session workflow', async ()
   await x.events.get('plan_review_resolved')({reviewId:'review-original',choice:'execute'},x.ctx);
   assert.equal(x.entries.length,count);
   await x.commands.get('forge').handler('status',x.ctx);
-  assert.match(x.notifications.at(-1).message,/AWAITING_APPROVAL/);
+  assert.match(x.notifications.at(-1).message,/PLAN/);
   assert.ok(x.notifications.some(n=>n.message.includes('Open /plan-review')));
   assert.match(x.notifications.at(-1).message,/approved: no/);
 });
@@ -190,7 +195,7 @@ async function reachExecutionBlocked(x) {
   const retry=await x.events.get('session_stop')({},x.ctx);
   assert.equal(retry.continue,true);
   assert.equal(await x.events.get('session_stop')({},x.ctx),undefined);
-  assert.equal(x.entries.at(-1).data.phase,'EXECUTION_BLOCKED');
+  assert.equal(x.entries.at(-1).data.phase,'EXECUTE');
   return x.entries.at(-1).data;
 }
 
@@ -204,7 +209,7 @@ test('native provider rate limits preserve approved execution until real executo
   for (let i=0;i<2;i++) {
     assert.equal(await x.events.get('session_stop')(providerFailure,x.ctx),undefined);
     const state=x.entries.at(-1).data;
-    assert.equal(state.phase,'EXECUTING');
+    assert.equal(state.phase,'EXECUTE');
     assert.equal(state.active,true);
     assert.equal(state.approved,true);
     assert.equal(state.approvedPlanHash,before.approvedPlanHash);
@@ -218,7 +223,7 @@ test('native provider rate limits preserve approved execution until real executo
   const success=await x.events.get('session_stop')({last_assistant_message:{role:'assistant',content:[],stopReason:'stop'}},x.ctx);
   assert.equal(success.continue,true);
   assert.match(success.additionalContext,/POST-EXECUTION QA REVIEW/);
-  assert.equal(x.entries.at(-1).data.phase,'QA_REVIEW');
+  assert.equal(x.entries.at(-1).data.phase,'QA');
   assert.equal(x.entries.at(-1).data.agentCompletions.filter(item=>item.agent==='forge-executor').length,1);
 });
 
@@ -236,8 +241,8 @@ test('aborted stops do not spend retries; legacy stops without assistant payload
   }
   const legacySuccess=await x.events.get('session_stop')({},x.ctx);
   assert.equal(legacySuccess.continue,true);
-  assert.equal(x.entries.at(-1).data.phase,'EXECUTING');
-  assert.equal(x.entries.at(-1).data.agentRetries.EXECUTING,1);
+  assert.equal(x.entries.at(-1).data.phase,'EXECUTE');
+  assert.equal(x.entries.at(-1).data.agentRetries.EXECUTE,1);
 });
 
 test('missing executor blocks truthfully and status offers QA and execution recovery', async () => {
@@ -259,18 +264,18 @@ test('provider failures after implementation and during QA never synthesize tran
   const providerFailure={last_assistant_message:{role:'assistant',content:[],stopReason:'error',errorStatus:429}};
   const savedEntries=x.entries.length, sentMessages=x.sent.length;
   assert.equal(await x.events.get('session_stop')(providerFailure,x.ctx),undefined);
-  assert.equal(x.entries.at(-1).data.phase,'EXECUTING');
+  assert.equal(x.entries.at(-1).data.phase,'EXECUTE');
   assert.equal(x.entries.length,savedEntries);
   assert.equal(x.sent.length,sentMessages);
   const successful=await x.events.get('session_stop')({last_assistant_message:{role:'assistant',content:[],stopReason:'stop'}},x.ctx);
   assert.equal(successful.continue,true);
-  assert.equal(x.entries.at(-1).data.phase,'QA_REVIEW');
+  assert.equal(x.entries.at(-1).data.phase,'QA');
   const qaBefore=structuredClone(x.entries.at(-1).data);
   const qaEntries=x.entries.length, qaMessages=x.sent.length;
   for (let i=0;i<2;i++) {
     assert.equal(await x.events.get('session_stop')(providerFailure,x.ctx),undefined);
     const state=x.entries.at(-1).data;
-    assert.equal(state.phase,'QA_REVIEW');
+    assert.equal(state.phase,'QA');
     assert.equal(state.qaRetries,qaBefore.qaRetries);
     assert.equal(state.qaStatus,qaBefore.qaStatus);
     assert.equal(state.qaReportPath,qaBefore.qaReportPath);
@@ -292,17 +297,17 @@ test('approved blocked checkpoint enters read-only independent QA without replay
   const sentMessages=x.sent.length;
   await x.commands.get('forge').handler('qa',x.ctx);
   const review=x.entries.at(-1).data;
-  assert.equal(review.phase,'QA_REVIEW');
+  assert.equal(review.phase,'QA');
   assert.equal(review.active,true);
   assert.equal(review.approved,true);
   assert.equal(review.approvedPlanHash,approvedHash);
   assert.equal(review.planPath,planPath);
-  assert.deepEqual(review.gateAgents.QA_REVIEW,[]);
+  assert.deepEqual(review.gateAgents.QA,[]);
   assert.deepEqual(review.agentCompletions,completions);
   assert.equal(x.sent.length,sentMessages+1);
   assert.match(x.sent.at(-1).content,/POST-EXECUTION QA REVIEW/);
   assert.doesNotMatch(x.sent.at(-1).content,/GATE 3\/5: EXECUTION/);
-  assert.match(footer.at(-1).value,/QA review 4\/5/);
+  assert.match(footer.at(-1).value,/QA review 4\/4/);
   assert.equal((await x.events.get('tool_call')({toolName:'edit',input:{path:'src/app.go'}},x.ctx)).block,true);
   const premature=await x.tools.get('forge_qa_submit').execute('call',SUBMISSION,null,null,x.ctx);
   assert.equal(premature.isError,true);
@@ -310,7 +315,7 @@ test('approved blocked checkpoint enters read-only independent QA without replay
   await runQaAgents(x);
   const result=await x.tools.get('forge_qa_submit').execute('call',SUBMISSION,null,null,x.ctx);
   assert.match(result.content[0].text,/GATE: PASS/);
-  assert.equal(x.entries.at(-1).data.phase,'DELIVERY_PREP');
+  assert.equal(x.entries.at(-1).data.phase,'QA');
 });
 
 test('blocked QA requires current valid approval and never restores approval on an empty branch', async () => {
@@ -343,7 +348,7 @@ test('global chain runs planning and after native approval starts execution then
   const x=setup();
   await advanceToReview(x);
   await x.events.get('plan_review_resolved')({choice:'execute'},x.ctx);
-  assert.equal(x.entries.at(-1).data.phase,'EXECUTING');
+  assert.equal(x.entries.at(-1).data.phase,'EXECUTE');
   assert.equal(x.entries.at(-1).data.active,true);
   x.setPlan('inactive');
   assert.equal(await x.events.get('session_stop')({},x.ctx),undefined,'not yet observed execution');
@@ -353,14 +358,15 @@ test('global chain runs planning and after native approval starts execution then
   assert.equal(qa.continue,true);
   assert.match(qa.additionalContext,/POST-EXECUTION QA REVIEW/);
   assert.match(qa.additionalContext,/BIZ-002: Approval/);
-  assert.equal(x.entries.at(-1).data.phase,'QA_REVIEW');
+  assert.equal(x.entries.at(-1).data.phase,'QA');
   assert.equal((await x.events.get('tool_call')({toolName:'write',input:{path:'src/service.ts'}},x.ctx)).block,true);
   assert.equal((await x.events.get('tool_call')({toolName:'bash',input:{command:'rm -rf .'}},x.ctx)).block,true);
   assert.equal(await x.events.get('tool_call')({toolName:'bash',input:{command:'npm run lint'}},x.ctx),undefined);
   await runQaAgents(x);
   const result=await x.tools.get('forge_qa_submit').execute('call',SUBMISSION,null,null,x.ctx);
   assert.match(result.content[0].text,/GATE: PASS/);
-  assert.equal(x.entries.at(-1).data.phase,'DELIVERY_PREP');
+  assert.equal(x.entries.at(-1).data.phase,'QA');
+  assert.equal(x.entries.at(-1).data.qaStatus,'PASS');
   assert.equal(x.entries.at(-1).data.active,true);
   assert.ok(existsSync(x.entries.at(-1).data.qaReportPath));
   assert.match(readFileSync(x.entries.at(-1).data.qaReportPath,'utf8'),/BIZ-001 — Booking/);
@@ -382,7 +388,7 @@ test('QA submits a grouped FAIL report and does not auto-fix', async () => {
   assert.match(result.content[0].text,/BIZ-002 Approval \/ TC-002/);
   assert.equal(x.entries.at(-1).data.qaStatus,'FAIL');
   assert.equal(x.entries.at(-1).data.active,true);
-  assert.equal(x.entries.at(-1).data.phase,'REWORK_PLANNING');
+  assert.equal(x.entries.at(-1).data.phase,'PLAN');
   assert.equal(x.entries.at(-1).data.approved,false);
 });
 
@@ -395,7 +401,7 @@ test('missing QA submission fails closed instead of claiming PASS', async () => 
   assert.equal(retry.continue,true);
   await x.events.get('session_stop')({},x.ctx);
   assert.equal(x.entries.at(-1).data.qaStatus,'BLOCKED');
-  assert.equal(x.entries.at(-1).data.phase,'QA_EVIDENCE_PENDING');
+  assert.equal(x.entries.at(-1).data.phase,'QA');
   assert.equal(x.entries.at(-1).data.active,true);
   assert.equal(x.entries.at(-1).data.approved,true, 'approval must be retained for evidence-only blockers');
   assert.ok(x.entries.at(-1).data.approvedPlanHash);
@@ -405,7 +411,7 @@ test('dismissed plan review does not authorize execution', async () => {
   const x=setup(); await advanceToReview(x);
   await x.events.get('plan_review_resolved')({choice:undefined},x.ctx);
   assert.equal(x.entries.at(-1).data.approved,false);
-  assert.equal(x.entries.at(-1).data.phase,'AWAITING_APPROVAL');
+  assert.equal(x.entries.at(-1).data.phase,'PLAN');
 });
 
 test('forge read-only policy blocks mutation during discovery but allows reading and asks', async () => {
@@ -417,7 +423,9 @@ test('forge read-only policy blocks mutation during discovery but allows reading
   assert.equal((await hook({toolName:'write',input:{path:'src/app.ts'}},x.ctx)).block,true);
   assert.equal((await hook({toolName:'write',input:{path:'local://forge-plan.md'}},x.ctx)).block,true);
   assert.equal((await hook({toolName:'write',input:{path:'xd://propose'}},x.ctx)).block,true);
-  for (const tool of ['read','grep','glob','task','ask']) assert.equal(await hook({toolName:tool,input:{}},x.ctx),undefined,tool);
+  for (const tool of ['read','grep','glob','ask']) assert.equal(await hook({toolName:tool,input:{}},x.ctx),undefined,tool);
+  const task = await hook({toolName:'task',input:{agent:'forge-requirement',task:'Analyze'}},x.ctx);
+  assert.match(task.input.task,/Skill: forge-requirement-gate/);
 });
 
 test('input with forge: prefix enters plan without slash command', async () => {
@@ -453,7 +461,7 @@ test('after QA PASS, delivery tool produces copy-ready message without invoking 
   },null,null,x.ctx);
   assert.match(delivery.content[0].text,/COPY THIS COMMIT MESSAGE/);
   assert.match(delivery.content[0].text,/feat\(booking\): add approval workflow/);
-  assert.equal(x.entries.at(-1).data.phase,'DELIVERY');
+  assert.equal(x.entries.at(-1).data.phase,'QA');
   assert.equal(x.entries.at(-1).data.active,false);
   assert.equal(readFileSync(x.entries.at(-1).data.commitMessagePath,'utf8'),'feat(booking): add approval workflow\n\n- Implement booking approvals\n- Cover overlapping reservations\n');
   assert.match(readFileSync(x.entries.at(-1).data.deliveryPath,'utf8'),/QA PASS — READY FOR MANUAL COMMIT/);
@@ -471,7 +479,8 @@ test('QA failure loops through rework plan then fresh approval before execution'
   fail.topicResults[0].tests[0].status='FAIL';fail.topicResults[0].tests[0].actual='Duplicate booking created';
   await runQaAgents(x);
   await x.tools.get('forge_qa_submit').execute('call',fail,null,null,x.ctx);
-  assert.equal(x.entries.at(-1).data.phase,'REWORK_PLANNING');
+  assert.equal(x.entries.at(-1).data.phase,'PLAN');
+  assert.equal(x.entries.at(-1).data.approved,false);
   assert.equal(x.entries.at(-1).data.reworkCycles,1);
   assert.equal((await x.events.get('tool_call')({toolName:'edit',input:{path:'src/booking.ts'}},x.ctx)).block,true);
   assert.equal(await x.events.get('session_stop')({},x.ctx),undefined,'rework waits safely until native Plan Mode can be activated');
@@ -481,7 +490,7 @@ test('QA failure loops through rework plan then fresh approval before execution'
   assert.match(rework.additionalContext,/QA FAILED: REWORK PLAN/);
   assert.match(rework.additionalContext,/qa-report.md/);
   assert.equal(x.getPlan(),'active');
-  assert.equal(x.entries.at(-1).data.phase,'REWORK_PLANNING');
+  assert.equal(x.entries.at(-1).data.phase,'PLAN');
   const reworkState = x.entries.at(-1).data;
   const originalPlanPath = reworkState.reworkBasePlanPath;
   const reworkPath = `local://${reworkState.slug}-rework-${reworkState.reworkCycles}-plan.md`;
@@ -493,17 +502,17 @@ test('QA failure loops through rework plan then fresh approval before execution'
   await runCompletedAgent(x,'forge-planner');
   await writeCanonicalPlan(x,reworkPath);
   await x.events.get('plan_review_requested')({planContent:PLAN,planPath:reworkPath},x.ctx);
-  assert.equal(x.entries.at(-1).data.phase,'AWAITING_APPROVAL');
+  assert.equal(x.entries.at(-1).data.phase,'PLAN');
   assert.equal(x.entries.at(-1).data.approved,false);
   // Refine is not approval; it loops to planning.
   await x.events.get('plan_review_resolved')({choice:'refine'},x.ctx);
-  assert.equal(x.entries.at(-1).data.phase,'PLANNING');
+  assert.equal(x.entries.at(-1).data.phase,'PLAN');
   assert.equal(x.entries.at(-1).data.approved,false);
   await runCompletedAgent(x,'forge-planner');
   await writeCanonicalPlan(x,reworkPath);
   await x.events.get('plan_review_requested')({planContent:PLAN+'\n## Rework fix\n- Remove duplicate booking\n',planPath:reworkPath},x.ctx);
   await x.events.get('plan_review_resolved')({choice:'keep'},x.ctx);
-  assert.equal(x.entries.at(-1).data.phase,'EXECUTING');
+  assert.equal(x.entries.at(-1).data.phase,'EXECUTE');
   assert.equal(x.entries.at(-1).data.approved,true);
   assert.equal(x.entries.at(-1).data.reworkCycles,1);
 });
@@ -512,7 +521,7 @@ test('delivery cannot be prepared before QA PASS', async () => {
   const x=setup(); await advanceToReview(x);
   const result=await x.tools.get('forge_delivery_submit').execute('call',{subject:'feat: add booking',body:'',highlights:[],changedFiles:[]},null,null,x.ctx);
   assert.equal(result.isError,true);
-  assert.equal(x.entries.at(-1).data.phase,'AWAITING_APPROVAL');
+  assert.equal(x.entries.at(-1).data.phase,'PLAN');
 });
 
 test('required gate agents are enforced and wrong agent is blocked', async () => {
@@ -526,7 +535,7 @@ test('required gate agents are enforced and wrong agent is blocked', async () =>
   assert.match(next.additionalContext,/Mandatory named subagents were not observed: forge-requirement/);
   next=await x.events.get('session_stop')({},x.ctx);
   assert.equal(next,undefined);
-  assert.equal(x.entries.at(-1).data.phase,'AGENTS_BLOCKED');
+  assert.equal(x.entries.at(-1).data.phase,'REQUIREMENT');
   assert.equal(x.entries.at(-1).data.active,false);
   await x.commands.get('forge').handler('resume current',x.ctx);
   const resumed=x.entries.at(-1).data;
@@ -535,9 +544,9 @@ test('required gate agents are enforced and wrong agent is blocked', async () =>
   assert.deepEqual(resumed.gateAgents,{});
   assert.deepEqual(resumed.agentRetries,{});
   assert.equal(resumed.requirementSummaryRequested,false);
-  assert.match(x.sent.at(-1).content,/GATE 1\/6: REQUIREMENT — single-pass analysis/);
+  assert.match(x.sent.at(-1).content,/GATE 1\/4: REQUIREMENT — single-pass analysis/);
   await completeRequirement(x);
-  assert.equal(x.entries.at(-1).data.phase,'PLANNING');
+  assert.equal(x.entries.at(-1).data.phase,'PLAN');
 });
 
 test('post-execution QA PASS is blocked if independent specialists did not spawn', async () => {
@@ -549,7 +558,7 @@ test('post-execution QA PASS is blocked if independent specialists did not spawn
   const result=await x.tools.get('forge_qa_submit').execute('call',SUBMISSION,null,null,x.ctx);
   assert.equal(result.isError,true);
   assert.match(result.content[0].text,/independent QA specialists/i);
-  assert.equal(x.entries.at(-1).data.phase,'QA_REVIEW');
+  assert.equal(x.entries.at(-1).data.phase,'QA');
 });
 
 test('wrong agent is rejected during read-only QA and delivery phases', async () => {
@@ -598,7 +607,7 @@ test('v5 invalid native plan review cannot authorize execution', async () => {
   assert.equal(x.entries.at(-1).data.planValid,false);
   await x.events.get('plan_review_resolved')({choice:'execute'},x.ctx);
   assert.equal(x.entries.at(-1).data.approved,false);
-  assert.equal(x.entries.at(-1).data.phase,'AWAITING_APPROVAL');
+  assert.equal(x.entries.at(-1).data.phase,'PLAN');
 });
 
 test('v5 disallows Git writes in a Forge subagent session', async () => {
@@ -616,7 +625,7 @@ test('v5.1 regression: OMP Plan Mode inactive cannot deadlock read-only requirem
   await x.commands.get('forge').handler('Change debit card enum references',x.ctx);
   x.setPlan('inactive'); // OMP mode transition between turns/subagent entry
   for (const tool of ['read','grep','glob','ask','task']) {
-    const outcome = await x.events.get('tool_call')({toolName:tool,input:{path:'src/operations.ts'}},x.ctx);
+    const outcome = await x.events.get('tool_call')({toolName:tool,input:tool === 'task' ? {agent:'forge-requirement',task:'Analyze'} : {path:'src/operations.ts'}},x.ctx);
     assert.notEqual(outcome?.block,true,`${tool} must work even when plan is inactive`);
   }
   assert.equal((await x.events.get('tool_call')({toolName:'edit',input:{path:'src/operations.ts'}},x.ctx)).block,true);
@@ -625,7 +634,7 @@ test('v5.1 regression: OMP Plan Mode inactive cannot deadlock read-only requirem
   assert.equal(await x.events.get('tool_call')({toolName:'forge_requirement_summary',input:SUMMARY},x.ctx),undefined);
   const result=await submitSummary(x);
   assert.notEqual(result.isError,true);
-  assert.equal(x.entries.at(-1).data.phase,'PLANNING');
+  assert.equal(x.entries.at(-1).data.phase,'PLAN');
 });
 
 test('v5.1 regression: temporarily paused Plan Mode is not a blocker for the requirement report and summary', async () => {
@@ -638,7 +647,7 @@ test('v5.1 regression: temporarily paused Plan Mode is not a blocker for the req
   assert.match(next.additionalContext,/\[FORGE REQUIREMENT — report received\]/);
   assert.equal(x.entries.at(-1).data.phase,'REQUIREMENT');
   await submitSummary(x);
-  assert.equal(x.entries.at(-1).data.phase,'PLANNING');
+  assert.equal(x.entries.at(-1).data.phase,'PLAN');
 });
 
 test('v5.4: Plan Mode resumed after requirement summary, and proposal requires successful plan write', async () => {
@@ -646,11 +655,11 @@ test('v5.4: Plan Mode resumed after requirement summary, and proposal requires s
   await x.commands.get('forge').handler('Build booking workflow',x.ctx);
   x.setPlan('paused');
   await completeRequirement(x);
-  assert.equal(x.entries.at(-1).data.phase,'PLANNING');
+  assert.equal(x.entries.at(-1).data.phase,'PLAN');
   assert.equal(x.getPlan(),'active');
   assert.equal((await x.events.get('tool_call')({toolName:'write',input:{path:'xd://propose'}},x.ctx)).block,true);
   await runCompletedAgent(x,'forge-planner');
-  assert.equal(x.entries.at(-1).data.phase,'PLANNING');
+  assert.equal(x.entries.at(-1).data.phase,'PLAN');
   await writeCanonicalPlan(x);
   assert.equal(await x.events.get('tool_call')({toolName:'write',input:{path:'xd://propose',content:x.entries.at(-1).data.slug}},x.ctx),undefined);
 });
@@ -663,7 +672,7 @@ test('v5.1: read-only Rework permits agents but never source code changes', asyn
   const fail=structuredClone(SUBMISSION); fail.topicResults[0].tests[0].status='FAIL';
   await runQaAgents(x);
   await x.tools.get('forge_qa_submit').execute('call',fail,null,null,x.ctx);
-  assert.equal(x.entries.at(-1).data.phase,'REWORK_PLANNING');
+  assert.equal(x.entries.at(-1).data.phase,'PLAN');
   for (const tool of ['read','grep','glob','ask']) assert.equal(await x.events.get('tool_call')({toolName:tool,input:{}},x.ctx),undefined);
   assert.equal((await x.events.get('tool_call')({toolName:'edit',input:{path:'src/change.ts'}},x.ctx)).block,true);
 });
@@ -674,7 +683,7 @@ test('v5.1: QA prevents arbitrary shell and exec aliases, not just bash', async 
   await x.events.get('plan_review_resolved')({choice:'execute'},x.ctx);
   x.setPlan('inactive'); await x.events.get('agent_start')({},x.ctx);
   await runCompletedAgent(x,'forge-executor'); await x.events.get('session_stop')({},x.ctx);
-  assert.equal(x.entries.at(-1).data.phase,'QA_REVIEW');
+  assert.equal(x.entries.at(-1).data.phase,'QA');
   for (const tool of ['bash','shell','terminal','exec','run']) {
     assert.equal((await x.events.get('tool_call')({toolName:tool,input:{command:'rm -rf src'}},x.ctx)).block,true,tool);
     assert.equal(await x.events.get('tool_call')({toolName:tool,input:{command:'git diff --stat'}},x.ctx),undefined,tool);
@@ -755,7 +764,7 @@ test('v6.1: one REQUIREMENT gate runs a single forge-requirement pass, then the 
   assert.match(result.content[0].text, /^Forge: requirement summary recorded \(0 CRITICAL\/HIGH, 1 open blocker\(s\)\) → Planning\./);
   assert.match(result.content[0].text, /Use this requirement synthesis as the starting point[\s\S]*Edge case for empty input unspecified[\s\S]*Max booking horizon\?/);
   const planning = x.entries.at(-1).data;
-  assert.equal(planning.phase, 'PLANNING');
+  assert.equal(planning.phase, 'PLAN');
   assert.equal(planning.planWritten, false);
   assert.equal(planning.requirementSummary.baseline, SUMMARY.baseline);
   assert.deepEqual(planning.requirementSummary.blockers, ['Max booking horizon?']);
@@ -780,13 +789,14 @@ test('v6.1: legacy v5 COOKING state resumes as the single REQUIREMENT gate', asy
   assert.equal((await x.events.get('before_subagent_spawn')({agent:'forge-planner'}, x.ctx)).block, true);
   assert.equal((await x.events.get('before_subagent_spawn')({agent:'forge-critic'}, x.ctx)).block, true);
   await completeRequirement(x);
-  assert.equal(x.entries.at(-1).data.phase, 'PLANNING');
+  assert.equal(x.entries.at(-1).data.phase, 'PLAN');
 });
 
 test('v6.1: legacy v6.0 state with requirementStep/mode still completes with one report and a new summary', async () => {
   const x = setup();
   const old = {
     ...initialState('Legacy v6.0 requirement', 'legacy-v60'),
+    gateSkills: {}, skillPins: {},
     requirementStep: 'CHALLENGE', requirementMode: 'fast',
     gateAgents: { 'REQUIREMENT:DISCOVERY': ['forge-requirement'], 'REQUIREMENT:COOKING': ['forge-requirement','forge-critic'] },
     agentRetries: { 'REQUIREMENT:COOKING': 1 },
@@ -797,7 +807,7 @@ test('v6.1: legacy v6.0 state with requirementStep/mode still completes with one
   assert.equal((await submitSummary(x)).isError, true, 'old step keys do not count as the report');
   await completeRequirement(x);
   const state = x.entries.at(-1).data;
-  assert.equal(state.phase, 'PLANNING');
+  assert.equal(state.phase, 'PLAN');
   assert.equal(state.requirementSummary.baseline, SUMMARY.baseline);
 });
 
@@ -813,7 +823,7 @@ test('v5.4: requirement report asks for the summary via task tool_result without
   const x=setup(); await x.events.get('session_start')({},x.ctx);
   await x.commands.get('forge').handler('Analyze a feature change',x.ctx);
   await completeRequirement(x);
-  assert.equal(x.entries.at(-1).data.phase,'PLANNING');
+  assert.equal(x.entries.at(-1).data.phase,'PLAN');
   assert.equal(x.sent.length,1,'no synthetic user messages needed');
 });
 
@@ -835,7 +845,7 @@ test('v5.4: a failed local plan write cannot advance PLANNING to PROPOSAL', asyn
   const id='write-failed';const path=`local://${x.entries.at(-1).data.slug}-plan.md`;
   await x.events.get('tool_call')({toolName:'write',toolCallId:id,input:{path}},x.ctx);
   await x.events.get('tool_result')({toolName:'write',toolCallId:id,isError:true,content:[{type:'text',text:'Disk failure'}]},x.ctx);
-  assert.equal(x.entries.at(-1).data.phase,'PLANNING');
+  assert.equal(x.entries.at(-1).data.phase,'PLAN');
   assert.equal(x.entries.at(-1).data.planWritten,false);
   assert.equal((await x.events.get('tool_call')({toolName:'write',input:{path:'xd://propose'}},x.ctx)).block,true);
 });
@@ -850,7 +860,7 @@ test('v5.4: busy Plan Mode after specialist task defers planning until session s
   let first=true;
   x.ctx.sessionModes.set=async (...args) => first ? (first=false,{ok:false,code:'busy',message:'turn running'}) : origSet(...args);
   const last=await submitSummary(x);
-  assert.equal(x.entries.at(-1).data.phase,'PLAN_MODE_PENDING');
+  assert.equal(x.entries.at(-1).data.phase,'PLAN');
   assert.match(last.content[0].text,/\[FORGE REQUIREMENT COMPLETE\]/);
   assert.match(last.content[0].text,/Do NOT write local:\/\//);
   assert.equal((await x.events.get('tool_call')({toolName:'write',input:{path:`local://${x.entries.at(-1).data.slug}-plan.md`}},x.ctx)).block,true);
@@ -859,10 +869,10 @@ test('v5.4: busy Plan Mode after specialist task defers planning until session s
   const continuation=await x.events.get('session_stop')({},x.ctx);
   assert.equal(continuation,undefined,'mode recovery is deferred until the turn is idle');
   assert.ok(timers.length>0);
-  await timers.shift()();
-  assert.equal(x.entries.at(-1).data.phase,'PLANNING');
+  while (timers.length && x.getPlan() !== 'active') await timers.shift()();
+  assert.equal(x.entries.at(-1).data.phase,'PLAN');
   assert.equal(x.getPlan(),'active');
-  assert.match(x.sent.at(-1).content,/GATE 2\/6: PLANNING/);
+  assert.match(x.sent.at(-1).content,/GATE 2\/4: PLANNING/);
 });
 
 test('v5.4: restoring paused Plan Mode uses enter (not unsupported resume)', async () => {
@@ -872,7 +882,7 @@ test('v5.4: restoring paused Plan Mode uses enter (not unsupported resume)', asy
   const calls=[];
   x.ctx.sessionModes.set=async arg=>{calls.push(arg);x.setPlan('active');return {ok:true};};
   await completeRequirement(x);
-  assert.equal(x.entries.at(-1).data.phase,'PLANNING');
+  assert.equal(x.entries.at(-1).data.phase,'PLAN');
   assert.deepEqual(calls,[{mode:'plan',action:'enter'}]);
 });
 
@@ -885,7 +895,7 @@ test('v5.5: approval hides Forge widget; execution restores compact 3/5 progress
   assert.equal(widgets.at(-1).lines,undefined,'native review must not compete with Forge widget');
   await x.events.get('plan_review_resolved')({choice:'execute'},x.ctx);
   const finalWidget=widgets.at(-1);
-  assert.deepEqual(finalWidget.lines,['FORGE  ▰▰▰▱▱  Execution  3/5']);
+  assert.deepEqual(finalWidget.lines,['FORGE  ▰▰▰▱  Execution  3/4']);
   assert.equal(finalWidget.options.placement,'aboveEditor');
 });
 
@@ -899,14 +909,14 @@ for (const mode of ['active','paused','inactive']) {
     await x.commands.get('forge').handler('Plan a feature',x.ctx);
     await completeRequirement(x);
     await runCompletedAgent(x,'forge-planner');
-    assert.equal(x.entries.at(-1).data.phase,'PLANNING');
+    assert.equal(x.entries.at(-1).data.phase,'PLAN');
     x.setPlan(mode);
     const path=`local://${x.entries.at(-1).data.slug}-plan.md`;
     const id=`plan-write-${mode}`;
     assert.equal(await x.events.get('tool_call')({toolName:'write',toolCallId:id,input:{path,content:PLAN}},x.ctx),undefined);
-    assert.equal(x.entries.at(-1).data.phase,'PLANNING','cannot claim write succeeded before tool_result');
+    assert.equal(x.entries.at(-1).data.phase,'PLAN','cannot claim write succeeded before tool_result');
     await x.events.get('tool_result')({toolName:'write',toolCallId:id,isError:false,content:[{type:'text',text:`Wrote ${path}`}]},x.ctx);
-    assert.equal(x.entries.at(-1).data.phase,'PROPOSAL');
+    assert.equal(x.entries.at(-1).data.phase,'PLAN');
     assert.equal(x.entries.at(-1).data.planPath,path);
     const proposal=await x.events.get('tool_call')({toolName:'write',input:{path:'xd://propose',content:x.entries.at(-1).data.slug}},x.ctx);
     if (mode==='active') assert.equal(proposal,undefined);
@@ -936,7 +946,7 @@ test('v5.6: PLANNING permits an alternate OMP-local plan filename then pins it',
   assert.equal(await x.events.get('tool_call')({toolName:'write',toolCallId:'alt-plan',input:{path,content:PLAN}},x.ctx),undefined);
   await x.events.get('tool_result')({toolName:'write',toolCallId:'alt-plan',isError:false,content:[{type:'text',text:'wrote alternate local plan'}]},x.ctx);
   assert.equal(x.entries.at(-1).data.planPath,path);
-  assert.equal(x.entries.at(-1).data.phase,'PROPOSAL');
+  assert.equal(x.entries.at(-1).data.phase,'PLAN');
   assert.equal((await x.events.get('tool_call')({toolName:'write',input:{path:`local://${x.entries.at(-1).data.slug}-plan.md`,content:PLAN}},x.ctx)).block,true,'different plan cannot be modified after pinning');
   assert.equal(await x.events.get('tool_call')({toolName:'write',input:{path,content:PLAN}},x.ctx),undefined);
 });
@@ -968,7 +978,7 @@ test('v5.6: failed local plan write never advances to PROPOSAL', async () => {
   const path=`local://${x.entries.at(-1).data.slug}-plan.md`;
   assert.equal(await x.events.get('tool_call')({toolName:'write',toolCallId:'bad-plan',input:{path,content:PLAN}},x.ctx),undefined);
   await x.events.get('tool_result')({toolName:'write',toolCallId:'bad-plan',isError:true,content:[{type:'text',text:'native OMP rejected write'}]},x.ctx);
-  assert.equal(x.entries.at(-1).data.phase,'PLANNING');
+  assert.equal(x.entries.at(-1).data.phase,'PLAN');
   assert.equal(x.entries.at(-1).data.planWritten,false);
   assert.equal((await x.events.get('tool_call')({toolName:'write',input:{path:'xd://propose'}},x.ctx)).block,true);
 });
@@ -985,7 +995,7 @@ test('v5.6: QA FAIL clears previous plan-written and approval validity before re
   submission.topicResults[0].tests[0].status='FAIL';
   await x.tools.get('forge_qa_submit').execute('call',submission,null,null,x.ctx);
   const state=x.entries.at(-1).data;
-  assert.equal(state.phase,'REWORK_PLANNING');
+  assert.equal(state.phase,'PLAN');
   assert.equal(state.planWritten,false);
   assert.equal(state.planValid,false);
   assert.equal(state.approvedPlanHash,null);
@@ -1005,7 +1015,8 @@ test('v5.8 gate skill is installed, pinned and attached to specialist task in cu
   assert.match(x.notifications.at(-1).message,/security-review/);
   await x.commands.get('forge').handler('Build payment API',x.ctx);
   const state=x.entries.at(-1).data;
-  assert.deepEqual(state.gateSkills.requirement,['security-review']);
+  assert.ok(state.gateSkills.requirement.includes('forge-requirement-gate'));
+  assert.ok(state.gateSkills.requirement.includes('security-review'));
   assert.ok(state.skillPins['security-review'].sha256);
   const task={agent:'forge-requirement',task:'Analyze the code'};
   const event=await x.events.get('tool_call')({toolName:'task',toolCallId:'skills-1',input:task},x.ctx);
@@ -1025,11 +1036,12 @@ test('v5.8 changed pinned skill blocks task rather than injecting stale instruct
   await x.events.get('session_start')({},x.ctx);
   await x.commands.get('forge').handler('skill add qa go-testing',x.ctx);
   await x.commands.get('forge').handler('Create a CRM',x.ctx);
-  assert.deepEqual(x.entries.at(-1).data.gateSkills.qa,['go-testing']);
+  assert.ok(x.entries.at(-1).data.gateSkills.qa.includes('forge-qa-gate'));
+  assert.ok(x.entries.at(-1).data.gateSkills.qa.includes('go-testing'));
   writeFileSync(path,'---\ndescription: Go testing standards\n---\nRun go test race detector.\n');
   // Simulate QA state to inspect gate lock without advancing unrelated phases.
   const current=x.entries.at(-1).data;
-  const altered={...current,phase:'QA_REVIEW'};
+  const altered={...current,phase:'QA',qaStatus:null};
   x.entries.push({type:'custom',customType:'dev.omp-forge.workflow.v1',data:altered});
   await x.events.get('session_start')({},x.ctx);
   const rejected=await x.events.get('tool_call')({toolName:'task',toolCallId:'skills-2',input:{agent:'forge-qa',task:'Verify tests'}},x.ctx);
@@ -1123,7 +1135,7 @@ test('v5.12 legacy config does not override gate routing for new workflows', asy
     await x.commands.get('forge').handler('Build a CRM',x.ctx);
     const state=x.entries.at(-1).data;
     assert.equal(state.agentAssignments.planning.planner,'forge-planner');
-    assert.deepEqual(requiredAgentsFor({...state,phase:'PLANNING'}),['forge-planner']);
+    assert.deepEqual(requiredAgentsFor({...state,phase:'PLAN'}),['forge-planner']);
   } finally { writeFileSync(process.env.FORGE_CONFIG_PATH,backup); }
 });
 
@@ -1162,7 +1174,7 @@ test('v5.13: successful plan exists but lost write receipt cannot deadlock nativ
   await x.commands.get('forge').handler('Implement feature with acceptance cases',x.ctx);
   await completeRequirement(x);
   await runCompletedAgent(x,'forge-planner');
-  assert.equal(x.entries.at(-1).data.phase,'PLANNING');
+  assert.equal(x.entries.at(-1).data.phase,'PLAN');
   const slug=x.entries.at(-1).data.slug;
   const path=`local://${slug}-plan.md`;
   // Simulate a real file successfully written by native OMP, but Forge misses
@@ -1172,12 +1184,12 @@ test('v5.13: successful plan exists but lost write receipt cannot deadlock nativ
   // The actual OMP native device verifies that the artifact exists BEFORE
   // emitting plan_review_requested. This mock stands for that native event.
   await x.events.get('plan_review_requested')({planContent:PLAN,planPath:path},x.ctx);
-  assert.equal(x.entries.at(-1).data.phase,'AWAITING_APPROVAL');
+  assert.equal(x.entries.at(-1).data.phase,'PLAN');
   assert.equal(x.entries.at(-1).data.planWritten,true);
   assert.equal(x.entries.at(-1).data.planValid,true);
   assert.equal(x.entries.at(-1).data.approved,false);
   await x.events.get('plan_review_resolved')({choice:'execute'},x.ctx);
-  assert.equal(x.entries.at(-1).data.phase,'EXECUTING');
+  assert.equal(x.entries.at(-1).data.phase,'EXECUTE');
 });
 
 test('v5.13: native plan proposal bypasses only Forge stale state, not human approval or QA contract', async () => {
@@ -1200,7 +1212,7 @@ test('v5.13: native plan proposal bypasses only Forge stale state, not human app
   await x.events.get('plan_review_requested')({planContent:'# Plan\nMissing contracts',planPath:path},x.ctx);
   assert.equal(x.entries.at(-1).data.planValid,false);
   await x.events.get('plan_review_resolved')({choice:'execute'},x.ctx);
-  assert.notEqual(x.entries.at(-1).data.phase,'EXECUTING');
+  assert.notEqual(x.entries.at(-1).data.phase,'EXECUTE');
 });
 
 test('v5.14: paused native Plan Mode after writing plan resumes only after idle and opens native review', async () => {
@@ -1219,7 +1231,7 @@ test('v5.14: paused native Plan Mode after writing plan resumes only after idle 
   const id='v514-plan-write';
   await x.events.get('tool_call')({toolName:'write',toolCallId:id,input:{path,content:PLAN}},x.ctx);
   await x.events.get('tool_result')({toolName:'write',toolCallId:id,isError:false,content:[{type:'text',text:'Wrote plan'}]},x.ctx);
-  assert.equal(x.entries.at(-1).data.phase,'PROPOSAL');
+  assert.equal(x.entries.at(-1).data.phase,'PLAN');
   assert.equal(timers.length,1,'write completion arranges a deferred native review');
   assert.equal((await x.events.get('tool_call')({toolName:'write',input:{path:'src/index.ts',content:'bad'}},x.ctx)).block,true);
   await timers.shift()();
@@ -1240,7 +1252,7 @@ test('v5.14: paused native Plan Mode after writing plan resumes only after idle 
   await timers.shift()();
   assert.equal(opened,1);
   assert.equal(x.getPlan(),'active');
-  assert.equal(x.entries.at(-1).data.phase,'AWAITING_APPROVAL');
+  assert.equal(x.entries.at(-1).data.phase,'PLAN');
   assert.equal(x.entries.at(-1).data.approved,false,'no approval may occur without user action');
 });
 
@@ -1250,7 +1262,7 @@ test('v5.14: proposal with stale write telemetry does not loop when mode paused'
   await x.commands.get('forge').handler('Plan a feature',x.ctx);
   await completeRequirement(x);
   await runCompletedAgent(x,'forge-planner');
-  assert.equal(x.entries.at(-1).data.phase,'PLANNING');
+  assert.equal(x.entries.at(-1).data.phase,'PLAN');
   x.setPlan('inactive');
   const timers=[];
   x.ctx.setTimeout=cb=>timers.push(cb);
@@ -1265,7 +1277,7 @@ test('v5.14: proposal with stale write telemetry does not loop when mode paused'
   };
   await timers.shift()();
   assert.equal(x.getPlan(),'active');
-  assert.equal(x.entries.at(-1).data.phase,'AWAITING_APPROVAL');
+  assert.equal(x.entries.at(-1).data.phase,'PLAN');
   assert.equal(x.entries.at(-1).data.approved,false);
 });
 
@@ -1285,7 +1297,7 @@ test('v5.14: permanent Plan Mode refusal never unlocks implementation or silentl
   await timers.shift()();
   assert.equal(timers.length,0,'non-retryable failure must not spin');
   assert.ok(x.notifications.some(n=>n.message.includes('Plan mode disabled')));
-  assert.notEqual(x.entries.at(-1).data.phase,'EXECUTING');
+  assert.notEqual(x.entries.at(-1).data.phase,'EXECUTE');
   assert.equal((await x.events.get('tool_call')({toolName:'write',input:{path:'src/app.go',content:'not approved'}},x.ctx)).block,true);
 });
 
@@ -1322,7 +1334,7 @@ test('v6.0: saved plan recovery survives long busy and pending-message periods',
   pending=false;
   await timers.shift()();
   assert.equal(opened,1);
-  assert.equal(x.entries.at(-1).data.phase,'AWAITING_APPROVAL');
+  assert.equal(x.entries.at(-1).data.phase,'PLAN');
   assert.equal(x.entries.at(-1).data.planPath,path);
   assert.equal(x.entries.at(-1).data.approved,false);
 });
@@ -1350,7 +1362,7 @@ test('v6.0: lost plan-write receipt recovers after prolonged busy state', async 
   idle=true;
   await timers.shift()();
   assert.equal(opened,1);
-  assert.equal(x.entries.at(-1).data.phase,'AWAITING_APPROVAL');
+  assert.equal(x.entries.at(-1).data.phase,'PLAN');
   assert.equal(x.entries.at(-1).data.planPath,path);
   assert.equal(x.entries.at(-1).data.planWritten,true);
   assert.equal(x.entries.at(-1).data.approved,false);
@@ -1383,7 +1395,7 @@ test('v6.0: native setter busy results do not consume recovery attempts', async 
   await timers.shift()();
   assert.equal(calls,81);
   assert.equal(opened,1);
-  assert.equal(x.entries.at(-1).data.phase,'AWAITING_APPROVAL');
+  assert.equal(x.entries.at(-1).data.phase,'PLAN');
   assert.equal(x.entries.at(-1).data.approved,false);
 });
 
@@ -1407,7 +1419,7 @@ test('v6.0: review retries count only actual opens and stop after three failures
   for(let i=0;i<3;i++) await timers.shift()();
   assert.equal(opens,3);
   assert.equal(timers.length,0);
-  assert.equal(x.entries.at(-1).data.phase,'AWAITING_APPROVAL');
+  assert.equal(x.entries.at(-1).data.phase,'PLAN');
   assert.equal(x.entries.at(-1).data.proposalDeferred,false);
   assert.equal(x.entries.at(-1).data.approved,false);
   assert.equal(x.notifications.some(n=>n.message.includes('could not open the native Plan Review')),false);
@@ -1527,14 +1539,14 @@ test('v6.0: asynchronous recovery cannot overwrite cancellation or native review
   };
   const awaitingReview=reviewTimers.shift()();
   await inReview;
-  assert.equal(reviewed.entries.at(-1).data.phase,'AWAITING_APPROVAL');
+  assert.equal(reviewed.entries.at(-1).data.phase,'PLAN');
   assert.equal(reviewed.entries.at(-1).data.proposalDeferred,false);
   assert.equal(reviewed.entries.at(-1).data.approved,false);
   const reviewEntries=reviewed.entries.length;
   finishReview(true);
   await awaitingReview;
   assert.equal(reviewed.entries.length,reviewEntries);
-  assert.equal(reviewed.entries.at(-1).data.phase,'AWAITING_APPROVAL');
+  assert.equal(reviewed.entries.at(-1).data.phase,'PLAN');
   assert.equal(reviewed.entries.at(-1).data.proposalDeferred,false);
 });
 
@@ -1574,7 +1586,7 @@ test('v5.14: resume old PLAN_MODE_BLOCKED session with saved plan directly into 
   await x.commands.get('forge').handler('resume current',x.ctx);
   assert.equal(opened,1);
   assert.equal(x.getPlan(),'active');
-  assert.equal(x.entries.at(-1).data.phase,'AWAITING_APPROVAL');
+  assert.equal(x.entries.at(-1).data.phase,'PLAN');
   assert.equal(x.entries.at(-1).data.approved,false);
 });
 
@@ -1591,7 +1603,7 @@ test('v5.18: QA BLOCKED keeps approved plan and pauses for evidence instead of a
   const res=await x.tools.get('forge_qa_submit').execute('call',blocked,null,null,x.ctx);
   assert.match(res.content[0].text,/GATE: BLOCKED/);
   const state=x.entries.at(-1).data;
-  assert.equal(state.phase,'QA_EVIDENCE_PENDING');
+  assert.equal(state.phase,'QA');
   assert.equal(state.approved,true);
   assert.equal(state.planValid,true);
   assert.equal(state.approvedPlanHash, expectedHash);
@@ -1613,16 +1625,16 @@ test('v5.18: evidence-only QA retry preserves approval and rechecks specialists'
   await x.tools.get('forge_qa_submit').execute('call',blocked,null,null,x.ctx);
   const before=x.entries.at(-1).data.approvedPlanHash;
   await x.commands.get('forge').handler('resume current',x.ctx);
-  assert.equal(x.entries.at(-1).data.phase,'QA_EVIDENCE_PENDING','resume alone must not replay writes or approval');
+  assert.equal(x.entries.at(-1).data.phase,'QA','resume alone must not replay writes or approval');
   await x.commands.get('forge').handler('qa',x.ctx);
-  assert.equal(x.entries.at(-1).data.phase,'QA_REVIEW');
+  assert.equal(x.entries.at(-1).data.phase,'QA');
   assert.equal(x.entries.at(-1).data.approvedPlanHash,before);
-  assert.deepEqual(x.entries.at(-1).data.gateAgents.QA_REVIEW, []);
+  assert.deepEqual(x.entries.at(-1).data.gateAgents.QA, []);
   assert.match(x.sent.at(-1).content,/forge_qa_scope/);
   await runQaAgents(x);
   const result=await x.tools.get('forge_qa_submit').execute('call',SUBMISSION,null,null,x.ctx);
   assert.match(result.content[0].text,/GATE: PASS/);
-  assert.equal(x.entries.at(-1).data.phase,'DELIVERY_PREP');
+  assert.equal(x.entries.at(-1).data.phase,'QA');
 });
 
 test('v5.18: scope read is unavailable before approved QA and gracefully handles non-repo',async()=>{
@@ -1652,11 +1664,11 @@ test('v5.18: explicit rework after evidence block needs Plan Mode and retains ap
   const approved=x.entries.at(-1).data.approvedPlanHash;
   x.ctx.sessionModes.set=async()=>({ok:false,message:'session is busy'});
   await x.commands.get('forge').handler('rework',x.ctx);
-  assert.equal(x.entries.at(-1).data.phase,'QA_EVIDENCE_PENDING');
+  assert.equal(x.entries.at(-1).data.phase,'QA');
   assert.equal(x.entries.at(-1).data.approvedPlanHash,approved);
   x.ctx.sessionModes.set=async()=>({ok:true});
   await x.commands.get('forge').handler('rework',x.ctx);
-  assert.equal(x.entries.at(-1).data.phase,'REWORK_PLANNING');
+  assert.equal(x.entries.at(-1).data.phase,'PLAN');
   assert.equal(x.entries.at(-1).data.approved,false);
   assert.equal(x.entries.at(-1).data.reworkCycles,1);
 });
@@ -1713,7 +1725,7 @@ test('v5.20: recover opens native select and safely corrects a corrupt executing
   x.ctx.ui.select=async (_label, options)=>options[0];
   await x.events.get('session_start')({},x.ctx);
   await x.commands.get('forge').handler('recover',x.ctx);
-  assert.equal(x.entries.at(-1).data.phase,'AWAITING_APPROVAL');
+  assert.equal(x.entries.at(-1).data.phase,'PLAN');
   assert.equal(x.entries.at(-1).data.approved,false);
   assert.ok(x.entries.at(-1).data.recoveryAudit?.length);
   assert.equal((await x.events.get('tool_call')({toolName:'write',input:{path:'src/file.ts',content:'x'}},x.ctx)).block,true);
@@ -1722,13 +1734,13 @@ test('v5.20: recover opens native select and safely corrects a corrupt executing
 test('v5.20: decline popup leaves current checkpoint unchanged',async()=>{
   const x=setup(); await advanceToReview(x);
   const previous=x.entries.at(-1).data;
-  x.entries.push({type:'custom',customType:'dev.omp-forge.workflow.v1',data:{...previous,phase:'PROPOSAL',planWritten:false,active:true}});
+  x.entries.push({type:'custom',customType:'dev.omp-forge.workflow.v1',data:{...previous,phase:'EXECUTING',approved:false,active:true}});
   x.ctx.ui.select=async(_label,options)=>options[1];
   await x.events.get('session_start')({},x.ctx);
   const n=x.entries.length;
   await x.commands.get('forge').handler('recover',x.ctx);
   assert.equal(x.entries.length,n);
-  assert.equal(x.entries.at(-1).data.phase,'PROPOSAL');
+  assert.equal(x.entries.at(-1).data.phase,'EXECUTING', 'declining recovery does not rewrite the legacy checkpoint');
 });
 
 test('v5.20: native Plan Mode recovery asks and changes only OMP mode',async()=>{
@@ -1740,14 +1752,16 @@ test('v5.20: native Plan Mode recovery asks and changes only OMP mode',async()=>
   await x.events.get('session_start')({},x.ctx);
   await x.commands.get('forge').handler('recover',x.ctx);
   assert.equal(x.getPlan(),'active');
-  assert.equal(x.entries.at(-1).data.phase,'REWORK_PLANNING');
+  assert.equal(x.entries.at(-1).data.phase,'REWORK_PLANNING', 'mode-only recovery leaves the historical entry untouched');
   assert.equal(x.entries.at(-1).data.approved,false);
+  await x.commands.get('forge').handler('status',x.ctx);
+  assert.match(x.notifications.at(-1).message,/Forge: PLAN/);
 });
 
 test('v5.20: automatic recovery popup is scheduled on loading an inconsistent session',async()=>{
   const x=setup(); await advanceToReview(x);
   const previous=x.entries.at(-1).data;
-  x.entries.push({type:'custom',customType:'dev.omp-forge.workflow.v1',data:{...previous,phase:'PROPOSAL',planWritten:false,active:true}});
+  x.entries.push({type:'custom',customType:'dev.omp-forge.workflow.v1',data:{...previous,phase:'EXECUTING',approved:false,active:true}});
   const callbacks=[];
   const labels=[];
   x.ctx.setTimeout=callback=>callbacks.push(callback);
@@ -1756,7 +1770,7 @@ test('v5.20: automatic recovery popup is scheduled on loading an inconsistent se
   assert.ok(callbacks.length>0);
   await callbacks.shift()();
   assert.match(labels.at(-1),/State inconsistency/);
-  assert.equal(x.entries.at(-1).data.phase,'PROPOSAL');
+  assert.equal(x.entries.at(-1).data.phase,'EXECUTING', 'declining recovery leaves the legacy checkpoint untouched');
 });
 
 test('v5.20: unsafe mismatch blocks executor subagent before repair is confirmed',async()=>{
@@ -1780,17 +1794,17 @@ test('v5.21: native plan review exit restores Forge EXECUTION status in the foot
   await advanceToReview(x);
   assert.equal(footer.at(-1).value,undefined,'approval overlay owns the UI');
   await x.events.get('plan_review_resolved')({choice:'execute'},x.ctx);
-  assert.match(footer.at(-1).value,/Execution 3\/5/);
+  assert.match(footer.at(-1).value,/Execution 3\/4/);
   assert.equal(widgets.at(-1).value,undefined,'legacy above-editor status was removed');
   x.setPlan('inactive');
   // Emulate the native terminal clearing the footer while leaving Plan Mode.
   footer.length=0;
   await x.events.get('agent_start')({},x.ctx);
-  assert.match(footer.at(-1).value,/Execution 3\/5/);
-  assert.equal(x.entries.at(-1).data.phase,'EXECUTING');
+  assert.match(footer.at(-1).value,/Execution 3\/4/);
+  assert.equal(x.entries.at(-1).data.phase,'EXECUTE');
   footer.length=0;
   await x.events.get('agent_end')({},x.ctx);
-  assert.match(footer.at(-1).value,/Execution 3\/5/);
+  assert.match(footer.at(-1).value,/Execution 3\/4/);
 });
 
 test('v5.21: QA transition and session lifecycle refresh footer without changing approval state', async () => {
@@ -1803,14 +1817,14 @@ test('v5.21: QA transition and session lifecycle refresh footer without changing
   await x.events.get('agent_start')({},x.ctx);
   await runCompletedAgent(x,'forge-executor');
   await x.events.get('session_stop')({},x.ctx);
-  assert.equal(x.entries.at(-1).data.phase,'QA_REVIEW');
+  assert.equal(x.entries.at(-1).data.phase,'QA');
   assert.equal(x.entries.at(-1).data.approved,true);
-  assert.match(statuses.at(-1).value,/QA review 4\/5/);
+  assert.match(statuses.at(-1).value,/QA review 4\/4/);
   // A re-render must not append new checkpoints or advance the Gate.
   const n=x.entries.length;
   await x.events.get('agent_end')({},x.ctx);
   assert.equal(x.entries.length,n);
-  assert.match(statuses.at(-1).value,/QA review 4\/5/);
+  assert.match(statuses.at(-1).value,/QA review 4\/4/);
 });
 
 test('v5.21: status widget fallback still works when OMP footer API is unavailable', async () => {
@@ -1832,13 +1846,13 @@ async function laterBranchSwitch(x, eventName='session_tree') {
 test('v5.22: later branch switch without Forge entries shows recovery, not inactive', async () => {
   const x=setup({persistentSession:true}); await advanceToReview(x);
   await x.events.get('plan_review_resolved')({choice:'execute'},x.ctx);
-  assert.equal(x.entries.at(-1).data.phase,'EXECUTING');
+  assert.equal(x.entries.at(-1).data.phase,'EXECUTE');
   x.setBranch([]);
   await laterBranchSwitch(x);
   await x.commands.get('forge').handler('status',x.ctx);
   const last=x.notifications.at(-1).message;
   assert.match(last,/RECOVERY_AVAILABLE/);
-  assert.match(last,/EXECUTING/);
+  assert.match(last,/EXECUTE/);
   assert.doesNotMatch(last,/Forge: inactive/);
   // Historical approval must not be imported into the newly selected branch.
   // No Forge workflow is active. Forge has NOT silently restored EXECUTING privileges.
@@ -1851,14 +1865,14 @@ test('v5.22: accepting missing-branch checkpoint starts from PLANNING with renew
   x.ctx.ui.select=async (_title, options)=>options[0];
   await x.commands.get('forge').handler('recover',x.ctx);
   const current=x.entries.at(-1).data;
-  assert.equal(current.phase,'PLANNING');
+  assert.equal(current.phase,'PLAN');
   assert.equal(current.approved,false);
   assert.equal(current.planValid,false);
   assert.equal(current.approvedPlanHash,null);
   assert.equal(current.recoveryAudit.at(-1).priorApprovalRevoked,true);
   assert.equal((await x.events.get('tool_call')({toolName:'write',input:{path:'lib/main.dart'}},x.ctx)).block,true);
   await x.commands.get('forge').handler('status',x.ctx);
-  assert.match(x.notifications.at(-1).message,/Forge: PLANNING/);
+  assert.match(x.notifications.at(-1).message,/Forge: PLAN/);
 });
 
 test('v5.22: declining recovery leaves the new OMP branch untouched', async () => {
@@ -1902,10 +1916,10 @@ test('v5.22: unambiguous full-session entry can offer recovery without mirror', 
   x.setBranch([]); await x.events.get('session_start')({},x.ctx);
   await x.commands.get('forge').handler('status',x.ctx);
   assert.match(x.notifications.at(-1).message,/RECOVERY_AVAILABLE/);
-  assert.match(x.notifications.at(-1).message,/QA_EVIDENCE_PENDING/);
+  assert.match(x.notifications.at(-1).message,/QA/);
   x.ctx.ui.select=async (_title,opts)=>opts[0];
   await x.commands.get('forge').handler('recover',x.ctx);
-  assert.equal(x.entries.at(-1).data.phase,'PLANNING');
+  assert.equal(x.entries.at(-1).data.phase,'PLAN');
   assert.equal(x.entries.at(-1).data.approved,false);
 });
 
@@ -1922,13 +1936,13 @@ test('v5.23: approval-driven branch switch carries the fresh approval forward (n
   await x.events.get('session_tree')({},x.ctx);
   const carried=x.entries.at(-1).data;
   assert.equal(x.entries.length,before+1);
-  assert.equal(carried.phase,'EXECUTING');
+  assert.equal(carried.phase,'EXECUTE');
   assert.equal(carried.approved,true);
   assert.equal(carried.approvedPlanHash,approved.approvedPlanHash);
   assert.equal(carried.recoveryAudit.at(-1).reason,'plan-approval-branch-handoff');
   newBranch.push(x.entries.at(-1));
   await x.commands.get('forge').handler('status',x.ctx);
-  assert.match(x.notifications.at(-1).message,/Forge: EXECUTING/);
+  assert.match(x.notifications.at(-1).message,/Forge: EXECUTE/);
   assert.doesNotMatch(x.notifications.at(-1).message,/RECOVERY_AVAILABLE/);
 });
 
@@ -1939,7 +1953,7 @@ test('v5.23: approval handoff is single-use and survives an executionObserved wr
   // an event on the SAME branch must not consume the handoff
   await x.events.get('session_branch')({},x.ctx);
   x.setBranch([]); await x.events.get('session_tree')({},x.ctx);
-  assert.equal(x.entries.at(-1).data.phase,'EXECUTING');
+  assert.equal(x.entries.at(-1).data.phase,'EXECUTE');
   assert.equal(x.entries.at(-1).data.executionObserved,true);
   // consumed: a second empty branch falls back to human recovery
   x.setBranch([]); await x.events.get('session_tree')({},x.ctx);
@@ -2011,7 +2025,7 @@ test('v5.23: blocked workflow in the mirror is offered for recovery', async () =
   persistForgeCheckpoint(join(process.env.PI_CODING_AGENT_DIR,'forge-checkpoints'),id,{...x.entries.at(-1).data,phase:'AGENTS_BLOCKED',active:false});
   x.setBranch([]); await x.events.get('session_tree')({},x.ctx);
   await x.commands.get('forge').handler('status',x.ctx);
-  assert.match(x.notifications.at(-1).message,/RECOVERY_AVAILABLE \| previousGate: AGENTS_BLOCKED/);
+  assert.match(x.notifications.at(-1).message,/RECOVERY_AVAILABLE \| previousGate: REQUIREMENT/);
   x.ctx.ui.select=async (_t,o)=>o[0];
   await x.commands.get('forge').handler('recover',x.ctx);
   assert.equal(x.entries.at(-1).data.phase,'REQUIREMENT');
@@ -2078,14 +2092,14 @@ test('v5.24: order A — resolved(execute) then OMP new session: Forge follows a
   const {previousSessionFile,newBranch}=switchToNewSession(x);
   await x.events.get('session_switch')({reason:'new',previousSessionFile},x.ctx);
   const carried=x.entries.at(-1).data; newBranch.push(x.entries.at(-1));
-  assert.equal(carried.phase,'EXECUTING');
+  assert.equal(carried.phase,'EXECUTE');
   assert.equal(carried.approved,true);
   assert.equal(carried.approvedPlanHash,approvedHash);
   assert.equal(carried.recoveryAudit.at(-1).reason,'plan-approval-new-session-handoff');
   const gate=await x.events.get('before_agent_start')({},x.ctx);
   assert.equal(gate.message.customType,'forge-execution-gate-v5');
   await x.commands.get('forge').handler('status',x.ctx);
-  assert.match(x.notifications.at(-1).message,/Forge: EXECUTING/);
+  assert.match(x.notifications.at(-1).message,/Forge: EXECUTE/);
 });
 
 test('v5.24: order B — new session before resolved: carried as AWAITING_APPROVAL, then approved by resolved', async () => {
@@ -2093,16 +2107,16 @@ test('v5.24: order B — new session before resolved: carried as AWAITING_APPROV
   const {previousSessionFile,newBranch}=switchToNewSession(x);
   await x.events.get('session_switch')({reason:'new',previousSessionFile},x.ctx);
   let w=x.entries.at(-1).data; newBranch.push(x.entries.at(-1));
-  assert.equal(w.phase,'AWAITING_APPROVAL');
+  assert.equal(w.phase,'PLAN');
   assert.equal(w.approved,false);
   assert.equal(w.nativeApprovalPending.reviewId,'rev-1');
   assert.equal((await x.events.get('tool_call')({toolName:'write',input:{path:'lib/main.dart'}},x.ctx)).block,true);
   // a different review's result is ignored
   await x.events.get('plan_review_resolved')({reviewId:'other',choice:'execute'},x.ctx);
-  assert.equal(x.entries.at(-1).data.phase,'AWAITING_APPROVAL');
+  assert.equal(x.entries.at(-1).data.phase,'PLAN');
   await x.events.get('plan_review_resolved')({reviewId:'rev-1',choice:'execute'},x.ctx);
   w=x.entries.at(-1).data;
-  assert.equal(w.phase,'EXECUTING');
+  assert.equal(w.phase,'EXECUTE');
   assert.equal(w.approved,true);
   assert.equal(w.nativeApprovalPending,null);
 });
@@ -2114,7 +2128,7 @@ test('v5.24: order B race — OMP approval mode_change entry promotes before res
   newBranch.push(x.entries.at(-1));
   newBranch.push({type:'mode_change',mode:'none',data:{approvedPlanFilePath:`local://${slug}-plan.md`}});
   const gate=await x.events.get('before_agent_start')({},x.ctx);
-  assert.equal(x.entries.at(-1).data.phase,'EXECUTING');
+  assert.equal(x.entries.at(-1).data.phase,'EXECUTE');
   assert.equal(x.entries.at(-1).data.recoveryAudit.at(-1).reason,'native-approval-mode-change-entry');
   assert.equal(gate.message.customType,'forge-execution-gate-v5');
 });
@@ -2126,7 +2140,7 @@ test('v5.24: approval entry for a DIFFERENT plan file never promotes', async () 
   newBranch.push(x.entries.at(-1));
   newBranch.push({type:'mode_change',mode:'none',data:{approvedPlanFilePath:'local://other-plan.md'}});
   await x.events.get('before_agent_start')({},x.ctx);
-  assert.equal(x.entries.at(-1).data.phase,'AWAITING_APPROVAL');
+  assert.equal(x.entries.at(-1).data.phase,'PLAN');
 });
 
 test('v5.24: plain /new (no open review, no approval) does not carry Forge', async () => {
@@ -2199,7 +2213,7 @@ test('v6.1: summary cannot silently drop the report\'s CRITICAL/HIGH findings', 
   assert.match(ok.content[0].text,/^Forge: requirement summary recorded \(1 CRITICAL\/HIGH, 0 open blocker\(s\)\) → Planning\./);
   assert.match(ok.content[0].text,/\[HIGH\] No tenant column/);
   const w=x.entries.at(-1).data;
-  assert.equal(w.phase,'PLANNING');
+  assert.equal(w.phase,'PLAN');
   assert.deepEqual(w.requirementSummary.specialistSeverities,{critical:0,high:1});
 });
 
@@ -2219,7 +2233,7 @@ test('v6.1: summary is rejected before the report, with bad severity or a too-sh
   assert.equal(x.entries.at(-1).data.phase,'REQUIREMENT');
   r=await submitSummary(x,LOW_SUMMARY);
   assert.notEqual(r.isError,true);
-  assert.equal(x.entries.at(-1).data.phase,'PLANNING');
+  assert.equal(x.entries.at(-1).data.phase,'PLAN');
 });
 
 test('v6.1: session_stop asks for the summary at most twice instead of stalling or blocking', async () => {
@@ -2237,7 +2251,7 @@ test('v6.1: session_stop asks for the summary at most twice instead of stalling 
   assert.equal(w.active,true);
   assert.equal(w.agentRetries['REQUIREMENT:summary'],2);
   assert.notEqual((await submitSummary(x,LOW_SUMMARY)).isError,true);
-  assert.equal(x.entries.at(-1).data.phase,'PLANNING');
+  assert.equal(x.entries.at(-1).data.phase,'PLAN');
 });
 
 test('v6.1: unknown tools remain blocked in REQUIREMENT', async () => {
@@ -2268,6 +2282,38 @@ test('v6.1: requirement synthesis survives native approval into execution', asyn
   await x.events.get('plan_review_requested')({planContent:PLAN,planPath:`local://${x.entries.at(-1).data.slug}-plan.md`},x.ctx);
   await x.events.get('plan_review_resolved')({choice:'keep'},x.ctx);
   const w=x.entries.at(-1).data;
-  assert.equal(w.phase,'EXECUTING'); assert.equal(w.approved,true);
+  assert.equal(w.phase,'EXECUTE'); assert.equal(w.approved,true);
   assert.equal(w.requirementSummary.baseline.startsWith('Goal: CRM'),true);
+});
+
+test('four persisted phases preserve explicit approval and read-only QA', async () => {
+  const x=setup(); await x.events.get('session_start')({},x.ctx);
+  await x.commands.get('forge').handler('Create a CRM',x.ctx);
+  await completeRequirement(x,LOW_SUMMARY);
+  assert.equal(x.entries.at(-1).data.phase,'PLAN');
+  await runCompletedAgent(x,'forge-planner');
+  await writeCanonicalPlan(x);
+  await x.events.get('plan_review_requested')({reviewId:'four-gates',planContent:PLAN,planPath:`local://${x.entries.at(-1).data.slug}-plan.md`},x.ctx);
+  assert.equal(x.entries.at(-1).data.phase,'PLAN');
+  assert.equal(x.entries.at(-1).data.approved,false);
+  assert.equal((await x.events.get('tool_call')({toolName:'write',input:{path:'src/a.ts'}},x.ctx)).block,true);
+  await x.events.get('plan_review_resolved')({reviewId:'four-gates',choice:'keep'},x.ctx);
+  assert.equal(x.entries.at(-1).data.phase,'EXECUTE');
+  x.setPlan('inactive'); await x.events.get('agent_start')({},x.ctx);
+  await runCompletedAgent(x,'forge-executor');
+  await x.events.get('session_stop')({},x.ctx);
+  assert.equal(x.entries.at(-1).data.phase,'QA');
+  assert.equal((await x.events.get('tool_call')({toolName:'write',input:{path:'src/a.ts'}},x.ctx)).block,true);
+  assert.ok(x.entries.filter(e=>e.customType==='dev.omp-forge.workflow.v1' && e.data).every(e=>['REQUIREMENT','PLAN','EXECUTE','QA'].includes(e.data.phase)));
+});
+
+test('native review cannot replace a completed planner report', async () => {
+  const x=setup(); await x.events.get('session_start')({},x.ctx);
+  await x.commands.get('forge').handler('Create a CRM',x.ctx);
+  await completeRequirement(x);
+  await x.events.get('plan_review_requested')({reviewId:'no-planner',planContent:PLAN},x.ctx);
+  assert.equal(x.entries.at(-1).data.planValid,false);
+  await x.events.get('plan_review_resolved')({reviewId:'no-planner',choice:'execute'},x.ctx);
+  assert.equal(x.entries.at(-1).data.phase,'PLAN');
+  assert.equal(x.entries.at(-1).data.approved,false);
 });

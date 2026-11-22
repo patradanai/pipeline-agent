@@ -28,6 +28,7 @@ for (const entry of readdirSync(join(ROOT, 'adapters', 'omp'))) {
 for (const f of coreFiles) cpSync(join(ROOT, 'core', f), join(omp, 'forge', f)); // flat vendoring keeps './core.mjs' imports
 mkdirSync(join(omp, 'agents'), { recursive: true });
 for (const f of agentFiles) cpSync(join(ROOT, 'agents', f), join(omp, 'agents', f));
+cpSync(join(ROOT, 'skills'), join(omp, 'skills'), { recursive: true });
 for (const sh of ['install.sh', 'uninstall.sh', 'smoke-install.sh', 'install-example-skills.sh']) {
   if (existsSync(join(omp, sh))) chmodSync(join(omp, sh), 0o755);
 }
@@ -37,6 +38,7 @@ const market = join(DIST, 'claude-code', 'forge-marketplace');
 const plugin = join(market, 'plugins', 'forge');
 mkdirSync(plugin, { recursive: true });
 cpSync(join(ROOT, 'adapters', 'claude-code', 'plugin'), plugin, { recursive: true });
+cpSync(join(ROOT, 'skills'), join(plugin, 'skills'), { recursive: true });
 mkdirSync(join(plugin, 'core'), { recursive: true });
 for (const f of coreFiles) cpSync(join(ROOT, 'core', f), join(plugin, 'core', f));
 mkdirSync(join(plugin, 'agents'), { recursive: true });

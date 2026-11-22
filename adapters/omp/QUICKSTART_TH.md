@@ -11,7 +11,7 @@ bash ./install.sh
 
 ปิด OMP แล้วเปิดใหม่ เลือก Session ที่มีงาน Forge ด้วย OMP `/resume` หรือ `/forge resume` จาก Main Session.
 
-หลังอนุมัติ Plan และเข้า Execution แถบสถานะด้านล่างควรแสดง `FORGE Execution 3/5` จาก OMP Native Footer; เมื่อเข้า QA จะเปลี่ยนเป็น `FORGE QA review 4/5`.
+Forge ใช้ 4 gate: `REQUIREMENT`, `PLAN`, `EXECUTE`, `QA` โดยต้องได้รับ Native OMP Approval จากผู้ใช้ก่อนเริ่ม Execute
 
 ตรวจสอบด้วย:
 
@@ -20,6 +20,14 @@ bash ./install.sh
 ```
 
 Forge ยังคงใช้ Native OMP Approval, Gate Skills, 6 Agents และไม่ทำ git commit/push เอง.
+
+### Gate Skills ที่ติดตั้งมาพร้อม Forge
+
+แพ็กเกจติดตั้ง `forge-requirement-gate`, `forge-plan-gate`, `forge-execute-gate` และ `forge-qa-gate` ลงใน `~/.omp/agent/skills/<ชื่อ>/SKILL.md` หรือ `$PI_CODING_AGENT_DIR/skills/<ชื่อ>/SKILL.md` เมื่อกำหนดตัวแปรนี้ Forge แนบ skill ของแต่ละ gate ให้ workflow และยังใช้ skill เพิ่มเติมที่ผู้ใช้ตั้งค่าได้ผ่าน `/forge skill` และ `/forge skill list`
+
+Installer ไม่เขียนทับโฟลเดอร์ skill ชื่อเดียวกันที่มีอยู่ จึงรักษาการปรับแต่งของผู้ใช้ไว้ หากต้องการใช้ไฟล์จากแพ็กเกจ ให้สำรองและย้ายโฟลเดอร์เดิมออกก่อนติดตั้งใหม่
+
+QA ตรวจโดย `forge-qa` และ `forge-code-reviewer` อย่างอิสระ หลังบันทึก QA PASS แล้ว `forge-delivery` จัดทำรายงานและข้อความ commit สำหรับผู้ใช้ โดยไม่ stage, commit หรือ push เอง หาก QA ไม่ผ่าน ต้องวางแผนแก้ไขและขออนุมัติใหม่
 
 ---
 

@@ -10,7 +10,7 @@ const temp = mkdtempSync(join(tmpdir(), 'forge-checkpoints-'));
 process.on('exit', () => rmSync(temp, { recursive:true, force:true }));
 const sessionFile = join(temp, 'sessions', 'session-one.jsonl');
 const context = { getSessionId: () => 'session-one', getSessionFile: () => sessionFile };
-const state = { active:true, phase:'EXECUTING', slug:'forge-example', requirement:'Implement test feature', approved:true, planValid:true, planWritten:true, planPath:'local://forge-example-plan.md', approvedPlanHash:'approved-hash', qaStatus:'pending' };
+const state = { active:true, phase:'EXECUTE', slug:'forge-example', requirement:'Implement test feature', approved:true, planValid:true, planWritten:true, planPath:'local://forge-example-plan.md', approvedPlanHash:'approved-hash', qaStatus:'pending' };
 
 test('checkpoint identity is exact to OMP session id and absolute file', () => {
   assert.equal(sessionIdentity(context, temp).sessionFile, sessionFile);
@@ -32,9 +32,9 @@ test('checkpoint mirror survives restart and cannot be loaded under another sess
 test('completed or cancelled state cannot be revived', () => {
   const dir = join(temp,'completed');
   const id = sessionIdentity(context,temp);
-  persistForgeCheckpoint(dir,id,{...state,phase:'DELIVERY',active:false});
+  persistForgeCheckpoint(dir,id,{...state,phase:'QA',qaStatus:'PASS',active:false});
   assert.equal(loadForgeCheckpoint(dir,id),null);
-  persistForgeCheckpoint(dir,id,{...state,active:false,phase:'EXECUTING'});
+  persistForgeCheckpoint(dir,id,{...state,active:false,phase:'EXECUTE'});
   assert.equal(loadForgeCheckpoint(dir,id),null);
 });
 
@@ -48,7 +48,7 @@ test('symlink checkpoint is not followed', () => {
 test('full session history candidate is only selected when unambiguous', () => {
   const entry = data => ({type:'custom',customType:FORGE_STATE_ENTRY,data});
   assert.deepEqual(candidateFromSessionEntries([entry(state)]),state);
-  assert.deepEqual(candidateFromSessionEntries([entry(state),entry({...state,phase:'QA_REVIEW'})]).phase,'QA_REVIEW');
+  assert.deepEqual(candidateFromSessionEntries([entry(state),entry({...state,phase:'QA'})]).phase,'QA');
   assert.equal(candidateFromSessionEntries([entry(state),entry({...state,slug:'forge-other'})]),null);
   assert.equal(candidateFromSessionEntries([entry(state),entry({...state,active:false})]),null);
   assert.equal(candidateFromSessionEntries([entry(state),entry({active:false,version:9})]),null);
@@ -56,7 +56,7 @@ test('full session history candidate is only selected when unambiguous', () => {
 
 test('human-approved off-branch checkpoint returns to fresh planning, not execution', () => {
   const recovered = prepareHumanRecovery(state);
-  assert.equal(recovered.phase,'PLANNING');
+  assert.equal(recovered.phase,'PLAN');
   assert.equal(recovered.approved,false);
   assert.equal(recovered.approvedPlanHash,null);
   assert.equal(recovered.planWritten,false);
@@ -84,13 +84,13 @@ import { loadForgeCheckpointCandidates, pruneForgeCheckpoints, recoveryIdentity 
 test('v5.23: mirror keeps different workflows instead of last-writer-wins', () => {
   const dir=join(temp,'multi'); const id=sessionIdentity(context,temp);
   persistForgeCheckpoint(dir,id,{...state,slug:'forge-a',requirement:'A'});
-  persistForgeCheckpoint(dir,id,{...state,slug:'forge-b',requirement:'B',phase:'PLANNING',approved:false});
+  persistForgeCheckpoint(dir,id,{...state,slug:'forge-b',requirement:'B',phase:'PLAN',approved:false});
   const list=loadForgeCheckpointCandidates(dir,id);
   assert.deepEqual(list.map(c=>c.state.slug),['forge-b','forge-a']);
   assert.ok(list[0].savedAt);
   // updating A moves it to the front without duplicating it
-  persistForgeCheckpoint(dir,id,{...state,slug:'forge-a',requirement:'A',phase:'QA_REVIEW'});
-  assert.deepEqual(loadForgeCheckpointCandidates(dir,id).map(c=>`${c.state.slug}:${c.state.phase}`),['forge-a:QA_REVIEW','forge-b:PLANNING']);
+  persistForgeCheckpoint(dir,id,{...state,slug:'forge-a',requirement:'A',phase:'QA'});
+  assert.deepEqual(loadForgeCheckpointCandidates(dir,id).map(c=>`${c.state.slug}:${c.state.phase}`),['forge-a:QA','forge-b:PLAN']);
 });
 
 test('v5.23: named cancel retires one workflow; anonymous tombstone retires all', () => {
@@ -106,19 +106,20 @@ test('v5.23: named cancel retires one workflow; anonymous tombstone retires all'
   assert.deepEqual(loadForgeCheckpointCandidates(dir,id).map(c=>c.state.slug),['forge-d']);
 });
 
-test('v5.23: blocked (active:false) workflows are restore candidates; delivery is not', () => {
+test('legacy blocked workflows migrate to active gates; completed delivery is not restored', () => {
   const dir=join(temp,'blocked'); const id=sessionIdentity(context,temp);
   persistForgeCheckpoint(dir,id,{...state,phase:'EXECUTION_BLOCKED',active:false});
-  assert.equal(loadForgeCheckpointCandidates(dir,id)[0].state.phase,'EXECUTION_BLOCKED');
+  assert.equal(loadForgeCheckpointCandidates(dir,id)[0].state.phase,'EXECUTE');
   persistForgeCheckpoint(dir,id,{...state,phase:'DELIVERY',active:false});
   assert.deepEqual(loadForgeCheckpointCandidates(dir,id),[]);
 });
 
 test('v5.23: schema 1 mirrors from v5.22 are still readable', () => {
   const dir=join(temp,'schema1'); mkdirSync(dir,{recursive:true}); const id=sessionIdentity(context,temp);
-  writeFileSync(join(dir,`${id.fingerprint}.json`),JSON.stringify({schema:1,identity:id,savedAt:'2026-11-19T00:00:00.000Z',state}));
+  writeFileSync(join(dir,`${id.fingerprint}.json`),JSON.stringify({schema:1,identity:id,savedAt:'2026-11-19T00:00:00.000Z',state:{...state,phase:'EXECUTING'}}));
   const list=loadForgeCheckpointCandidates(dir,id);
   assert.equal(list[0].state.slug,'forge-example');
+  assert.equal(list[0].state.phase,'EXECUTE');
   assert.equal(list[0].savedAt,'2026-11-19T00:00:00.000Z');
 });
 

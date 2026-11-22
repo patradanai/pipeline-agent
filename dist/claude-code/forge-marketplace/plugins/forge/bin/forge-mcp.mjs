@@ -32,7 +32,7 @@ export const TOOLS = [
   },
   {
     name: 'forge_qa_submit',
-    description: 'Submit evidence-backed post-execution QA results grouped by the BIZ IDs in the approved plan. Forge computes the gate and saves the report outside the project. Only valid during Forge QA_REVIEW.',
+    description: 'Submit evidence-backed post-execution QA results grouped by the BIZ IDs in the approved plan. Forge computes the gate and saves the report outside the project. Only valid during Forge QA.',
     inputSchema: {
       type: 'object', additionalProperties: false, required: ['topicResults', 'codeQualityChecks', 'codeReview'],
       properties: {
