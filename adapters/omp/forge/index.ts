@@ -105,7 +105,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
   // session_switch{reason:'new', previousSessionFile}. plan_review_resolved can
   // arrive before OR after that switch, so Forge tracks the open native review.
   const NEW_SESSION_HANDOFF_MS = 60_000;
-  let nativeReview: { reviewId: string; sessionId: string; sessionFile: string | null; slug: string; planHash: string; planFilePath: string | null; at: number } | null = null;
+  let nativeReview: { reviewId: string | null; sessionId: string; sessionFile: string | null; slug: string; planHash: string; planFilePath: string | null; at: number } | null = null;
   let stateWriteSeq = 0;
   let checkpointsPruned = false;
   const READ_ONLY_TOOLS = ['read', 'grep', 'glob', 'ls', 'ask'];
@@ -1051,7 +1051,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
       }
     }
     const r = nativeReview;
-    if (r && r.sessionFile === prevFile && now - r.at <= 24 * 60 * 60 * 1000 &&
+    if (r?.reviewId && r.sessionFile === prevFile && now - r.at <= 24 * 60 * 60 * 1000 &&
         before?.active && before.phase === 'AWAITING_APPROVAL' && before.planValid === true &&
         before.slug === r.slug && before.approvedPlanHash === r.planHash) {
       workflow = { ...before, approved: false, carriedFromSessionFile: prevFile,
@@ -1120,6 +1120,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
     if (ctx.agent?.kind !== 'main') return;
     workspaceDir = ctx.cwd || workspaceDir;
     approvalHandoff = null;
+    nativeReview = null;
     if (!checkpointsPruned) { checkpointsPruned = true; try { pruneForgeCheckpoints(checkpointRoot); } catch { /* best effort */ } }
     planRecoveryEpoch++; planRecoveryScheduled = false;
     recoveryPopupEpoch++; recoveryPopupScheduled = false; readConfig(); restoreState(ctx); updateDashboard(ctx); scheduleStateRecoveryPopup(ctx);
@@ -1133,6 +1134,12 @@ export default function forgeExtension(pi: ExtensionAPI) {
       const branchHasForgeEntry = restoreState(ctx);
       const carried = eventName === 'session_switch' && carryAcrossNewSession(ctx, event, before, branchHasForgeEntry);
       if (!carried && !(eventName === 'session_switch' && event?.reason === 'new')) applyApprovalHandoff(ctx, branchHasForgeEntry);
+      if (!carried && nativeReview && (workflow?.phase !== 'AWAITING_APPROVAL' ||
+          workflow.slug !== nativeReview.slug || workflow.approvedPlanHash !== nativeReview.planHash ||
+          ctx.sessionManager?.getSessionId?.() !== nativeReview.sessionId ||
+          (nativeReview.sessionFile && currentSessionIdentity?.sessionFile !== nativeReview.sessionFile))) {
+        nativeReview = null;
+      }
       if (carried) {
         notify(ctx, workflow.phase === 'EXECUTING'
           ? 'Forge followed the approved plan into OMP\'s new execution session: EXECUTING 3/5.'
@@ -1203,6 +1210,9 @@ export default function forgeExtension(pi: ExtensionAPI) {
         const mismatch = recoveryProposal(workflow, ctx.sessionModes?.getState?.().plan ?? 'unknown');
         if (mismatch) notify(ctx, `Forge state warning: ${mismatch.explanation} Run /forge recover to confirm a safe correction.`, 'warning');
         const missingAgents = workflow?.phase === 'EXECUTION_BLOCKED' ? missingGateAgentsFor({ ...workflow, phase: 'EXECUTING' }) : missingGateAgentsFor(workflow);
+        if (workflow?.phase === 'AWAITING_APPROVAL' && !nativeReview && !workflow.nativeApprovalPending) {
+          notify(ctx, 'Forge is awaiting a native plan review, but no review is tracked in this session. Open /plan-review and approve the plan there; approval is never inferred from a restored checkpoint.', 'warning');
+        }
         notify(ctx, `Forge: ${workflow?.phase ?? 'inactive'} | requirement: ${workflow?.requirement ? String(workflow.requirement).replace(/[\r\n]/g, ' ').slice(0, 80) : '(none)'} | slug: ${workflow?.slug ?? '-'} | approved: ${workflow?.approved === true ? 'yes' : 'no'} | QA: ${workflow?.qaStatus ?? 'pending'} | rework: ${workflow?.reworkCycles ?? 0} | waiting agents: ${missingAgents.join(',') || 'none'}${workflow?.phase === 'EXECUTION_BLOCKED' ? ' | action: /forge qa reviews existing work without rerunning implementation; /forge resume retries execution.' : ''} | global auto: ${autoStart ? 'ON' : 'OFF'}`);
         return;
       }
@@ -1546,8 +1556,8 @@ export default function forgeExtension(pi: ExtensionAPI) {
     };
     saveState(); updateDashboard(ctx);
     const reviewSessionId = typeof event.sessionId === 'string' && event.sessionId ? event.sessionId : ctx.sessionManager?.getSessionId?.();
-    nativeReview = contract.valid && typeof event.reviewId === 'string' && event.reviewId && typeof reviewSessionId === 'string'
-      ? { reviewId: event.reviewId, sessionId: reviewSessionId,
+    nativeReview = contract.valid && typeof reviewSessionId === 'string'
+      ? { reviewId: typeof event.reviewId === 'string' && event.reviewId ? event.reviewId : null, sessionId: reviewSessionId,
           sessionFile: sessionIdentity(ctx.sessionManager, ctx.cwd || workspaceDir)?.sessionFile ?? null,
           slug: workflow.slug, planHash: contract.hash, planFilePath: workflow.nativePlanFilePath, at: Date.now() }
       : null;
@@ -1566,10 +1576,20 @@ export default function forgeExtension(pi: ExtensionAPI) {
   pi.on('plan_review_resolved', async (event, ctx) => {
     if (ctx.agent?.kind !== 'main') return;
     const review = nativeReview;
+    if (!workflow?.active || workflow.phase !== 'AWAITING_APPROVAL') return;
+    // A resolution belongs to one review, not any workflow awaiting approval.
+    // Older OMP versions omit IDs from both review events.
+    const pending = workflow.nativeApprovalPending;
+    if (pending && event.reviewId !== pending.reviewId) return;
+    if (!pending && workflow.planValid && !review) return;
+    if (!pending && review && (event.reviewId || review.reviewId) && event.reviewId !== review.reviewId) return;
+    if (review && !pending) {
+      const identity = sessionIdentity(ctx.sessionManager, ctx.cwd || workspaceDir);
+      if (workflow.slug !== review.slug || workflow.approvedPlanHash !== review.planHash ||
+          ctx.sessionManager?.getSessionId?.() !== review.sessionId ||
+          (review.sessionFile && identity?.sessionFile !== review.sessionFile)) return;
+    }
     if (nativeReview && (!event.reviewId || event.reviewId === nativeReview.reviewId)) nativeReview = null;
-    if (!workflow?.active) return;
-    // A workflow carried into OMP's new execute session answers only its own review.
-    if (workflow.nativeApprovalPending && event.reviewId && event.reviewId !== workflow.nativeApprovalPending.reviewId) return;
     const choice = typeof event.choice === 'string' ? event.choice : (event.choice?.id ?? event.choiceId ?? event.selectedChoice);
     if (['execute', 'compact', 'keep'].includes(choice) && !workflow.planValid) {
       workflow = { ...workflow, phase: 'AWAITING_APPROVAL', approved: false };

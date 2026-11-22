@@ -140,6 +140,48 @@ async function advanceToReview(x) {
   assert.equal(x.entries.at(-1).data.requirements.length,2);
   assert.equal(x.entries.at(-1).data.qualityGates.length,2);
 }
+
+test('native review resolution ignores mismatched IDs and duplicate late events', async () => {
+  const x=setup();
+  await advanceToReview(x);
+  await x.events.get('plan_review_requested')({reviewId:'review-current',planContent:PLAN},x.ctx);
+  const before=x.entries.length;
+  await x.events.get('plan_review_resolved')({reviewId:'review-old',choice:'execute'},x.ctx);
+  await x.events.get('plan_review_resolved')({choice:'execute'},x.ctx);
+  assert.equal(x.entries.length,before);
+  assert.equal(x.entries.at(-1).data.phase,'AWAITING_APPROVAL');
+  await x.events.get('plan_review_resolved')({reviewId:'review-current',choice:'execute'},x.ctx);
+  assert.equal(x.entries.at(-1).data.phase,'EXECUTING');
+  x.setPlan('inactive');
+  await x.events.get('agent_start')({},x.ctx);
+  await runCompletedAgent(x,'forge-executor');
+  await x.events.get('session_stop')({},x.ctx);
+  assert.equal(x.entries.at(-1).data.phase,'QA_REVIEW');
+  const qaState=structuredClone(x.entries.at(-1).data), count=x.entries.length;
+  for (const choice of ['execute','refine',undefined]) {
+    await x.events.get('plan_review_resolved')({reviewId:'review-current',choice},x.ctx);
+  }
+  assert.equal(x.entries.length,count);
+  assert.deepEqual(x.entries.at(-1).data,qaState);
+});
+
+test('a review resolution cannot approve a different session workflow', async () => {
+  const x=setup({persistentSession:true});
+  await advanceToReview(x);
+  await x.events.get('plan_review_requested')({reviewId:'review-original',planContent:PLAN},x.ctx);
+  const other={...x.entries.at(-1).data,slug:'other-workflow'};
+  x.setBranch([{type:'custom',customType:'dev.omp-forge.workflow.v1',data:other}]);
+  x.ctx.sessionManager.getSessionId=()=> 'other-session';
+  x.ctx.sessionManager.getSessionFile=()=>join(tmp,'other-session.jsonl');
+  await x.events.get('session_switch')({reason:'resume'},x.ctx);
+  const count=x.entries.length;
+  await x.events.get('plan_review_resolved')({reviewId:'review-original',choice:'execute'},x.ctx);
+  assert.equal(x.entries.length,count);
+  await x.commands.get('forge').handler('status',x.ctx);
+  assert.match(x.notifications.at(-1).message,/AWAITING_APPROVAL/);
+  assert.ok(x.notifications.some(n=>n.message.includes('Open /plan-review')));
+  assert.match(x.notifications.at(-1).message,/approved: no/);
+});
 async function reachExecutionBlocked(x) {
   await advanceToReview(x);
   await x.events.get('plan_review_resolved')({choice:'execute'},x.ctx);

@@ -50,6 +50,12 @@ the adapter).
 | Forge tools | `pi.registerTool` | plugin MCP server declares schemas; hooks validate (pre) and apply (post) |
 | state | OMP session custom entries (+ checkpoint mirror) | `${CLAUDE_PLUGIN_DATA}/sessions/<session_id>.json`, per-session lock |
 
+OMP review resolutions are accepted only for the currently tracked review and
+workflow. Stale resolutions and duplicate events cannot advance another branch.
+After restart, an untracked review must be reopened; approval is never inferred.
+Recovery suggestions are bound to the exact checkpoint they were generated
+from, so an outdated confirmation cannot overwrite newer state.
+
 ## Claude Code adapter — known gaps (validate on your install)
 
 * Built and tested against the documented hook schemas with simulated

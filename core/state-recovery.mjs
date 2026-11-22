@@ -2,15 +2,28 @@
  * Conservative Forge state reconciliation. These are suggestions, not automatic
  * transitions. Never manufacture an approval or a QA PASS from a phase name.
  */
+import { createHash } from 'node:crypto';
+
+// Checkpoints are JSON data. Sort object keys so equivalent snapshots have the
+// same identity regardless of property insertion order.
+function checkpointFingerprint(state) {
+  const json = JSON.stringify(state, (_key, value) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+    return Object.fromEntries(Object.keys(value).sort().map(key => [key, value[key]]));
+  });
+  return createHash('sha256').update(json).digest('hex');
+}
+
 const PLAN_STAGES = new Set(['PLANNING', 'PROPOSAL', 'REWORK_PLANNING']);
 
 /** Same pinning as `/forge rework`: the superseded approved plan becomes the
  * read-only base, and a NEW local:// plan must be written and re-approved. */
 function reworkPin(state) {
+  const hasBase = state.reworkBaseHash != null || state.reworkBasePlanPath != null;
   return {
     planValid: false, planWritten: false, approvedPlanHash: null, planPath: null,
-    reworkBaseHash: state.approvedPlanHash ?? state.reworkBaseHash ?? null,
-    reworkBasePlanPath: state.reworkBasePlanPath ?? state.planPath ?? null,
+    reworkBaseHash: hasBase ? state.reworkBaseHash ?? null : state.approvedPlanHash ?? null,
+    reworkBasePlanPath: hasBase ? state.reworkBasePlanPath ?? null : state.planPath ?? null,
   };
 }
 
@@ -22,6 +35,7 @@ export function recoveryProposal(state, nativePlan = 'unknown') {
   const written = state.planWritten === true && /^local:\/\/[a-zA-Z0-9][a-zA-Z0-9._-]*-plan\.md$/.test(state.planPath ?? '');
   const issue = (key, target, explanation, patch, category = 'mismatch') => ({
     key, current: phase, target, explanation, patch, category,
+    checkpointFingerprint: checkpointFingerprint(state),
   });
 
   if (phase === 'EXECUTING' && !hasApprovedEvidence) {
@@ -84,7 +98,10 @@ export function applyRecoveryProposal(state, proposal) {
   if (!state || !proposal || !state.active) throw new Error('No active state to recover');
   const current = recoveryProposal(state, proposal.category === 'native-mode' ? 'inactive' : 'unknown');
   if (!current || current.key !== proposal.key || current.current !== proposal.current ||
-      current.target !== proposal.target) throw new Error('Recovery suggestion expired; re-check state');
+      current.target !== proposal.target || current.category !== proposal.category ||
+      current.checkpointFingerprint !== proposal.checkpointFingerprint) {
+    throw new Error('Recovery suggestion expired; re-check state');
+  }
   if (proposal.category === 'native-mode') return state;
   return { ...state, ...current.patch, recoveryAudit: [ ...(state.recoveryAudit ?? []), {
     from: current.current, to: current.target, reason: current.key,
