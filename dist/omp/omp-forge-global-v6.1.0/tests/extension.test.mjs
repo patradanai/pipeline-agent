@@ -641,35 +641,19 @@ test('v5.1: QA prevents arbitrary shell and exec aliases, not just bash', async 
   }
 });
 
-// v5.2: The bare /forge command must provide native multiline composition.
-test('v5.2: /forge opens multiline editor and preserves line breaks before starting', async () => {
+// Bare /forge prefills the main composer: only it delivers pasted images to extensions.
+test('bare /forge prefills the composer with forge: and starts nothing', async () => {
   const x = setup();
   await x.events.get('session_start')({}, x.ctx);
-  const draft = 'Feature: Replacement debit card\n\nConstraints:\n- Keep existing behavior\n- No commits';
-  let editorCalls = 0;
-  x.ctx.ui.input = async () => { throw new Error('single-line input must never be opened'); };
-  x.ctx.ui.editor = async (title, prefill) => {
-    editorCalls++;
-    assert.match(title, /Forge/);
-    assert.equal(prefill, '');
-    return draft;
-  };
+  const prefills = [];
+  x.ctx.ui.editor = async () => { throw new Error('dialog must not open'); };
+  x.ctx.ui.setEditorText = t => prefills.push(t);
   await x.commands.get('forge').handler('', x.ctx);
-  assert.equal(editorCalls, 1);
-  assert.equal(x.entries.at(-1).data.requirement, draft);
-  assert.equal(x.entries.at(-1).data.phase, 'REQUIREMENT');
-  assert.equal(x.sent.length, 1);
-});
-
-test('v5.2: cancelling or submitting empty multiline editor does not start workflow', async () => {
-  for (const result of [undefined, null, '', '  \n  ']) {
-    const x = setup();
-    await x.events.get('session_start')({}, x.ctx);
-    x.ctx.ui.editor = async () => result;
-    await x.commands.get('forge').handler('', x.ctx);
-    assert.equal(x.sent.length, 0);
-    assert.equal(x.entries.length, 0);
-  }
+  assert.deepEqual(prefills, ['forge: ']);
+  assert.equal(x.entries.length, 0);
+  assert.equal(x.sent.length, 0);
+  assert.match(x.notifications.at(-1).message, /Shift\+Enter/);
+  assert.match(x.notifications.at(-1).message, /image/i);
 });
 
 test('v5.2: direct /forge args and management commands do not open multiline editor', async () => {
@@ -682,13 +666,27 @@ test('v5.2: direct /forge args and management commands do not open multiline edi
   assert.equal(x.entries.at(-1).data.requirement, 'Create a CRM');
 });
 
-test('v5.2: unsupported editor API warns rather than silently using single line', async () => {
+test('bare /forge without setEditorText warns and starts nothing', async () => {
   const x = setup();
   await x.events.get('session_start')({}, x.ctx);
-  x.ctx.ui.input = async () => { throw new Error('no fallback to single line'); };
   await x.commands.get('forge').handler('', x.ctx);
   assert.equal(x.entries.length, 0);
-  assert.match(x.notifications.at(-1).message, /multiline requirement editor/i);
+  assert.match(x.notifications.at(-1).message, /cannot prefill the prompt/);
+});
+
+test('forge: input with pasted images saves them and lists their paths in the requirement', async () => {
+  const x = setup(); await x.events.get('session_start')({}, x.ctx);
+  const data = Buffer.from('fake-png-bytes').toString('base64');
+  const result = await x.events.get('input')({source:'interactive', text:'forge: Build login\n\nMatch [Image #1]', images:[{type:'image', data, mimeType:'image/png'}]}, x.ctx);
+  const state = x.entries.at(-1).data;
+  const file = join(process.env.PI_CODING_AGENT_DIR, 'forge-attachments', state.slug, 'image-1.png');
+  assert.equal(state.phase, 'REQUIREMENT');
+  assert.equal(readFileSync(file, 'utf8'), 'fake-png-bytes');
+  assert.ok(state.requirement.startsWith('Build login\n\nMatch [Image #1]'));
+  assert.ok(state.requirement.includes(`- [Image #1] ${file}`));
+  assert.ok(result.text.includes(file));
+  assert.equal('images' in result, false); // attachments preserved on the instruction
+  assert.equal(x.sent.length, 0);
 });
 
 // v5.3 regression: the UI shows one REQUIREMENT gate, never internal steps.

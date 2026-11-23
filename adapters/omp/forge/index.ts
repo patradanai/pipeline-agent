@@ -80,6 +80,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
   let currentSessionIdentity: any = null;
   let activeSessionManager: any = null;
   const checkpointRoot = process.env.FORGE_CHECKPOINT_DIR || join(agentRoot, 'forge-checkpoints');
+  const attachmentRoot = join(agentRoot, 'forge-attachments');
   let autoStart = false;
   const runningTasks = new Map<string, { key: string; agents: string[]; qaStatus: string | null; reworkCycles: number }>();
   // Forge's own plan review opens once the proposing turn is idle. The epoch
@@ -875,7 +876,27 @@ export default function forgeExtension(pi: ExtensionAPI) {
     tick(0);
   }
 
-  async function begin(requirement: string, ctx: any, useInputReplacement = false) {
+  type PastedImage = { type: 'image'; data: string; mimeType?: string };
+  function isPastedImage(value: unknown): value is PastedImage {
+    if (!value || typeof value !== 'object') return false;
+    const img = value as Record<string, unknown>; // plain object checked above
+    return img.type === 'image' && typeof img.data === 'string' && img.data.length > 0;
+  }
+
+  function saveRequirementImages(slug: string, images: unknown[]): string[] {
+    const valid = images.filter(isPastedImage);
+    if (!valid.length) return [];
+    const dir = join(attachmentRoot, slug);
+    mkdirSync(dir, { recursive: true });
+    return valid.map((img, index) => {
+      const ext = String(img.mimeType ?? '').split('/')[1]?.toLowerCase().replace(/[^a-z0-9]/g, '') || 'img';
+      const file = join(dir, `image-${index + 1}.${ext}`);
+      writeFileSync(file, Buffer.from(img.data, 'base64'));
+      return file;
+    });
+  }
+
+  async function begin(requirement: string, ctx: any, useInputReplacement = false, images: unknown[] = []) {
     if (workflow?.active) {
       notify(ctx, 'A Forge workflow is active. Steer it, or use /forge off.', 'warning');
       return null;
@@ -901,7 +922,14 @@ export default function forgeExtension(pi: ExtensionAPI) {
       notify(ctx, `Forge cannot start: missing required OMP agent definitions: ${missing.join(', ')}. Check /agents or reinstall the Forge agent files.`, 'error');
       return null;
     }
-    workflow = initialState(requirement, undefined, configuredAgents, configuredSkills, skillPins);
+    let next = initialState(requirement, undefined, configuredAgents, configuredSkills, skillPins);
+    if (images.length) {
+      let paths: string[];
+      try { paths = saveRequirementImages(next.slug, images); }
+      catch (err) { notify(ctx, `Forge cannot start: could not save pasted images: ${String(err)}`, 'error'); return null; }
+      if (paths.length) next = { ...next, requirement: `${next.requirement}\n\nAttached images (pasted with this requirement; open each with the read tool):\n${paths.map((p, i) => `- [Image #${i + 1}] ${p}`).join('\n')}` };
+    }
+    workflow = next;
     pendingCheckpointRecovery = null; reviewEpoch++; reviewScheduled = false;
     saveState();
     updateDashboard(ctx);
@@ -1082,11 +1110,12 @@ export default function forgeExtension(pi: ExtensionAPI) {
     const text = String(event.text ?? '').trim();
     const explicitPrefix = /^forge\s*:\s*/i.test(text);
     if (!explicitPrefix && !autoStart) return;
-    if (!isAutoEligible(text, event.source, Boolean(workflow?.active), Boolean(event.images?.length))) return;
+    const images = Array.isArray(event.images) ? event.images : [];
+    if (!isAutoEligible(text, event.source, Boolean(workflow?.active), images.length > 0 && !explicitPrefix)) return;
     if (ctx.sessionModes?.getState?.().plan !== 'inactive') return;
     const requirement = explicitPrefix ? text.replace(/^forge\s*:\s*/i, '').trim() : text;
     if (!requirement) return;
-    const instruction = await begin(requirement, ctx, true);
+    const instruction = await begin(requirement, ctx, true, images);
     if (instruction) return { text: instruction };
   });
 
@@ -1239,21 +1268,17 @@ export default function forgeExtension(pi: ExtensionAPI) {
         pi.sendUserMessage(phaseInstruction(workflow), { attribution: 'agent' });
         return;
       }
-      let requirement = command.requirement;
+      const requirement = command.requirement;
       if (!requirement) {
-        // TUI native editor supports paragraphs, lists and pasted specifications.
-        // Unlike ui.input(), this is a multi-line dialog. Cancel never starts a run.
-        if (typeof ctx.ui?.editor !== 'function') {
-          notify(ctx, 'This OMP client does not support the multiline requirement editor. Use /forge <requirement> or update OMP.', 'warning');
+        // The main composer is the only OMP surface that delivers pasted images to
+        // extensions (input event). Prefill it; the forge: input hook starts the run.
+        if (typeof ctx.ui?.setEditorText !== 'function') {
+          notify(ctx, 'This OMP client cannot prefill the prompt. Type "forge: <requirement>" in the prompt, or use /forge <requirement>.', 'warning');
           return;
         }
-        const result = await ctx.ui.editor('Forge · Describe your requirement (multiline)', '');
-        if (result == null) return; // user cancelled the editor
-        requirement = String(result);
-        if (!requirement.trim()) {
-          notify(ctx, 'Forge requirement was empty. Nothing started.', 'warning');
-          return;
-        }
+        ctx.ui.setEditorText('forge: ');
+        notify(ctx, 'Forge: write your requirement after "forge: " in the prompt. Shift+Enter adds a line, Ctrl+V pastes an image. Press Enter to start.');
+        return;
       }
       await begin(requirement, ctx);
     },

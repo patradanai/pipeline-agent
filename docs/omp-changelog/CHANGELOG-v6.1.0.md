@@ -36,6 +36,14 @@ checks that made the old gate rigorous.
   `plan_review_requested`/`plan_review_resolved`, approval handoff across
   branch/new-session switches, and the native Plan Mode recovery prompt.
   Approval now always happens in the current session.
+- Bare `/forge` (OMP) no longer opens the text-only multiline dialog, which
+  dropped pasted images. It prefills the main prompt with `forge: `; write the
+  requirement there (Shift+Enter for new lines, Ctrl+V to paste images) and
+  press Enter. The explicit `forge:` prefix now starts Forge even with images
+  attached (implicit auto-start still skips messages with images). Pasted images
+  are saved to `~/.omp/agent/forge-attachments/<slug>/image-<n>.<ext>` and their
+  paths are appended to the requirement, so `forge-requirement` and later gates
+  can open them with the read tool.
 
 ## Removed
 

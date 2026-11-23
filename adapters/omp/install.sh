@@ -88,7 +88,7 @@ printf 'Retired agents (merged into forge-requirement) moved to backup: %s\n' "$
 if ! cmp -s "$SOURCE_ROOT/agents/forge-requirement.md" "$AGENTS/forge-requirement.md"; then
   printf 'NOTE: forge-requirement now runs the whole Requirement gate in one pass, but your installed copy differs from the bundled one. Compare it with %s, or replace it: FORGE_REINSTALL_AGENTS=1 bash install.sh (backups kept).\n' "$SOURCE_ROOT/agents/forge-requirement.md"
 fi
-printf 'Restart OMP. Then type: /forge (opens multiline requirement editor)\n'
+printf 'Restart OMP. Then type: /forge (prefills "forge: " in the prompt; Shift+Enter for new lines, Ctrl+V to paste images)\n'
 printf 'Manage agent models/prompts with OMP /agents; view fixed Forge map with /forge agents\n'
 printf 'Forge plan mode with its own approval dialog; no automatic git commits or pushes.\n'
 printf 'Requirement gate: one forge-requirement pass (intake, gaps, critique, architecture, QA strategy, self-challenge), then your review via forge_requirement_summary\n'
