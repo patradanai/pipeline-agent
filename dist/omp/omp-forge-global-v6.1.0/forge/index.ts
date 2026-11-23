@@ -697,8 +697,9 @@ export default function forgeExtension(pi: ExtensionAPI) {
   /** Forge runs its own plan mode; native OMP Plan Mode would block approved
    * implementation writes. "exit" leaves it without approving or deleting a draft. */
   async function exitNativePlanMode(ctx: any): Promise<boolean> {
-    const plan = ctx.sessionModes?.getState?.().plan;
-    if (!plan || plan === 'inactive') return true;
+    // OMP reports each session mode as `{ status: 'inactive' | 'active' | 'paused' }`.
+    const status = ctx.sessionModes?.getState?.().plan?.status;
+    if (!status || status === 'inactive') return true;
     try {
       const result = await ctx.sessionModes.set({ mode: 'plan', action: 'exit' });
       return result?.ok === true;
@@ -1212,7 +1213,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
     const explicitPrefix = /^forge\s*:\s*/i.test(text);
     if (!explicitPrefix && !autoStart) return;
     if (!isAutoEligible(text, event.source, Boolean(workflow?.active), images.length > 0 && !explicitPrefix)) return;
-    if (ctx.sessionModes?.getState?.().plan !== 'inactive') return;
+    if (ctx.sessionModes?.getState?.().plan?.status !== 'inactive') return;
     const requirement = explicitPrefix ? text.replace(/^forge\s*:\s*/i, '').trim() : text;
     if (!requirement) return;
     const instruction = await begin(requirement, ctx, true, images);
