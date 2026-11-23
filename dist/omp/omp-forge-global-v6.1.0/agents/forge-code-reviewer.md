@@ -3,6 +3,7 @@ name: forge-code-reviewer
 description: OMP Forge Global v5 · Independent Code Reviewer
 tools: read, grep, glob
 blocking: true
+model: anthropic/claude-sonnet-5-5, sonnet
 ---
 
 # Independent Code Reviewer — OMP Forge Global

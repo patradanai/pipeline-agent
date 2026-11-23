@@ -66,15 +66,17 @@ AI เรียกคำสั่งเหล่านี้แทนคุณ�
 
 ## ค่าใช้ token
 
-Forge ใช้หลาย agent จึงกิน token มากกว่าการสั่ง Claude ตรง ๆ เลือกระดับโมเดลตอน build ได้ (ไม่ลดขั้นตอน ลดแค่โมเดล):
+Forge ใช้หลาย agent จึงกิน token มากกว่าการสั่ง Claude ตรง ๆ เลือกระดับโมเดลตอน build ได้ (ไม่ลดขั้นตอน ลดแค่โมเดล) ใช้ได้ทั้ง Claude Code และ OMP:
 
 | `FORGE_MODELS` | opus | sonnet | haiku |
 |---|---|---|---|
-| `rigor` (ค่าเริ่มต้น) | requirement, planner, qa, code-reviewer | executor, delivery | — |
+| `rigor` (ค่าเริ่มต้น) | requirement, planner | qa, code-reviewer | executor, delivery |
 | `balanced` | requirement, planner, qa, code-reviewer | executor | delivery |
 | `economy` | — | 5 ตัว | delivery |
 
 `forge-requirement` ใช้ opus ทั้งใน `rigor` และ `balanced` เพราะรับงาน critic ไปด้วย
+
+OMP: build ใส่ `model:` ให้ไฟล์ `forge-*.md` ตาม profile (เช่น `anthropic/claude-opus-5-5, opus` คือลอง id เต็มก่อน แล้ว fallback เป็น alias) แก้ต่อได้ใน OMP `/agents` ส่วน `install.sh` จะไม่ทับไฟล์ agent ที่ติดตั้งไว้แล้ว ถ้าต้องการโมเดลใหม่ให้รัน `FORGE_REINSTALL_AGENTS=1 bash install.sh` (สำรองไฟล์เดิมไว้ใน `forge-backups/`)
 
 ```bash
 FORGE_MODELS=balanced npm test

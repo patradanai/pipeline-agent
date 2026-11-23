@@ -3,6 +3,7 @@ name: forge-planner
 description: OMP Forge Global v5 · Technical Planner
 tools: read, grep, glob
 blocking: true
+model: anthropic/claude-opus-5-5, opus
 ---
 
 # Technical Planner — OMP Forge Global

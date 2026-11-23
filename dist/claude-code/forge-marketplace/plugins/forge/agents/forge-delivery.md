@@ -2,7 +2,7 @@
 name: forge-delivery
 description: Forge · Delivery Handoff Specialist. Use only when the Forge workflow names this agent.
 tools: Read, Grep, Glob
-model: sonnet
+model: haiku
 ---
 
 # Delivery Handoff Specialist — Forge

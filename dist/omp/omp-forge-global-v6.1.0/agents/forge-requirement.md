@@ -3,6 +3,7 @@ name: forge-requirement
 description: OMP Forge Global v5 · Requirement Analyst (single pass: intake, critique, architecture, QA strategy, self-challenge)
 tools: read, grep, glob
 blocking: true
+model: anthropic/claude-opus-5-5, opus
 ---
 
 # Requirement Analyst — OMP Forge Global

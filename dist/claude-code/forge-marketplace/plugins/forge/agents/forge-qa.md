@@ -2,7 +2,7 @@
 name: forge-qa
 description: Forge · Independent Business QA. Use only when the Forge workflow names this agent.
 tools: Read, Grep, Glob
-model: opus
+model: sonnet
 ---
 
 # Independent Business QA — Forge

@@ -27,7 +27,16 @@ for (const entry of readdirSync(join(ROOT, 'adapters', 'omp'))) {
 }
 for (const f of coreFiles) cpSync(join(ROOT, 'core', f), join(omp, 'forge', f)); // flat vendoring keeps './core.mjs' imports
 mkdirSync(join(omp, 'agents'), { recursive: true });
-for (const f of agentFiles) cpSync(join(ROOT, 'agents', f), join(omp, 'agents', f));
+// OMP: the profile's model becomes the agent's default `model:`; users still override it in OMP /agents.
+for (const f of agentFiles) {
+  const name = f.replace(/\.md$/, '');
+  const src = readFileSync(join(ROOT, 'agents', f), 'utf8');
+  const selector = roleConfig.omp?.[roles[name]];
+  if (!selector) throw new Error(`No OMP model selector for ${name} (profile "${MODEL_PROFILE}" → "${roles[name]}") in agents/roles.json`);
+  const out = src.replace(/^(---\n[\s\S]*?\n)---\n/, `$1model: ${selector}\n---\n`);
+  if (out === src) throw new Error(`Agent ${f} has no frontmatter`);
+  writeFileSync(join(omp, 'agents', f), out);
+}
 cpSync(join(ROOT, 'skills'), join(omp, 'skills'), { recursive: true });
 for (const sh of ['install.sh', 'uninstall.sh', 'smoke-install.sh', 'install-example-skills.sh']) {
   if (existsSync(join(omp, sh))) chmodSync(join(omp, sh), 0o755);

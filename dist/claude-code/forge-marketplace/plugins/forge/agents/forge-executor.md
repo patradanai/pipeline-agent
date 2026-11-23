@@ -2,7 +2,7 @@
 name: forge-executor
 description: Forge · Implementation Executor. Use only when the Forge workflow names this agent.
 tools: Read, Grep, Glob, Edit, Write
-model: sonnet
+model: haiku
 ---
 
 # Implementation Executor — Forge

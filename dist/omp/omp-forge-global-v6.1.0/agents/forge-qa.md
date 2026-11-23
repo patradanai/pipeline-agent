@@ -3,6 +3,7 @@ name: forge-qa
 description: OMP Forge Global v5 · Independent Business QA
 tools: read, grep, glob
 blocking: true
+model: anthropic/claude-sonnet-5-5, sonnet
 ---
 
 # Independent Business QA — OMP Forge Global

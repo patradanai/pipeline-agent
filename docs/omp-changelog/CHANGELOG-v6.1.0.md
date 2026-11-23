@@ -44,6 +44,15 @@ checks that made the old gate rigorous.
   are saved to `~/.omp/agent/forge-attachments/<slug>/image-<n>.<ext>` and their
   paths are appended to the requirement, so `forge-requirement` and later gates
   can open them with the read tool.
+- Default model profile `rigor` is now: requirement and planner on opus, QA
+  and code reviewer on sonnet, executor and delivery on haiku. `balanced` and
+  `economy` are unchanged.
+- OMP now gets the profile too: the build writes a default `model:` into each
+  bundled `forge-*.md` (exact Anthropic id first, bare alias as fallback, e.g.
+  `anthropic/claude-haiku-5-5, haiku`). OMP `/agents` can still change it.
+  `install.sh` keeps agent files that are already installed; run
+  `FORGE_REINSTALL_AGENTS=1 bash install.sh` to take the new defaults (old files
+  are backed up).
 
 ## Removed
 

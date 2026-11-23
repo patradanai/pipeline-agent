@@ -2,7 +2,7 @@
 name: forge-code-reviewer
 description: Forge · Independent Code Reviewer. Use only when the Forge workflow names this agent.
 tools: Read, Grep, Glob
-model: opus
+model: sonnet
 ---
 
 # Independent Code Reviewer — Forge

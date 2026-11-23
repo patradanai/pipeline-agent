@@ -49,7 +49,7 @@ and during QA/delivery; specialists read-only; executor has no shell; wrong agen
 
 ## Models
 
-Set in `agents/roles.json` (opus for analysis/planning/QA, sonnet for executor/delivery), then rebuild.
+Set in `agents/roles.json` (default `rigor`: opus for requirement/planner, sonnet for QA/code review, haiku for executor/delivery), then rebuild. Pick another profile with `FORGE_MODELS=balanced|economy`.
 
 ## Validate on first run
 

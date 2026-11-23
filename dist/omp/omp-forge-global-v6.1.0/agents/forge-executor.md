@@ -3,6 +3,7 @@ name: forge-executor
 description: OMP Forge Global v5 · Implementation Executor
 tools: read, grep, glob, edit, write
 blocking: true
+model: anthropic/claude-haiku-5-5, haiku
 ---
 
 # Implementation Executor — OMP Forge Global

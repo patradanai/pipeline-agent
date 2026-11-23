@@ -3,6 +3,7 @@ name: forge-delivery
 description: OMP Forge Global v5 · Delivery Handoff Specialist
 tools: read, grep, glob
 blocking: true
+model: anthropic/claude-haiku-5-5, haiku
 ---
 
 # Delivery Handoff Specialist — OMP Forge Global

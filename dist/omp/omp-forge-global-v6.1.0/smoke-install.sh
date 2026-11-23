@@ -18,6 +18,8 @@ for f in forge-state.mjs workspace.mjs transitions.mjs platform.mjs engine.mjs; 
 [[ -f "$TEST_ROOT/extensions/forge/state-recovery.mjs" ]]
 [[ -f "$TEST_ROOT/extensions/forge/index.ts" ]]
 [[ "$(find "$TEST_ROOT/agents" -name 'forge-*.md' | wc -l | tr -d ' ')" -eq 6 ]]
+# Freshly installed agents carry the build profile's default model; OMP /agents can still change it.
+grep -q '^model: ' "$TEST_ROOT/agents/forge-executor.md"
 [[ ! -e "$TEST_ROOT/agents/forge-critic.md" && -z "$(find "$TEST_ROOT/agents" -name 'forge-architect.md*')" ]]
 grep -R -q 'RETIRED CRITIC' "$TEST_ROOT/forge-backups"
 grep -R -q 'RETIRED ARCHITECT' "$TEST_ROOT/forge-backups"
