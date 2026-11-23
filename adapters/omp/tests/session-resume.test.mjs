@@ -79,7 +79,7 @@ test('/forge resume offers past Forge session, switches natively and continues w
   const pi={ zod:fakeZ,setLabel(){}, on(name,handler){handlers.set(name,handler)},registerCommand(name,cmd){commands.set(name,cmd)},registerTool(){}, appendEntry(type,data){branch.push({type:'custom',customType:type,data})},sendUserMessage(msg){calls.push(['message',msg])} };
   forgeExtension(pi);
   const ctx={ agent:{kind:'main'},mode:'tui',cwd:tmp,sessionManager:new Manager(),hasPendingMessages(){return false},isIdle(){return true},
-    sessionModes:{getState(){return {plan}}, async set(){plan='active';return {ok:true}}},
+    sessionModes:{getState(){return {plan:{status:plan}}}, async set(){plan='active';return {ok:true}}},
     ui:{notify(m){notifications.push(m)},async select(title,options){calls.push(['select',title,options]);return options[0]},setWidget(){}},
     async switchSession(path){calls.push(['switch',path]);currentFile=path;branch=[{type:'custom',customType:FORGE_STATE_ENTRY,data:active}];await handlers.get('session_switch')({},ctx);return {cancelled:false}},
   };
@@ -120,7 +120,7 @@ test('/forge resume offers all-projects search and restores blocked plan without
   const pi={zod, setLabel(){},on(n,f){events.set(n,f)},registerCommand(n,c){commands.set(n,c)},registerTool(){},appendEntry(n,d){branch.push({type:'custom',customType:n,data:d})},sendUserMessage(...args){calls.push(['message',...args])}};
   forgeExtension(pi);
   const ctx={agent:{kind:'main'},mode:'tui',cwd:tmp,sessionManager:new Manager(),isIdle(){return true},hasPendingMessages(){return false},
-    sessionModes:{getState(){return {plan}},async set(){plan='active';return {ok:true}}},
+    sessionModes:{getState(){return {plan:{status:plan}}},async set(){plan='active';return {ok:true}}},
     ui:{notify(m){calls.push(['notify',m])},setWidget(){},async select(_title,options){calls.push(['picker',options]);return options[0]}},
     async switchSession(path){calls.push(['switch',path]);currentFile=path;branch=[{type:'custom',customType:FORGE_STATE_ENTRY,data:blocked}];await events.get('session_switch')({},ctx);return {cancelled:false}},
   };
@@ -160,7 +160,7 @@ test('/forge resume recovers selected EXECUTING workflow while another REQUIREME
   forgeExtension(pi);
   const ctx={agent:{kind:'main'},mode:'tui',cwd:tmp,sessionManager:new Manager(),
     ui:{setWidget(){},notify(message){notifications.push(message)},async select(_title,options){calls.push(['select',options]);return options.find(x=>x.includes('EXECUTE'))}},
-    sessionModes:{getState(){return {plan:'inactive'}}},
+    sessionModes:{getState(){return {plan:{status:'inactive'}}}},
     async switchSession(path){calls.push(['switch',path]);currentFile=path;branch=[{type:'custom',customType:FORGE_STATE_ENTRY,data:executing}];await events.get('session_switch')({},ctx);return {cancelled:false}}};
   await events.get('session_start')({},ctx);
   await commands.get('forge').handler('resume',ctx);
@@ -209,7 +209,7 @@ test('resume picker lets user choose current rather than silently using current 
   forgeExtension(pi);
   const ctx={agent:{kind:'main'},mode:'tui',cwd:tmp,sessionManager:new Manager(),
     ui:{notify(x){notices.push(x)},setWidget(){},async select(_title,options){assert.ok(options[0].includes('Continue current'));return options[0]}},
-    sessionModes:{getState(){return {plan:'active'}},async set(){return {ok:true}}},
+    sessionModes:{getState(){return {plan:{status:'active'}}},async set(){return {ok:true}}},
     async switchSession(){switches++;return {cancelled:false}}};
   await events.get('session_start')({},ctx);
   await commands.get('forge').handler('resume',ctx);

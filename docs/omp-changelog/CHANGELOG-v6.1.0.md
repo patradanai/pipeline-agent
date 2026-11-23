@@ -81,6 +81,11 @@ checks that made the old gate rigorous.
   `install.sh` keeps agent files that are already installed; run
   `FORGE_REINSTALL_AGENTS=1 bash install.sh` to take the new defaults (old files
   are backed up).
+- Fix: `forge: <requirement>` typed in the prompt never started Forge. OMP
+  reports native Plan Mode as `{ status: 'inactive' }`, but Forge compared the
+  whole object to `'inactive'`, so the input hook always bailed and the prompt
+  went to the main model unchanged (no gates, no `forge-*` agents, so no
+  per-agent model switch). Forge now reads `plan.status`.
 
 ## Removed
 

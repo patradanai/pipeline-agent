@@ -57,7 +57,7 @@ function setup({persistentSession=false} = {}) {
   const ctx = {
     agent: {kind:'main'}, mode:'tui',
     sessionModes: {
-      getState: () => ({plan}),
+      getState: () => ({plan:{status:plan}}),
       set: async ({action} = {}) => { plan = action === 'exit' ? 'inactive' : 'active'; return {ok:true,changed:true}; },
     },
     sessionManager: { getBranch: () => branchEntries ?? entries, getEntries: () => entries, getSessionId: () => persistentSession ? `test-session-${savedSessionSeq}` : 'test-session', getSessionFile: () => sessionPath },
