@@ -1535,7 +1535,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
 
     if (['write', 'edit', 'apply_patch'].includes(tool)) {
       // Forge's own plan mode: the single plan file of the current PLAN gate is
-      // the only writable path before human approval. xd://propose stays blocked.
+      // the only writable path before human approval. Native propose devices stay blocked.
       const target = String(input.path ?? input.file_path ?? input.filePath ?? input.target ?? input.url ?? '');
       if (tool === 'write' && workflow.phase === 'PLAN' && target === forgePlanPath(workflow)) {
         if (workflow.planWritten && workflow.planValid) {
