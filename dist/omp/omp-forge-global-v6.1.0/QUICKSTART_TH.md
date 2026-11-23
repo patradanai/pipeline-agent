@@ -44,7 +44,7 @@ QA ตรวจโดย `forge-qa` และ `forge-code-reviewer` อย่า
 | PLAN | ถอนแผนที่เสนอไว้ แล้ว `forge-planner` แก้แผนเดิมแบบ delta (ID เดิมคงไว้) |
 | EXECUTE / QA (รวม QA PASS ก่อนส่งมอบ) | ยกเลิกการอนุมัติ แผนเดิมกลายเป็นฐาน rework แบบอ่านอย่างเดียว planner แก้เฉพาะส่วนที่ steering เปลี่ยน แล้วต้องอนุมัติใหม่ Forge ไม่สร้างรายงาน QA BLOCKED ปลอม และ executor ที่ยังรันอยู่แก้ไฟล์ต่อไม่ได้ |
 
-steering ทุกข้อ (เก็บสูงสุด 20 ข้อล่าสุด) อยู่ใน state และแนบไปกับคำสั่ง Requirement, Planning และ Rework ทุกครั้ง จึงไม่หายเมื่อ resume หรือ compact ข้อความ prompt ส่งให้ model ครั้งเดียว ไม่ซ้ำ ดูจำนวน steering ได้จาก `/forge status` (`steering: N`) และแถบสถานะ (`Steering N`)
+steering ทุกข้ออยู่ใน state และแนบไปกับคำสั่ง Requirement, Planning และ Rework ทุกครั้ง ไม่มีการตัดข้อเก่าทิ้งเมื่อเกิน 20 ข้อ จึงรักษา requirement เดิมเมื่อ resume หรือ compact ข้อความ prompt ส่งให้ model ครั้งเดียวต่อคำสั่ง ไม่ซ้ำ ดูจำนวน steering ได้จาก `/forge status` (`steering: N`) และแถบสถานะ (`Steering N`) ประวัติที่ยาวขึ้นจะเพิ่ม context ที่ต้องใช้
 
 ## v6.1: Requirement รอบเดียว agent เดียว
 

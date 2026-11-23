@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 420" role="img" aria-labelledby="title desc">
+  <title id="title">Forge human-approved AI coding workflow</title>
+  <desc id="desc">Requirement analysis leads to planning, explicit human approval, execution, independent QA, and delivery. QA failure or user steering returns work to planning and requires approval again.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 10 5 0 10z" fill="#64748b"/></marker>
+    <marker id="return" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 10 5 0 10z" fill="#c2410c"/></marker>
+    <style>
+      text{font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;fill:#172033}
+      .sub{font-size:13px;fill:#475569}.stage{font-size:18px;font-weight:700}.gate{font-size:11px;font-weight:700;letter-spacing:1.2px}
+    </style>
+  </defs>
+  <rect x="20" y="24" width="1160" height="350" rx="24" fill="#f8fafc" stroke="#dbe3ed"/>
+  <text x="600" y="62" text-anchor="middle" font-size="25" font-weight="750">A human-approved path from request to delivery</text>
+  <g text-anchor="middle">
+    <g transform="translate(42 112)"><rect width="166" height="120" rx="15" fill="#eaf2ff" stroke="#3b73d1" stroke-width="2"/><text x="83" y="25" class="gate" fill="#2859a8">GATE 1</text><text x="83" y="55" class="stage">Requirement</text><text x="83" y="82" class="sub">Analyze scope, gaps,</text><text x="83" y="101" class="sub">risks and acceptance</text></g>
+    <g transform="translate(236 112)"><rect width="166" height="120" rx="15" fill="#eaf2ff" stroke="#3b73d1" stroke-width="2"/><text x="83" y="25" class="gate" fill="#2859a8">GATE 2</text><text x="83" y="55" class="stage">Plan</text><text x="83" y="82" class="sub">Map BIZ / REQ / TC / QG</text><text x="83" y="101" class="sub">and verification</text></g>
+    <g transform="translate(430 112)"><rect width="166" height="120" rx="15" fill="#fff5d9" stroke="#d49a1d" stroke-width="2"/><text x="83" y="25" class="gate" fill="#9a6810">GATE 3</text><text x="83" y="55" class="stage">Approval</text><text x="83" y="82" class="sub">You review and</text><text x="83" y="101" class="sub">approve the plan</text></g>
+    <g transform="translate(624 112)"><rect width="166" height="120" rx="15" fill="#e8f7ed" stroke="#37935b" stroke-width="2"/><text x="83" y="25" class="gate" fill="#287346">GATE 4</text><text x="83" y="55" class="stage">Execute</text><text x="83" y="82" class="sub">Implement approved</text><text x="83" y="101" class="sub">scope only</text></g>
+    <g transform="translate(818 112)"><rect width="166" height="120" rx="15" fill="#f3eafa" stroke="#9360ad" stroke-width="2"/><text x="83" y="25" class="gate" fill="#75428d">GATE 5</text><text x="83" y="55" class="stage">QA</text><text x="83" y="82" class="sub">Independent review</text><text x="83" y="101" class="sub">with observed evidence</text></g>
+    <g transform="translate(1012 112)"><rect width="146" height="120" rx="15" fill="#e1f5f2" stroke="#23877b" stroke-width="2"/><text x="73" y="25" class="gate" fill="#176e64">GATE 6</text><text x="73" y="55" class="stage">Delivery</text><text x="73" y="82" class="sub">Review and commit</text><text x="73" y="101" class="sub">manually</text></g>
+  </g>
+  <g stroke="#64748b" stroke-width="2.5" marker-end="url(#arrow)"><path d="M210 172h22"/><path d="M404 172h22"/><path d="M598 172h22"/><path d="M792 172h22"/><path d="M986 172h22"/></g>
+  <path d="M900 244v53H319v-55" fill="none" stroke="#c2410c" stroke-width="2.5" stroke-dasharray="8 6" marker-end="url(#return)"/>
+  <rect x="480" y="281" width="280" height="34" rx="17" fill="#fff7ed" stroke="#fed7aa"/>
+  <text x="620" y="303" text-anchor="middle" font-size="13" font-weight="650" fill="#9a3412">QA FAIL or approved scope change → re-plan</text>
+  <text x="600" y="347" text-anchor="middle" font-size="13" fill="#475569">Every revised plan needs fresh human approval · Forge never commits or publishes for you</text>
+</svg>

@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createEngine, normalizeAgentName } from '../core/engine.mjs';
-import { PHASES, requiredAgentsFor } from '../core/core.mjs';
+import { PHASES, requiredAgentsFor, phaseInstruction } from '../core/core.mjs';
 import { PLAN, SUBMISSION, FAIL_SUBMISSION } from './fixtures.mjs';
-import { assertDeliverySubmittable, qaReportTransition, reworkTransition } from '../core/transitions.mjs';
+import { approvedExecutionState, assertDeliverySubmittable, qaReportTransition, reworkTransition, steerTransition } from '../core/transitions.mjs';
 
 const SUMMARY = { baseline: 'Goal: bookings with approvals. Scope: create + approve. Acceptance: both flows work.', findings: [{ severity: 'LOW', title: 'naming' }] };
 
@@ -167,8 +167,82 @@ test('re-entering rework preserves the approved plan as a read-only base', () =>
     planPath: 'local://forge-plan.md', reworkCycles: 0,
   });
   const retried = reworkTransition(first);
+  assert.equal(first.reworkBaseHash, 'sha256-old');
+  assert.equal(retried, first);
   assert.equal(retried.reworkBasePlanPath, 'local://forge-plan.md');
   assert.equal(retried.planPath, null);
+});
+
+test('A FAIL → B approved → BLOCKED rework pairs the current approved hash and path', () => {
+  const a = {
+    active: true, phase: 'QA', approved: true, planValid: true, planWritten: true,
+    requirement: 'Build bookings', slug: 'bookings', approvedPlanHash: 'sha256-A',
+    planPath: 'local://plan-A.md', reworkCycles: 0,
+  };
+  const failed = qaReportTransition(a, { status: 'FAIL' }, { reportPath: 'local://qa-A.md' });
+  assert.equal(failed.reworkBaseHash, 'sha256-A');
+  assert.equal(failed.reworkBasePlanPath, 'local://plan-A.md');
+  const b = approvedExecutionState({
+    ...failed, approvedPlanHash: 'sha256-B', planPath: 'local://plan-B.md',
+    planWritten: true, planValid: true,
+  });
+  assert.equal(b.reworkBaseHash, null);
+  assert.equal(b.reworkBasePlanPath, null);
+  const blocked = qaReportTransition({ ...b, phase: 'QA' }, { status: 'BLOCKED' }, { reportPath: 'local://qa-B.md' });
+  const rework = reworkTransition(blocked);
+  assert.equal(rework.reworkBaseHash, 'sha256-B');
+  assert.equal(rework.reworkBasePlanPath, 'local://plan-B.md');
+  assert.equal(rework.planPath, null);
+  assert.equal(rework.approvedPlanHash, null);
+  assert.equal(rework.reworkCycles, 2);
+  const instruction = phaseInstruction(rework);
+  assert.ok(instruction.includes('Previous approved plan: local://plan-B.md'));
+  assert.ok(!instruction.includes('local://plan-A.md'));
+});
+
+test('rework with a pending unapproved proposal preserves the actual base and proposal', () => {
+  const failed = qaReportTransition({
+    active: true, phase: 'QA', approved: true, planValid: true, planWritten: true,
+    requirement: 'Build bookings', slug: 'bookings', approvedPlanHash: 'sha256-A',
+    planPath: 'local://plan-A.md', reworkCycles: 0,
+  }, { status: 'FAIL' });
+  const proposed = {
+    ...failed, planPath: 'local://plan-B.md', approvedPlanHash: 'sha256-unapproved-B',
+    planWritten: true, planValid: true, reviewRequested: true,
+    gateAgents: { PLAN: ['forge-planner'] }, agentRetries: { PLAN: 1 },
+  };
+  const restored = JSON.parse(JSON.stringify(proposed));
+  const rework = reworkTransition(restored);
+  assert.equal(rework, restored);
+  assert.equal(rework.reworkBaseHash, 'sha256-A');
+  assert.equal(rework.reworkBasePlanPath, 'local://plan-A.md');
+  assert.equal(rework.approvedPlanHash, 'sha256-unapproved-B');
+  assert.equal(rework.planPath, 'local://plan-B.md');
+  assert.equal(rework.approved, false);
+  assert.match(phaseInstruction(rework), /awaiting explicit operator approval/);
+});
+
+test('more than 20 steering prompts survive JSON restore verbatim in phaseInstruction', () => {
+  const directives = [
+    '  Never execute without explicit human plan approval.\nKeep this authorization boundary.  ',
+    ...Array.from({ length: 24 }, (_, i) => `Steering ${i + 2}: retain requirement ${i + 2}.`),
+  ];
+  for (const phase of ['REQUIREMENT', 'PLAN', 'EXECUTE', 'QA']) {
+    let state = {
+      active: true, phase, requirement: 'Build bookings', slug: 'bookings',
+      approved: phase === 'EXECUTE' || phase === 'QA', approvedPlanHash: 'sha256-A',
+      planPath: 'local://plan-A.md', reworkCycles: 0,
+    };
+    for (const text of directives) {
+      state = JSON.parse(JSON.stringify(steerTransition(state, text, { at: '2026-01-01T00:00:00.000Z' })));
+    }
+    assert.equal(state.requirementSteering.length, directives.length, phase);
+    assert.deepEqual(state.requirementSteering.map(entry => entry.text), directives, phase);
+    assert.deepEqual(state.requirementSteering.map(entry => entry.revision), directives.map((_, i) => i + 1), phase);
+    const instruction = phaseInstruction(state);
+    for (const text of directives) assert.ok(instruction.includes(text), `${phase}: missing ${text}`);
+    assert.match(instruction, /every (?:requirement )?steering prompt verbatim/, phase);
+  }
 });
 
 test('QA status controls delivery without inferring PASS from phase', () => {

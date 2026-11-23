@@ -1,136 +1,174 @@
 # Forge
 
-**Forge** ทำให้ AI เขียนโค้ดอย่างมีขั้นตอนแบบทีมจริง: วิเคราะห์ requirement → วางแผน → **คุณอนุมัติ** → ลงมือ → QA อิสระ → ส่งมอบ
-แต่ละขั้นมี agent เฉพาะทางทำหน้าที่ของตัวเอง และ Forge จะไม่ยอมให้ข้ามขั้น
+**A human-approved, evidence-driven workflow for AI coding agents.** Forge turns a coding request into a requirement analysis, an auditable plan, an explicit human approval, implementation, independent QA, and a copy-ready delivery report.
 
-ใช้ได้กับ **Claude Code** (plugin) และ **Oh My Pi / OMP** (extension) โดยใช้ core เดียวกัน
+[English](README.md) · [ภาษาไทย](README_TH.md) · [User guide](docs/USER_GUIDE.md) · [Custom skills](docs/CUSTOM_SKILLS.md) · [Installation](docs/INSTALL.md) · [Security notes](docs/SECURITY.md)
 
-![Forge workflow](docs/images/workflow.svg)
+![Forge workflow](docs/images/workflow-public.svg)
 
-## ทำไมต้อง Forge
+Forge currently supports **Oh My Pi (OMP)** as an extension and **Claude Code** as a plugin. Both adapters use the shared Forge core; some host features differ.
 
-- **ไม่มีโค้ดก่อนคุณอนุมัติ** — ก่อน Gate 3 ทุกอย่างอ่านอย่างเดียว AI อนุมัติแผนแทนคุณไม่ได้
-- **ตรวจได้ทุกข้อ** — แผนต้องมี Business Topic (BIZ), Requirement (REQ), Test Case (TC) และ Quality Gate (QG) ที่ QA ใช้ตรวจย้อนได้ทีละข้อ
-- **QA ไม่เชื่อคำพูด** — test ที่ไม่ได้รันจริงต้องเป็น `NOT_RUN` ถ้า QA ไม่ผ่าน ต้องทำแผนแก้และอนุมัติใหม่
-- **Git เป็นของคุณ** — agent ห้าม `git add/commit/push` และห้าม publish ทุกขั้น Forge แค่ร่าง commit message ให้ copy
+## Why Forge
 
-## Agents ทั้ง 6 ตัว
+- **Approval before implementation.** The coding agent cannot approve its own plan. A human reviews and approves the plan before execution.
+- **Traceable requirements and tests.** Plans map business topics, requirements, test cases, and quality gates (`BIZ`, `REQ`, `TC`, `QG`).
+- **Independent QA.** QA checks the approved plan against observed evidence. A test that did not run is not reported as passing.
+- **Rework requires fresh approval.** QA failures and approved scope changes return to planning; execution cannot reuse a superseded approval.
+- **Manual Git publishing.** Forge does not stage, commit, push, merge, or publish changes for you.
 
-![Forge agents](docs/images/agents.svg)
+![Forge agent responsibilities](docs/images/agents-public.svg)
 
-| Agent | Gate | หน้าที่ | สิทธิ์ |
-|---|---|---|---|
-| `forge-requirement` | 1 | วิเคราะห์ Requirement รอบเดียวครบทุกมุม: เป้าหมาย ขอบเขต เกณฑ์ยอมรับ ช่องโหว่/กรณีที่จะพัง สถาปัตยกรรมพร้อม tradeoff แผนทดสอบ แล้วท้าทายร่างของตัวเองก่อนส่ง | อ่านอย่างเดียว |
-| `forge-planner` | 2 | แตกงานย่อย ลำดับงาน rollback และโครง BIZ/REQ/TC/QG | อ่านอย่างเดียว |
-| `forge-executor` | 4 | เขียนโค้ดตามแผนที่อนุมัติเท่านั้น (ไม่มี shell, ไม่แตะ Git) | **แก้ไฟล์ได้** |
-| `forge-qa` | 5 | ตรวจทุก TC เทียบพฤติกรรมจริงกับแผน | อ่านอย่างเดียว |
-| `forge-code-reviewer` | 5 | รีวิวความถูกต้อง ความปลอดภัย ประสิทธิภาพ พร้อม file:line | อ่านอย่างเดียว |
-| `forge-delivery` | 6 | สรุปงาน วิธี rollout/rollback และร่าง commit message | อ่านอย่างเดียว |
+## Workflow
 
-Gate 1 ใช้ agent ตัวเดียว รอบเดียว: `forge-requirement` ครอบคลุม 6 มุม (intake, ช่องว่าง, critique, สถาปัตยกรรม, กลยุทธ์ทดสอบ, self-challenge) → main ตรวจรายงานซ้ำแบบผู้อ่านอิสระ แล้วส่ง `forge_requirement_summary` → Planning
-
-## คำสั่ง
-
-พิมพ์ `/forge` ใน Claude Code แล้วเลือกจากเมนูได้เลย (ใน OMP ใช้ `/forge <คำสั่งย่อย>` เช่น `/forge status`)
-
-| คำสั่ง | ใช้เมื่อ |
+| Stage | What happens |
 |---|---|
-| `/forge <requirement>` | เริ่มงานใหม่ |
-| `/forge-status` | ดูว่าอยู่ Gate ไหน และกำลังรอ agent ตัวไหน |
-| `/forge-plan` | ดู path ของแผนที่ส่งอนุมัติ |
-| `/forge-approve` | อนุมัติแผนเอง เมื่อ Forge มองไม่เห็นการอนุมัติ (เช่น context ถูกล้าง) |
-| `/forge-qa` | เริ่มหรือรัน QA ใหม่ |
-| `/forge-rework` | ทำแผนแก้ไขหลัง QA ไม่ผ่าน (ต้องอนุมัติใหม่) |
-| `/forge-delivery` | ดู commit message หรือทำขั้นส่งมอบต่อ |
-| `/forge-report` | ดู path รายงาน QA ล่าสุด |
-| `/forge-resume [เลข]` | ดูงาน Forge ใน session อื่นของโปรเจกต์นี้ หรือดึงมาทำต่อ |
-| `/forge-agents` | รายชื่อ agent |
-| `/forge-trace [on\|off]` | บันทึก event สำหรับทดสอบ flow (ดู [แผนทดสอบ](docs/E2E-TEST-PLAN_TH.md)) |
-| `/forge-off` | ยกเลิกงาน (ไม่แก้ไฟล์ ไม่แตะ Git) |
+| Requirement | `forge-requirement` analyzes goals, scope, gaps, risks, architecture, and QA strategy in one pass. The main agent reviews its report. |
+| Plan | `forge-planner` prepares an implementation plan with traceable BIZ/REQ/TC/QG coverage. |
+| Approval | You inspect and approve the plan in the host's native approval UI. No approval is inferred. |
+| Execute | `forge-executor` implements the approved plan. It has no shell access. |
+| QA | `forge-qa` and `forge-code-reviewer` independently review evidence and code. QA is read-only. |
+| Delivery | After QA passes, `forge-delivery` prepares rollout notes and a commit message for you to review and copy. |
 
-AI เรียกคำสั่งเหล่านี้แทนคุณไม่ได้ ทุกคำสั่งต้องพิมพ์เอง
+If QA fails, Forge returns to planning and requires a new approval. If evidence is missing, QA stays blocked until you collect evidence or explicitly request rework.
 
-## Requirement Gate รอบเดียว
+## Custom skills (OMP)
 
-เดิม Gate 1 ใช้ agent 4 ตัว 3 รอบต่อกัน (7 ครั้ง) แต่ละตัวสำรวจโค้ดซ้ำเอง และ main ต้องสรุปคั่นทุกรอบ ตอนนี้เหลือ `forge-requirement` รันครั้งเดียว:
+OMP lets you create a Markdown skill and attach it to a Forge gate. Example skill:
 
-| สิ่งที่รักษาคุณภาพไว้ | ทำอย่างไร |
-|---|---|
-| ครบทุกมุมเหมือนเดิม | prompt ของ `forge-requirement` รวมหน้าที่ analyst, critic, architect, QA strategist และ challenge ไว้ครบ และคำสั่ง Gate บังคับให้ main ส่ง checklist 6 มุมไปในงานทุกครั้ง |
-| ยังมีรอบท้าทาย | agent ต้องท้าทายร่างของตัวเอง (counterexample กับทุก CRITICAL/HIGH และทุกทางเลือกสถาปัตยกรรม) แล้วบอกว่าแก้อะไร |
-| ยังมีผู้อ่านคนที่สอง | main ตรวจรายงานซ้ำก่อนสรุป เพิ่ม finding ที่ agent พลาด (source `orchestrator`) |
-| ห้ามตัดความเสี่ยงทิ้ง | Forge ปฏิเสธสรุปที่ไม่มี CRITICAL/HIGH ถ้ารายงานของ agent มี |
-| Planner ได้ baseline เดียวกันเสมอ | สรุปถูกเก็บใน state และแนบเข้าคำสั่ง Planning |
+```markdown
+---
+name: api-contract-review
+description: Check API contract changes during planning.
+---
 
-สิ่งที่เสียไป: critic ไม่ได้แยกเป็น agent อิสระแล้ว (self-challenge + main ตรวจซ้ำแทน)
-
-## ค่าใช้ token
-
-Forge ใช้หลาย agent จึงกิน token มากกว่าการสั่ง Claude ตรง ๆ เลือกระดับโมเดลตอน build ได้ (ไม่ลดขั้นตอน ลดแค่โมเดล) ใช้ได้ทั้ง Claude Code และ OMP:
-
-| `FORGE_MODELS` | opus | sonnet | haiku |
-|---|---|---|---|
-| `rigor` (ค่าเริ่มต้น) | requirement, planner | qa, code-reviewer | executor, delivery |
-| `balanced` | requirement, planner, qa, code-reviewer | executor | delivery |
-| `economy` | — | 5 ตัว | delivery |
-
-`forge-requirement` ใช้ opus ทั้งใน `rigor` และ `balanced` เพราะรับงาน critic ไปด้วย
-
-OMP: build ใส่ `model:` ให้ไฟล์ `forge-*.md` ตาม profile (เช่น `anthropic/claude-opus-5-5, opus` คือลอง id เต็มก่อน แล้ว fallback เป็น alias) แก้ต่อได้ใน OMP `/agents` ส่วน `install.sh` จะไม่ทับไฟล์ agent ที่ติดตั้งไว้แล้ว ถ้าต้องการโมเดลใหม่ให้รัน `FORGE_REINSTALL_AGENTS=1 bash install.sh` (สำรองไฟล์เดิมไว้ใน `forge-backups/`)
-
-```bash
-FORGE_MODELS=balanced npm test
+# API contract review
+- Identify breaking request and response changes.
+- Keep stable IDs and require an acceptance test for each change.
 ```
 
-Forge ไม่ยอมให้ specialist ตัวเดิมรันซ้ำใน Gate เดียวกัน (กำลังรันอยู่ หรือรายงานแล้ว) เพื่อตัดค่าใช้จ่ายที่ไม่ได้เพิ่มความครอบคลุม
-
-## ตัวอย่าง 1 รอบ
+Create it and attach it to planning with `/forge skill create planning`, or place it at `~/.omp/agent/skills/api-contract-review/SKILL.md` and run:
 
 ```text
-/forge เพิ่มฟังก์ชันคำนวณอายุจากวันเกิด พร้อม unit test
+/forge skill add planning api-contract-review
+/forge skills
 ```
 
-1. `forge-requirement` วิเคราะห์รอบเดียว แล้ว Claude ตรวจรายงานซ้ำและส่งสรุป (`forge_requirement_summary`)
-2. `forge-planner` วางแผน แล้ว Claude ส่งแผนเข้าหน้าอนุมัติ (Forge ตรวจรูปแบบแผนก่อน)
-3. **คุณอ่านแผนแล้วกดอนุมัติ**
-4. `forge-executor` เขียนโค้ด แล้ว main รัน test
-5. `forge-qa` + `forge-code-reviewer` ตรวจ ถ้าไม่ผ่าน กลับไปทำแผนแก้
-6. `forge-delivery` สรุปงาน และให้ commit message — คุณ review diff แล้ว commit เอง
+Skills are pinned for each new workflow and included in that gate's specialist tasks. They cannot override approval, read-only, or no-Git rules. Create, add, remove, or reset bindings only when no Forge workflow is active. See the [custom skills guide](docs/CUSTOM_SKILLS.md) for validation limits and commands.
 
-## ตัวอย่างเครื่องคำนวณอายุ
+![Custom skill lifecycle](docs/images/custom-skill-flow.svg)
 
-รันโปรแกรมด้วยวันเกิดรูปแบบ `YYYY-MM-DD` เช่น:
+
+## Quick start
+
+### Requirements
+
+- Node.js **22 or newer** to build and test Forge.
+- OMP or Claude Code installed and configured with the agents/models you intend to use.
+- A local clone of this repository. Replace `<repository-url>` with the HTTPS URL shown by your Git host.
 
 ```bash
-node examples/age-calculator.mjs 2000-02-29
+git clone <repository-url>
+cd <repository-directory>
+npm run build
 ```
 
-โปรแกรมแสดงอายุเต็มเป็นปี โดยใช้วันที่ปัจจุบันตามเขตเวลาท้องถิ่นของเครื่อง วันที่ต้องเป็นวันจริงตามปฏิทินเกรกอเรียนและใช้ปี ค.ศ. 4 หลัก หากเกิดวันที่ 29 กุมภาพันธ์ วันครบรอบในปีที่ไม่ใช่ปีอธิกสุรทินจะเป็นวันที่ 1 มีนาคม
-
-## ติดตั้ง
+### Install for OMP
 
 ```bash
-npm test                       # build + ทดสอบ (Node 22+)
+cd dist/omp/omp-forge-global-v6.1.0
+bash ./install.sh
 ```
 
-**Claude Code**
+Restart OMP. In the main session, run:
+
+```text
+/forge
+```
+
+Enter a requirement after the prefixed prompt, or start directly with `/forge <requirement>`. Check progress with `/forge status`.
+
+### Install for Claude Code
+
+From the repository root, build the local plugin package with `npm run build`, then run these commands in Claude Code. Use the absolute path to your clone:
+
+```text
+/plugin marketplace add /absolute/path/to/<repository-directory>/dist/claude-code/forge-marketplace
+/plugin install forge@forge-local
+```
+
+Restart Claude Code, then start with `/forge <requirement>`. See the [Claude Code guide](adapters/claude-code/README.md).
+
+More detailed update, custom data-directory, and uninstall steps: [Installation guide](docs/INSTALL.md).
+
+## Example
+
+```text
+/forge Add CSV export to the booking service. Include authorization checks, tests, and a rollback plan.
+```
+
+Review the requirement summary, then review the generated plan. **Approve only after the plan matches your intent.** Forge implements after approval, runs independent QA, and prepares a delivery summary if QA passes.
+
+In OMP, a plain prompt typed while a workflow is active opens a **Steer / Cancel** dialog. Steer applies the prompt to the requirement and returns to the relevant gate; after execution approval, it revokes approval and requires a revised, newly approved plan. Cancel leaves the workflow unchanged and returns the prompt to the editor. This prompt-steering dialog is currently OMP-specific.
+
+![OMP steering confirmation](docs/images/steering-confirmation.svg)
+
+## Agent roles
+
+| Agent | Responsibility | Access |
+|---|---|---|
+| `forge-requirement` | Requirement analysis, gaps, risks, architecture, QA strategy, self-challenge | Read-only |
+| `forge-planner` | Implementation plan and test traceability | Read-only |
+| `forge-executor` | Implement the approved plan | Can edit files; no shell |
+| `forge-qa` | Verify planned business tests and evidence | Read-only |
+| `forge-code-reviewer` | Independent code and security review | Read-only |
+| `forge-delivery` | Delivery, rollout/rollback notes, and commit-message draft | Read-only |
+
+## Commands
+
+OMP commands use `/forge <subcommand>`; Claude Code also exposes dedicated `/forge-*` shortcuts.
+
+| Action | OMP | Claude Code |
+|---|---|---|
+| Start | `/forge <requirement>` | `/forge <requirement>` |
+| Status | `/forge status` | `/forge-status` or `/forge status` |
+| Review a plan | `/forge review` | Native plan approval |
+| Retry QA | `/forge qa` | `/forge-qa` |
+| Rework after QA FAIL/BLOCKED | `/forge rework` | `/forge-rework` |
+| Delivery/report | `/forge delivery`, `/forge report` | `/forge-delivery`, `/forge-report` |
+| Resume/recover | `/forge resume`, `/forge recover` | `/forge-resume` |
+| Cancel workflow | `/forge off` | `/forge-off` |
+| Custom skills | `/forge skill`, `/forge skills`, `/forge skill list` | Not available |
+
+OMP also supports `/forge agents` and custom gate skills; Claude Code does not currently expose this skill manager. For all commands and phase behavior, see the [user guide](docs/USER_GUIDE.md).
+
+## Model profiles and cost
+
+Forge calls multiple agents, so usage depends on the selected model profile, task size, and host. Profiles change model assignments, not workflow gates. Build with one of:
+
 ```bash
-mkdir -p ~/.claude/marketplaces && cp -R dist/claude-code/forge-marketplace ~/.claude/marketplaces/
-claude plugin marketplace add ~/.claude/marketplaces/forge-marketplace
-claude plugin install forge@forge-local
+FORGE_MODELS=rigor npm run build       # default
+FORGE_MODELS=balanced npm run build
+FORGE_MODELS=economy npm run build
 ```
 
-**OMP**
+OMP preserves installed agent definitions by default. Change models through OMP `/agents`, or explicitly replace bundled agent files with `FORGE_REINSTALL_AGENTS=1 bash ./install.sh` (the installer keeps backups).
+
+## Build and test
+
 ```bash
-cd dist/omp/omp-forge-global-v*/ && bash ./install.sh
+npm test
 ```
 
-รายงาน แผน และ commit message ถูกเก็บไว้นอกโปรเจกต์ (data dir ของ plugin) Forge ไม่เขียนไฟล์ลง repo ของคุณ
+This builds both adapters, runs the core and example tests, runs OMP tests plus its installer smoke test, and runs Claude Code adapter tests. Requires Node.js 22+.
 
-## เอกสารเพิ่มเติม
+Contributor and architecture documentation: [Development](docs/DEVELOPMENT.md) · [Architecture](docs/ARCHITECTURE.md).
 
-- [โครงสร้างโค้ดและการ build](docs/DEVELOPMENT.md)
-- [สถาปัตยกรรม core + adapter](docs/ARCHITECTURE.md)
-- [แผนทดสอบใน Claude Code จริง](docs/E2E-TEST-PLAN_TH.md)
-- [Claude Code plugin](adapters/claude-code/README.md)
-# pipeline-agent
+## Data and safety
+
+Forge stores workflow state, local plans, reports, and delivery artifacts in adapter/session data locations rather than in the project by default. See [data locations and privacy](docs/USER_GUIDE.md#data-and-privacy).
+
+Forge guardrails control agent tool calls; **Forge is not a security sandbox**. Nested scripts, external tools, MCP servers, host behavior, or user actions can bypass some controls. Use it only in repositories and environments you trust. Review the diff and run your own checks before merging or publishing.
+
+## License
+
+This repository currently has no `LICENSE` file. Public visibility does not grant permission to reuse or redistribute the code. Add a license before inviting public contributions or granting reuse rights.

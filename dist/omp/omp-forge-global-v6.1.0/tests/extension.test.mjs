@@ -1828,3 +1828,199 @@ test('an unchanged rework plan is rejected as identical', async () => {
   assert.equal(result.isError,true);
   assert.match(result.content[0].text,/identical/);
 });
+
+async function reachQa(x) {
+  await advanceToReview(x);
+  await approvePlan(x);
+  await x.events.get('agent_start')({},x.ctx);
+  await runCompletedAgent(x,'forge-executor');
+  await x.events.get('session_stop')({},x.ctx);
+  assert.equal(x.entries.at(-1).data.phase,'QA');
+}
+
+async function startPendingAgent(x, agent) {
+  const id=`pending-${++agentCallSeq}`;
+  const call=await x.events.get('tool_call')({toolName:'task',toolCallId:id,input:{agent,task:'Return independent evidence'}},x.ctx);
+  assert.notEqual(call?.block,true);
+  assert.notEqual((await x.events.get('before_subagent_spawn')({agent},x.ctx))?.block,true);
+  return () => x.events.get('tool_result')({toolName:'task',toolCallId:id,isError:false,content:[{type:'text',text:'Completed independent report'}]},x.ctx);
+}
+
+for (const delivery of [false,true]) {
+  test(`read-only ${delivery ? 'QA PASS delivery' : 'QA'} denies unknown mutation tools but permits evidence tools`, async () => {
+    const x=setup(); await reachQa(x);
+    if (delivery) {
+      await runQaAgents(x);
+      const result=await x.tools.get('forge_qa_submit').execute('pass',SUBMISSION,null,null,x.ctx);
+      assert.match(result.content[0].text,/GATE: PASS/);
+    }
+    const hook=x.events.get('tool_call');
+    for (const [toolName,input] of [
+      ['eval',{language:'py',code:'open("src/app.ts", "w").write("changed")'}],
+      ['ast_edit',{path:'src/app.ts',operation:'replace',replacement:'changed'}],
+      ['lsp',{action:'rename',path:'src/app.ts',newName:'changed'}],
+      ['mcp__workspace__write_file',{path:'src/app.ts',content:'changed'}],
+      ['mystery_tool',{}],
+    ]) {
+      assert.equal((await hook({toolName,input},x.ctx))?.block,true,toolName);
+    }
+    for (const toolName of ['read','grep','glob',...(delivery ? ['forge_delivery_submit'] : ['forge_qa_scope','forge_qa_submit'])]) {
+      assert.equal(await hook({toolName,input:{}},x.ctx),undefined,toolName);
+    }
+    const task=await hook({toolName:'task',toolCallId:`allowed-${++agentCallSeq}`,input:{agent:delivery?'forge-delivery':'forge-qa',task:'Read evidence'}},x.ctx);
+    assert.notEqual(task?.block,true,'task remains available for the current specialist');
+    assert.equal(await hook({toolName:'bash',input:{command:'npm test'}},x.ctx),undefined);
+  });
+}
+
+test('a late requirement report from closed workflow A cannot complete workflow B', async () => {
+  const x=setup(); await x.events.get('session_start')({},x.ctx);
+  await x.commands.get('forge').handler('Workflow A',x.ctx);
+  const finishA=await startPendingAgent(x,'forge-requirement');
+  await x.commands.get('forge').handler('off',x.ctx);
+  await x.commands.get('forge').handler('Workflow B',x.ctx);
+  const finishB=await startPendingAgent(x,'forge-requirement');
+  const before=structuredClone(x.entries.at(-1).data), count=x.entries.length;
+  await finishA();
+  assert.equal(x.entries.length,count);
+  assert.deepEqual(x.entries.at(-1).data,before);
+  const rejected=await submitSummary(x);
+  assert.equal(rejected.isError,true);
+  assert.match(rejected.content[0].text,/requirement report missing/);
+  await finishB();
+  assert.notEqual((await submitSummary(x)).isError,true,'only workflow B report satisfies its gate');
+});
+
+test('a late task report from an earlier QA round cannot satisfy a QA retry', async () => {
+  const x=setup(); await reachQa(x);
+  const finishOld=await startPendingAgent(x,'forge-qa');
+  await runQaAgents(x);
+  const blocked=structuredClone(SUBMISSION); blocked.codeQualityChecks[0].status='NOT_RUN';
+  await x.tools.get('forge_qa_submit').execute('blocked',blocked,null,null,x.ctx);
+  await x.commands.get('forge').handler('qa',x.ctx);
+  const before=structuredClone(x.entries.at(-1).data), count=x.entries.length;
+  await finishOld();
+  assert.equal(x.entries.length,count);
+  assert.deepEqual(x.entries.at(-1).data,before);
+  assert.deepEqual(x.entries.at(-1).data.gateAgents.QA,[]);
+  const result=await x.tools.get('forge_qa_submit').execute('retry',SUBMISSION,null,null,x.ctx);
+  assert.equal(result.isError,true);
+  assert.match(result.content[0].text,/independent QA specialists/i);
+  await runQaAgents(x);
+  assert.match((await x.tools.get('forge_qa_submit').execute('fresh',SUBMISSION,null,null,x.ctx)).content[0].text,/GATE: PASS/);
+});
+
+test('branch changes invalidate pending reports even when the loaded workflow checkpoint is unchanged', async () => {
+  const x=setup(); await x.events.get('session_start')({},x.ctx);
+  await x.commands.get('forge').handler('Branch-bound requirement',x.ctx);
+  const finish=await startPendingAgent(x,'forge-requirement');
+  x.setBranch([...x.entries]);
+  await x.events.get('session_tree')({},x.ctx);
+  const before=structuredClone(x.entries.at(-1).data), count=x.entries.length;
+  await finish();
+  assert.equal(x.entries.length,count);
+  assert.deepEqual(x.entries.at(-1).data,before);
+  assert.equal((await submitSummary(x)).isError,true);
+  await runCompletedAgent(x,'forge-requirement');
+  assert.notEqual((await submitSummary(x)).isError,true);
+});
+
+for (const change of ['branch','session','phase']) {
+  test(`a delayed steering choice is ignored after ${change} changes`, async () => {
+    const x=setup(); await x.events.get('session_start')({},x.ctx);
+    await x.commands.get('forge').handler('Original requirement',x.ctx);
+    let choose, opened;
+    const ready=new Promise(resolve=>{ opened=resolve; });
+    x.ctx.ui.select=async (_title,options) => {
+      opened();
+      return await new Promise(resolve=>{ choose=()=>resolve(options.find(option=>option.startsWith('Steer · '))); });
+    };
+    let aborts=0;
+    x.ctx.isIdle=()=>false;
+    x.ctx.abort=async()=>{ aborts++; };
+    const pending=x.events.get('input')({source:'interactive',text:'Do not apply this stale steering'},x.ctx);
+    await ready;
+    if (change==='branch') {
+      x.setBranch([...x.entries]);
+      await x.events.get('session_tree')({},x.ctx);
+    } else if (change==='session') {
+      x.ctx.sessionManager.getSessionId=()=>`different-session-${savedSessionSeq}`;
+      await x.events.get('session_switch')({},x.ctx);
+    } else {
+      await completeRequirement(x);
+    }
+    const before=structuredClone(x.entries.at(-1).data), count=x.entries.length, sent=x.sent.length;
+    choose();
+    assert.deepEqual(await pending,{handled:true});
+    assert.equal(aborts,0);
+    assert.equal(x.entries.length,count);
+    assert.equal(x.sent.length,sent);
+    assert.deepEqual(x.entries.at(-1).data,before);
+    assert.match(x.notifications.at(-1).message,/state changed/i);
+  });
+}
+
+for (const replacement of ['off','approved B']) {
+  for (const callback of ['onComplete','onError']) {
+    test(`compact approval A ${callback} is harmless after ${replacement}`, async () => {
+      const x=setup(); await advanceToReview(x);
+      const calls=[]; x.ctx.compact=options=>{ calls.push(options); };
+      await approvePlan(x,'Approve and compact context');
+      assert.equal(calls.length,1);
+      await x.commands.get('forge').handler('off',x.ctx);
+      if (replacement==='approved B') {
+        await advanceToReview(x);
+        await approvePlan(x);
+        assert.equal(x.entries.at(-1).data.phase,'EXECUTE');
+      }
+      const before=structuredClone(x.entries.at(-1).data), count=x.entries.length, sent=x.sent.length;
+      await assert.doesNotReject(async()=>{ await calls[0][callback](new Error('old compaction failed')); });
+      assert.equal(x.sent.length,sent,'stale callbacks never dispatch execution instructions');
+      assert.equal(x.entries.length,count);
+      assert.deepEqual(x.entries.at(-1).data,before);
+    });
+  }
+}
+
+test('QA PASS can start a fresh approved QA round and cannot reuse specialist completions', async () => {
+  const x=setup(); await reachQa(x);
+  await runQaAgents(x);
+  assert.match((await x.tools.get('forge_qa_submit').execute('first',SUBMISSION,null,null,x.ctx)).content[0].text,/GATE: PASS/);
+  const approved=structuredClone(x.entries.at(-1).data);
+  await x.commands.get('forge').handler('qa',x.ctx);
+  const state=x.entries.at(-1).data;
+  assert.equal(state.phase,'QA');
+  assert.equal(state.approved,true);
+  assert.equal(state.planValid,true);
+  assert.equal(state.approvedPlanHash,approved.approvedPlanHash);
+  assert.equal(state.planPath,approved.planPath);
+  assert.equal(state.qaStatus,null);
+  assert.deepEqual(state.gateAgents.QA,[]);
+  assert.match(x.sent.at(-1).content,/forge_qa_scope/);
+  const rejected=await x.tools.get('forge_qa_submit').execute('without-specialists',SUBMISSION,null,null,x.ctx);
+  assert.equal(rejected.isError,true);
+  assert.match(rejected.content[0].text,/independent QA specialists/i);
+  await runQaAgents(x);
+  assert.match((await x.tools.get('forge_qa_submit').execute('second',SUBMISSION,null,null,x.ctx)).content[0].text,/GATE: PASS/);
+});
+
+test('restarting a pending rework proposal preserves the paired approved base hash and path', async () => {
+  const x=setup(); await reachQa(x);
+  const approved=structuredClone(x.entries.at(-1).data);
+  await runQaAgents(x);
+  const fail=structuredClone(SUBMISSION); fail.topicResults[0].tests[0].status='FAIL';
+  await x.tools.get('forge_qa_submit').execute('fail',fail,null,null,x.ctx);
+  await runCompletedAgent(x,'forge-planner');
+  const state=x.entries.at(-1).data;
+  const reworkPath=`local://${state.slug}-rework-${state.reworkCycles}-plan.md`;
+  await writeCanonicalPlan(x,reworkPath,PLAN+'\n## QA Rework Changes\n- Fix duplicate bookings.\n');
+  assert.notEqual((await proposePlan(x)).isError,true);
+  await x.commands.get('forge').handler('rework',x.ctx);
+  const restarted=x.entries.at(-1).data;
+  assert.equal(restarted.phase,'PLAN');
+  assert.equal(restarted.approved,false);
+  assert.equal(restarted.reworkBaseHash,approved.approvedPlanHash);
+  assert.equal(restarted.reworkBasePlanPath,approved.planPath);
+  assert.notEqual(restarted.reworkBasePlanPath,reworkPath);
+  assert.equal((await x.events.get('tool_call')({toolName:'write',input:{path:approved.planPath,content:PLAN}},x.ctx)).block,true);
+});

@@ -7,6 +7,21 @@ checks that made the old gate rigorous.
 
 ## Changed
 
+- Workflow safety fixes: QA and delivery now allow only known read-only tools,
+  conservative test commands, and their phase-specific control tools. Unknown
+  tools, including eval, AST/LSP mutations, and MCP writes, are denied.
+- Pending specialist reports are bound to the session, workflow, approved hash,
+  and gate generation. Cancel, restore, steering, and QA retry invalidate old work.
+- Steering confirmations and delayed compact-execution callbacks validate their
+  original gate snapshot; stale callbacks cannot dispatch a cancelled plan into
+  a replacement workflow.
+- `/forge qa` can reopen a PASS review after working-tree changes. It preserves
+  plan approval but clears prior QA/delivery authorization and requires fresh
+  specialist reports.
+- Rework preserves the approved plan hash/path as a pair. Re-entering an existing
+  PLAN proposal never promotes its unapproved hash to the approved base.
+- Steering retains every directive instead of discarding requirements after 20
+  prompts; resumed instructions retain earlier constraints.
 - OMP: a prompt the user types while a workflow runs opens a steering popup:
   `Steer · <from> → <to>` or `Cancel · keep working on <gate>`. Cancel changes
   nothing and returns the prompt to the editor. Steer records it in state

@@ -44,7 +44,6 @@ import {
   phaseInstruction,
   requirementSummaryInstruction,
   qaInstruction,
-  reworkInstruction,
   steeringInstruction,
   renderDeliveryReport,
   renderQaReport,
@@ -83,7 +82,36 @@ export default function forgeExtension(pi: ExtensionAPI) {
   const checkpointRoot = process.env.FORGE_CHECKPOINT_DIR || join(agentRoot, 'forge-checkpoints');
   const attachmentRoot = join(agentRoot, 'forge-attachments');
   let autoStart = false;
-  const runningTasks = new Map<string, { key: string; agents: string[]; qaStatus: string | null; reworkCycles: number; steeringRevision: number }>();
+  type GateContext = {
+    sessionManager?: { getSessionId?: () => string | undefined; getSessionFile?: () => string | undefined };
+  };
+  type GateSnapshot = {
+    epoch: number; sessionId: string | undefined; sessionFile: string | undefined;
+    slug: string; phase: string; approved: boolean; planHash: string | null;
+    qaStatus: string | null; reworkCycles: number; steeringRevision: number;
+  };
+  let gateEpoch = 0;
+  const runningTasks = new Map<string, { scope: GateSnapshot; agents: string[] }>();
+  function invalidateGateWork() {
+    gateEpoch++;
+    runningTasks.clear();
+  }
+  function gateSnapshot(ctx: GateContext): GateSnapshot | null {
+    if (!workflow?.active) return null;
+    return {
+      epoch: gateEpoch, sessionId: ctx.sessionManager?.getSessionId?.(), sessionFile: ctx.sessionManager?.getSessionFile?.(),
+      slug: workflow.slug, phase: workflow.phase, approved: workflow.approved === true, planHash: workflow.approvedPlanHash ?? null,
+      qaStatus: workflow.qaStatus ?? null, reworkCycles: workflow.reworkCycles ?? 0, steeringRevision: workflow.steeringRevision ?? 0,
+    };
+  }
+  function isCurrentGate(snapshot: GateSnapshot | null, ctx: GateContext): boolean {
+    return snapshot !== null && workflow?.active === true &&
+      snapshot.epoch === gateEpoch && snapshot.sessionId === ctx.sessionManager?.getSessionId?.() &&
+      snapshot.sessionFile === ctx.sessionManager?.getSessionFile?.() &&
+      snapshot.slug === workflow.slug && snapshot.phase === workflow.phase && snapshot.approved === (workflow.approved === true) &&
+      snapshot.planHash === (workflow.approvedPlanHash ?? null) && snapshot.qaStatus === (workflow.qaStatus ?? null) &&
+      snapshot.reworkCycles === (workflow.reworkCycles ?? 0) && snapshot.steeringRevision === (workflow.steeringRevision ?? 0);
+  }
   // Forge's own plan review opens once the proposing turn is idle. The epoch
   // invalidates a scheduled review after a session/branch change or cancel.
   // This is control-plane only; it never authorizes code writes.
@@ -196,7 +224,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
     return pinned;
   }
   function skillBriefForGate() {
-    const gate = currentSkillGate(workflow?.phase);
+    const gate = currentSkillGate(workflow?.phase, workflow?.qaStatus);
     if (!gate) return '';
     const names: string[] = workflow?.gateSkills?.[gate] ?? [];
     if (!names.length) return '';
@@ -355,6 +383,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
   /** Returns true when the active branch contains ANY Forge entry (including
    * a tombstone); such a branch is authoritative and never auto-recovered. */
   function restoreState(ctx: any): boolean {
+    invalidateGateWork();
     const identity = sessionIdentity(ctx.sessionManager, ctx.cwd || workspaceDir);
     activeSessionManager = ctx.sessionManager;
     currentSessionIdentity = identity;
@@ -714,7 +743,12 @@ export default function forgeExtension(pi: ExtensionAPI) {
   /** Send the execution turn for an approved plan, optionally after compaction.
    * `send` is single-use, so compaction callbacks can never dispatch twice. */
   async function dispatchApprovedExecution(ctx: any, mode: 'keep' | 'compact', planContent: string) {
-    if (!(await exitNativePlanMode(ctx))) {
+    const snapshot = gateSnapshot(ctx);
+    const planPath = workflow?.planPath;
+    const canDispatch = () => isCurrentGate(snapshot, ctx) && workflow.phase === 'EXECUTE' && workflow.approved === true && workflow.planValid === true;
+    const exitedPlanMode = await exitNativePlanMode(ctx);
+    if (!canDispatch()) return;
+    if (!exitedPlanMode) {
       workflow = { ...workflow, active: false };
       saveState(); updateDashboard(ctx);
       notify(ctx, 'Plan approved, but native OMP Plan Mode is active and would block implementation writes. Exit it with /plan, then run /forge resume.', 'warning');
@@ -722,12 +756,13 @@ export default function forgeExtension(pi: ExtensionAPI) {
     }
     let sent = false;
     const send = () => {
-      if (sent) return;
+      if (sent || !canDispatch()) return;
       sent = true;
-      pi.sendUserMessage(`[FORGE PLAN APPROVED — ${workflow.planPath}]\nThe operator approved this plan in the Forge plan review. Execute it now.\n\n${planContent}`, { attribution: 'agent' });
+      pi.sendUserMessage(`[FORGE PLAN APPROVED — ${planPath}]\nThe operator approved this plan in the Forge plan review. Execute it now.\n\n${planContent}`, { attribution: 'agent' });
     };
     if (mode === 'compact' && typeof ctx.compact === 'function') {
       const fallback = (err: unknown) => {
+        if (sent || !canDispatch()) return;
         notify(ctx, `Compaction failed (${String(err)}); executing with the full context.`, 'warning');
         send();
       };
@@ -785,6 +820,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
           const feedback = await ctx.ui.editor('Forge · What should change in the plan?', '');
           if (stale()) { staleNotice(); return false; }
           if (feedback == null || !String(feedback).trim()) continue;
+          invalidateGateWork();
           workflow = { ...workflow, approved: false, planWritten: false, planValid: false, approvedPlanHash: null,
             reviewRequested: false, proposalRetries: 0, businessTopics: [], requirements: [], testCases: [], qualityGates: [],
             gateAgents: { ...(workflow.gateAgents ?? {}), PLAN: [] }, agentRetries: { ...(workflow.agentRetries ?? {}), PLAN: 0 } };
@@ -930,6 +966,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
       catch (err) { notify(ctx, `Forge cannot start: could not save pasted images: ${String(err)}`, 'error'); return null; }
       if (paths.length) next = { ...next, requirement: `${next.requirement}\n\nAttached images (pasted with this requirement; open each with the read tool):\n${paths.map((p, i) => `- [Image #${i + 1}] ${p}`).join('\n')}` };
     }
+    invalidateGateWork();
     workflow = next;
     pendingCheckpointRecovery = null; reviewEpoch++; reviewScheduled = false;
     saveState();
@@ -957,6 +994,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
       .filter(Boolean).join('\n\n');
     try { workflow = steerTransition(workflow, directive); }
     catch (err) { notify(ctx, `Forge steering not applied: ${err instanceof Error ? err.message : String(err)}`, 'warning'); return null; }
+    invalidateGateWork();
     reviewEpoch++; reviewScheduled = false;
     saveState(); updateDashboard(ctx);
     notify(ctx, `Forge steering #${workflow.steeringRevision} · ${from} → ${workflow.phase}${revoked ? ' · approval revoked, the revised plan needs new approval' : ''} · prompt "${promptPreview(text)}" from user`, revoked ? 'warning' : 'info');
@@ -1138,6 +1176,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
     if (workflow?.active && !workflow.deliveryPath && event.source === 'interactive' && !text.startsWith('/') && (text || images.length)) {
       const prompt = text.replace(/^forge\s*:\s*/i, '').trim();
       const route = steeringRoute(workflow);
+      const snapshot = gateSnapshot(ctx);
       const keepWorking = (reason: string) => {
         ctx.ui?.setEditorText?.(text);
         notify(ctx, `${reason} Forge continues ${workflow?.phase ?? 'its current gate'}; your prompt is back in the editor${images.length ? ' (attach images again)' : ''}.`);
@@ -1149,12 +1188,21 @@ export default function forgeExtension(pi: ExtensionAPI) {
       const steerChoice = `Steer · ${route.from} → ${route.to} · ${effect}`;
       const cancelChoice = `Cancel · keep working on ${route.from}`;
       const choice = await ctx.ui.select(`Forge steering · prompt "${promptPreview(prompt)}" from user`, [steerChoice, cancelChoice]);
+      if (!isCurrentGate(snapshot, ctx)) {
+        notify(ctx, 'Forge state changed while the steering dialog was open. Nothing was steered; submit the prompt again in the intended workflow.', 'warning');
+        return { handled: true };
+      }
       if (choice !== steerChoice) return keepWorking('Forge steering cancelled.');
       const instruction = steer(prompt, images, ctx);
       if (!instruction) return keepWorking('Forge steering was not applied.');
+      const steeredSnapshot = gateSnapshot(ctx);
       // The running turn now works for a superseded gate: stop it instead of paying
       // for its remaining tokens and time. Its specialists' late results are ignored.
       if (ctx.isIdle?.() === false) await ctx.abort?.();
+      if (!isCurrentGate(steeredSnapshot, ctx)) {
+        notify(ctx, 'Forge state changed while stopping the previous turn. The obsolete steering instruction was not dispatched.', 'warning');
+        return { handled: true };
+      }
       if (ctx.isIdle?.() === false) {
         pi.sendUserMessage(instruction, { deliverAs: 'followUp' });
         return { handled: true };
@@ -1244,8 +1292,11 @@ export default function forgeExtension(pi: ExtensionAPI) {
         if (!workflow || !['FAIL', 'BLOCKED'].includes(workflow.qaStatus) || !['QA', 'PLAN'].includes(workflow.phase)) {
           return notify(ctx, 'Rework requires a previous QA FAIL/BLOCKED.', 'warning');
         }
-        workflow = reworkTransition(workflow); saveState(); updateDashboard(ctx);
-        pi.sendUserMessage(reworkInstruction(workflow), { attribution: 'agent' });
+        if (workflow.phase === 'QA') {
+          invalidateGateWork();
+          workflow = reworkTransition(workflow); saveState(); updateDashboard(ctx);
+        }
+        pi.sendUserMessage(phaseInstruction(workflow), { attribution: 'agent' });
         return;
       }
       if (command.type === 'review') {
@@ -1255,6 +1306,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
       }
       if (command.type === 'cancel') {
         reviewEpoch++; reviewScheduled = false;
+        invalidateGateWork();
         const cancelledSlug = workflow?.slug;
         workflow = null; pendingCheckpointRecovery = null;
         saveState(typeof cancelledSlug === 'string' ? cancelledSlug : undefined); updateDashboard(ctx);
@@ -1262,10 +1314,13 @@ export default function forgeExtension(pi: ExtensionAPI) {
         return;
       }
       if (command.type === 'qa') {
-        if (!workflow || workflow.approved !== true || workflow.planValid !== true || typeof workflow.approvedPlanHash !== 'string' || workflow.approvedPlanHash.length === 0 || !['EXECUTE', 'QA'].includes(workflow.phase) || workflow.qaStatus === 'PASS') {
+        if (!workflow || workflow.approved !== true || workflow.planValid !== true || typeof workflow.approvedPlanHash !== 'string' || workflow.approvedPlanHash.length === 0 || !['EXECUTE', 'QA'].includes(workflow.phase)) {
           return notify(ctx, 'No approved execution is available for QA.', 'warning');
         }
-        workflow = { ...workflow, active: true, phase: 'QA', qaStatus: null, qaRetries: 0, qaEvidencePending: false, gateAgents: { ...(workflow.gateAgents ?? {}), QA: [] } };
+        invalidateGateWork();
+        workflow = { ...workflow, active: true, phase: 'QA', qaStatus: null, qaRetries: 0, qaEvidencePending: false, workingTreeAtQa: null,
+          deliveryPath: null, commitMessagePath: null, commitMessage: null, deliveryRetries: 0,
+          gateAgents: { ...(workflow.gateAgents ?? {}), QA: [] }, gateAgentsSpawned: { ...(workflow.gateAgentsSpawned ?? {}), QA: [] } };
         saveState(); updateDashboard(ctx);
         pi.sendUserMessage(qaInstruction(workflow), { attribution: 'agent' });
         return;
@@ -1283,16 +1338,19 @@ export default function forgeExtension(pi: ExtensionAPI) {
           return;
         }
         if (!workflow.active && workflow.phase === 'REQUIREMENT') {
+          invalidateGateWork();
           workflow = { ...workflow, active: true, gateAgents: {}, agentRetries: {}, requirementSummaryRequested: false }; saveState();
           pi.sendUserMessage(phaseInstruction(workflow), { attribution: 'agent' });
           return;
         }
         if (!workflow.active && workflow.phase === 'EXECUTE') {
+          invalidateGateWork();
           workflow = { ...workflow, active: true, executionObserved: false, agentRetries: {} }; saveState();
           pi.sendUserMessage(executionInstruction(workflow), { attribution: 'agent' });
           return;
         }
         if (!workflow.active && workflow.phase === 'PLAN') {
+          invalidateGateWork();
           workflow = { ...workflow, active: true }; saveState();
         }
         if (!workflow?.active) return notify(ctx, 'No active Forge workflow.', 'warning');
@@ -1488,8 +1546,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
     const pending = runningTasks.get(id);
     if (id) runningTasks.delete(id);
     // No matching dispatch or errored task: never count as completed.
-    if (!pending || pending.key !== workflow.phase || pending.qaStatus !== (workflow.qaStatus ?? null) ||
-        pending.reworkCycles !== (workflow.reworkCycles ?? 0) || pending.steeringRevision !== (workflow.steeringRevision ?? 0) || event.isError) return;
+    if (!pending || !isCurrentGate(pending.scope, ctx) || event.isError) return;
     const outputs = (event.content ?? []).filter((x: any)=>x?.type==='text' && typeof x.text==='string' && x.text.trim()).map((x: any)=>x.text);
     // Empty successful tool results are not meaningful completed agent reports.
     if (!outputs.length && !event.details) return;
@@ -1497,7 +1554,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
       if (requiredAgentsFor(workflow).includes(agent) && (workflow.gateAgentsSpawned?.[workflow.phase] ?? []).includes(agent)) {
         markAgent(agent, ctx);
         workflow = { ...workflow, agentCompletions: [...(workflow.agentCompletions ?? []),
-          { gate: pending.key, agent, resultId: id, reportedAt: new Date().toISOString(),
+          { gate: pending.scope.phase, agent, resultId: id, reportedAt: new Date().toISOString(),
             resultPreview: outputs.join('\n').slice(0,800) || '[structured tool result]',
             reportedSeverities: countReportedSeverities(outputs.join('\n')) }] };
         saveState();
@@ -1536,7 +1593,8 @@ export default function forgeExtension(pi: ExtensionAPI) {
       const id = String(event.toolCallId ?? event.id ?? '');
       // Keep task-agent tracking in sync with the input that will actually be executed.
       // An OMP tool_call hook can replace task arguments before native task dispatch.
-      if (id) runningTasks.set(id, { key: workflow.phase, agents: taskAgents(event.input), qaStatus: workflow.qaStatus ?? null, reworkCycles: workflow.reworkCycles ?? 0, steeringRevision: workflow.steeringRevision ?? 0 });
+      const scope = gateSnapshot(ctx);
+      if (id && scope) runningTasks.set(id, { scope, agents: taskAgents(event.input) });
       let skillBrief = '';
       try { skillBrief = skillBriefForGate(); }
       catch (err) { if (id) runningTasks.delete(id); return { block: true, reason: `Forge gate skill verification failed: ${String(err)}` }; }
@@ -1567,7 +1625,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
       if (/(?:^|\/)\.git(?:\/|$)/.test(target)) return { block: true, reason: 'Forge forbids direct writes to .git internals.' };
     }
     if (isForgeChild) {
-      if (childName !== configuredAgents.execution.executor && ['write','edit','apply_patch','bash','shell','terminal','exec','run','python'].includes(tool)) {
+      if (childName !== configuredAgents.execution.executor && !READ_ONLY_TOOLS.includes(tool)) {
         return { block: true, reason: 'Forge specialist is read-only. Only executor may edit approved code; no Git writes.' };
       }
       // Steering can revoke approval while the executor is still running.
@@ -1580,25 +1638,18 @@ export default function forgeExtension(pi: ExtensionAPI) {
     if (!workflow.active && !READ_ONLY_TOOLS.includes(tool)) {
       return { block: true, reason: 'Forge is paused. Resume the workflow or cancel it before making changes.' };
     }
-    if (workflow.phase === 'QA' && workflow.qaStatus === 'PASS') {
-      if (['write', 'edit', 'apply_patch', 'python'].includes(tool)) {
-        return { block: true, reason: 'Forge delivery is read-only. Use forge_delivery_submit for the commit-message artifact.' };
-      }
-      if (['bash', 'shell', 'terminal', 'exec', 'run'].includes(tool)) {
-        const cmd = String(input.command ?? input.cmd ?? '');
-        if (!isAllowedQaCommand(cmd)) return { block: true, reason: 'Forge delivery allows only conservative read-only Git/test commands.' };
-      }
-      return;
-    }
     if (workflow.phase === 'QA') {
-      if (['write', 'edit', 'apply_patch', 'python'].includes(tool)) {
-        return { block: true, reason: 'Forge post-execution QA is read-only. Report findings; do not modify implementation.' };
-      }
+      const delivery = workflow.qaStatus === 'PASS';
+      if (READ_ONLY_TOOLS.includes(tool) || tool === 'task' || tool === 'todo' || tool === 'wait') return;
+      if (delivery ? tool === 'forge_delivery_submit' : tool === 'forge_qa_scope' || tool === 'forge_qa_submit') return;
       if (['bash', 'shell', 'terminal', 'exec', 'run'].includes(tool)) {
         const cmd = String(input.command ?? input.cmd ?? '');
-        if (!isAllowedQaCommand(cmd)) return { block: true, reason: 'Forge QA only permits conservative test/lint/read commands. Record NOT_RUN if unavailable.' };
+        if (isAllowedQaCommand(cmd)) return;
+        return { block: true, reason: `Forge ${delivery ? 'delivery' : 'QA'} permits only conservative read-only Git/test commands. Record NOT_RUN if unavailable.` };
       }
-      return;
+      // Unknown tools can mutate files or external services (eval, AST/LSP edits,
+      // MCP writes). Review and delivery must fail closed, just like pre-approval.
+      return { block: true, reason: `Forge ${delivery ? 'delivery' : 'post-execution QA'} is read-only: tool ${tool} is not permitted.` };
     }
     if (workflow.phase === 'EXECUTE' && workflow.approved === true) return;
 

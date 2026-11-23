@@ -16,6 +16,8 @@ test('new workflows use bundled gate skills across four phases', () => {
   assert.equal(currentSkillGate('PLAN'),'planning');
   assert.equal(currentSkillGate('EXECUTE'),'execution');
   assert.equal(currentSkillGate('QA'),'qa');
+  assert.equal(currentSkillGate('QA','PASS'),'delivery');
+  assert.equal(currentSkillGate('QA','FAIL'),'qa');
   assert.equal(currentSkillGate('AWAITING_APPROVAL'),null);
 });
 test('gate skills can be added, removed and reset without mutating input', () => {

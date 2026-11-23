@@ -17,7 +17,7 @@ export function markGateAgent(state, agentName) {
 
 /** Human approved the plan through the platform's approval dialog. */
 export function approvedExecutionState(state, auditReason, reviewedBy = 'native-plan-review') {
-  return { ...state, phase: 'EXECUTE', approved: true, reworkBaseHash: null, executionObserved: false,
+  return { ...state, phase: 'EXECUTE', approved: true, reworkBaseHash: null, reworkBasePlanPath: null, executionObserved: false,
     gateAgents: { ...(state.gateAgents ?? {}), EXECUTE: [] }, agentRetries: { ...(state.agentRetries ?? {}), EXECUTE: 0 },
     ...(auditReason ? { recoveryAudit: [ ...(state.recoveryAudit ?? []), {
       from: state.phase, to: 'EXECUTE', reason: auditReason, reviewedBy, at: new Date().toISOString(),
@@ -75,16 +75,16 @@ export function deliveryTransition(state, { deliveryPath, commitMessagePath, com
 
 /** Explicit human request for a new plan after QA FAIL/BLOCKED. */
 export function reworkTransition(state) {
-  const previousHash = state.approvedPlanHash ?? state.reworkBaseHash ?? null;
+  // A pending PLAN proposal is not approved; retain both it and the actual approved base.
+  if (state.phase === 'PLAN') return state;
   return { ...state, active: true, approved: false, qaEvidencePending: false, phase: 'PLAN', planWritten: false, planValid: false, approvedPlanHash: null,
-    reworkBaseHash: previousHash, reworkBasePlanPath: state.reworkBasePlanPath ?? state.planPath, planPath: null,
+    reworkBaseHash: state.approvedPlanHash ?? null, reworkBasePlanPath: state.planPath ?? null, planPath: null,
 
     reworkCycles: (state.reworkCycles ?? 0) + (state.qaStatus === 'BLOCKED' ? 1 : 0), reworkReason: state.qaStatus === 'FAIL' ? 'QA_FAIL' : 'QA_BLOCKED',
     gateAgents: { ...(state.gateAgents ?? {}), PLAN: [] }, agentRetries: { ...(state.agentRetries ?? {}), PLAN: 0 } };
 }
 
 const STEERABLE_PHASES = new Set(['REQUIREMENT', 'PLAN', 'EXECUTE', 'QA']);
-const MAX_STEERING = 20;
 
 /** Where a steering prompt would take the workflow, or null when nothing can be steered.
  * Lets an adapter ask the human before anything changes. */
@@ -99,13 +99,13 @@ export function steeringRoute(state) {
  * PLAN withdraws any proposal, and EXECUTE/QA lose their approval and re-plan.
  * Throws when no running workflow can take steering. */
 export function steerTransition(state, text, { at = new Date().toISOString() } = {}) {
-  const directive = String(text ?? '').trim();
-  if (!directive) throw new Error('Steering prompt is empty.');
+  const directive = String(text ?? '');
+  if (!directive.trim()) throw new Error('Steering prompt is empty.');
   if (!steeringRoute(state)) throw new Error('No running Forge workflow to steer.');
   const steeringRevision = (state.steeringRevision ?? 0) + 1;
   const next = {
     ...state, steeringRevision,
-    requirementSteering: [...(state.requirementSteering ?? []), { revision: steeringRevision, phase: state.phase, text: directive, at }].slice(-MAX_STEERING),
+    requirementSteering: [...(state.requirementSteering ?? []), { revision: steeringRevision, phase: state.phase, text: directive, at }],
   };
   if (state.phase === 'REQUIREMENT') {
     return { ...next, requirementSummary: null, requirementSummaryRequested: false,

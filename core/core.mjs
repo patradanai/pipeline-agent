@@ -106,7 +106,8 @@ export function formatGateSkills(source) {
   const mapping = cloneGateSkills(source);
   return SKILL_GATES.map(g => `${g.toUpperCase().padEnd(12)} ${mapping[g].length ? mapping[g].join(', ') : '(none)'}`).join('\n');
 }
-export function currentSkillGate(phase) {
+export function currentSkillGate(phase, qaStatus = null) {
+  if (String(phase) === 'QA' && qaStatus === 'PASS') return 'delivery';
   return ({ REQUIREMENT:'requirement', PLAN:'planning', EXECUTE:'execution', QA:'qa' })[String(phase)] ?? null;
 }
 /** Apply skill text to every named subagent task, not just the lead orchestrator prompt. */
