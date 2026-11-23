@@ -23,10 +23,19 @@ checks that made the old gate rigorous.
 - `forge-requirement` stays on opus in the `balanced` model profile: it now
   carries the critic role.
 - Plan section renamed 'Cooking & Gap Analysis' → 'Requirement & Gap Analysis'.
-- OMP permits `propose <slug>` only in PROPOSAL for the saved plan slug. OMP
-  still validates the plan and opens native human approval; the command cannot
-  mark the workflow approved.
-- OMP rework stays in Forge PLAN while drafting. After a successful rework-plan save, Forge restores native Plan Mode and opens approval UI automatically, avoiding blocked-write and manual-proposal loops.
+- OMP runs Forge's own plan mode instead of native OMP Plan Mode. The PLAN gate
+  stays read-only except for one session-local plan file
+  (`local://<slug>-plan.md`, or `local://<slug>-rework-<n>-plan.md` after QA
+  FAIL). The model submits it with the new `forge_plan_propose` tool, which
+  checks the plan contract. When the turn ends, Forge shows the plan in the
+  transcript and opens its own approval dialog: **Approve and keep context**,
+  **Approve and compact context**, **Refine plan**, or **Not now**. `/forge
+  review` reopens it. Forge exits native OMP Plan Mode when Forge starts and
+  again on approval, then sends the execution turn itself.
+- Removed for OMP: `xd://propose` and `propose <slug>` handling,
+  `plan_review_requested`/`plan_review_resolved`, approval handoff across
+  branch/new-session switches, and the native Plan Mode recovery prompt.
+  Approval now always happens in the current session.
 
 ## Removed
 

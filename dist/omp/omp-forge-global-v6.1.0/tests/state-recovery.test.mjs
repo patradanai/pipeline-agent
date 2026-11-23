@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { recoveryProposal, applyRecoveryProposal } from '../forge/state-recovery.mjs';
+import { normalizeForgeState } from '../forge/forge-state.mjs';
 const approved = {active:true, slug:'forge-abc', approved:true, planValid:true,
   approvedPlanHash:'sha256-tested', planWritten:true, planPath:'local://forge-abc-plan.md'};
 
@@ -47,14 +48,6 @@ test('QA status does not manufacture delivery or approval',()=>{
   }
 });
 
-test('native mode mismatch never changes the Forge gate',()=>{
-  const state={active:true,phase:'PLAN',approved:false,planWritten:false};
-  const proposal=recoveryProposal(state,'inactive');
-  assert.equal(proposal.category,'native-mode');
-  assert.equal(proposal.target,'PLAN');
-  assert.strictEqual(applyRecoveryProposal(state,proposal),state);
-});
-
 test('valid QA and execution checkpoints do not cause prompts',()=>{
   assert.equal(recoveryProposal({...approved,phase:'EXECUTE'},'inactive'),null);
   assert.equal(recoveryProposal({...approved,phase:'QA',qaStatus:'BLOCKED'},'inactive'),null);
@@ -94,12 +87,11 @@ test('existing rework base is preserved, not replaced by planPath', () => {
 
 test('legacy rework migration revokes superseded approval before recovery', () => {
   const state={...approved,phase:'REWORK_PLANNING',qaStatus:'FAIL'};
-  const proposal=recoveryProposal(state,'inactive');
-  assert.equal(proposal.category,'native-mode');
-  const fixed=applyRecoveryProposal(state,proposal);
-  assert.equal(fixed.phase,'PLAN');
-  assert.equal(fixed.approved,false);
-  assert.equal(fixed.reworkBasePlanPath,approved.planPath);
-  assert.equal(fixed.reworkBaseHash,approved.approvedPlanHash);
-  assert.equal(fixed.planPath,null);
+  assert.equal(recoveryProposal(state),null);
+  const migrated=normalizeForgeState(state);
+  assert.equal(migrated.phase,'PLAN');
+  assert.equal(migrated.approved,false);
+  assert.equal(migrated.reworkBasePlanPath,approved.planPath);
+  assert.equal(migrated.reworkBaseHash,approved.approvedPlanHash);
+  assert.equal(migrated.planPath,null);
 });

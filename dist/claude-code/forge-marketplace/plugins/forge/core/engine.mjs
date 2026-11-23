@@ -196,7 +196,7 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
     }
     if (!state?.active) return keep(state);
 
-    const conflict = recoveryProposal(state, 'unknown');
+    const conflict = recoveryProposal(state);
     if (conflict?.category === 'safety' && !READ_ONLY.has(tool)) {
       return deny(state, `Forge state conflict: ${conflict.explanation} Run /forge status and /forge off or rework.`);
     }

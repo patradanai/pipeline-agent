@@ -24,7 +24,8 @@ test('each phase has domain-independent instructions', () => {
   const req = phaseInstruction(s);
   assert.match(req, /\[GATE 1\/4: REQUIREMENT — single-pass analysis\]/);
   assert.doesNotMatch(req, /forge-critic|forge-architect|forge-qa-strategist/);
-  assert.match(phaseInstruction({ ...s, phase:'PLAN', planWritten:true }), /xd:\/\/propose/);
+  assert.match(phaseInstruction({ ...s, phase:'PLAN', planWritten:true }), /forge_plan_propose/);
+  assert.doesNotMatch(phaseInstruction({ ...s, phase:'PLAN' }), /xd:\/\/propose|Plan Review overlay/);
   assert.match(phaseInstruction({ ...s, phase:'PLAN', planWritten:true, planValid:true }), /awaiting explicit operator approval/);
   assert.match(phaseInstruction({ ...s, phase:'EXECUTE', approved:true }), /forge-executor/);
   assert.match(phaseInstruction({ ...s, phase:'QA' }), /forge-qa/);

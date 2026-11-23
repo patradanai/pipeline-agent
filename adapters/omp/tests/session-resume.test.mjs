@@ -121,7 +121,6 @@ test('/forge resume offers all-projects search and restores blocked plan without
   forgeExtension(pi);
   const ctx={agent:{kind:'main'},mode:'tui',cwd:tmp,sessionManager:new Manager(),isIdle(){return true},hasPendingMessages(){return false},
     sessionModes:{getState(){return {plan}},async set(){plan='active';return {ok:true}}},
-    async openPlanReview(){calls.push(['open-plan-review']);return true},
     ui:{notify(m){calls.push(['notify',m])},setWidget(){},async select(_title,options){calls.push(['picker',options]);return options[0]}},
     async switchSession(path){calls.push(['switch',path]);currentFile=path;branch=[{type:'custom',customType:FORGE_STATE_ENTRY,data:blocked}];await events.get('session_switch')({},ctx);return {cancelled:false}},
   };
@@ -129,9 +128,10 @@ test('/forge resume offers all-projects search and restores blocked plan without
   await commands.get('forge').handler('resume',ctx);
   assert.equal(calls.filter(c=>c[0]==='picker').length,2);
   assert.deepEqual(calls.find(c=>c[0]==='switch').slice(1),[other]);
-  assert.equal(calls.filter(c=>c[0]==='open-plan-review').length,1);
+  const messages=calls.filter(c=>c[0]==='message');
+  assert.equal(messages.length,1);
+  assert.match(messages[0][1],/forge_plan_propose/);
   assert.equal(branch.at(-1).data.approved,false);
-  assert.equal(calls.some(c=>c[0]==='message'),false);
 });
 
 

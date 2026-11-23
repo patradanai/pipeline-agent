@@ -2,7 +2,7 @@ import type { ExtensionAPI } from '@oh-my-pi/pi-coding-agent';
 import { discoverForgeSessions, forgeSessionLabel, resolvePickerSessions, sameResumeCheckpoint } from './session-resume.mjs';
 import { recoveryProposal, applyRecoveryProposal } from './state-recovery.mjs';
 import { snapshotWorkingTree as coreSnapshotWorkingTree, inspectWorkspaceScope } from './workspace.mjs';
-import { applyRequirementSummary, hasGateAgents, markGateAgent, approvedExecutionState as coreApprovedExecutionState, qaReportTransition, assertQaSubmittable, assertDeliverySubmittable, deliveryTransition, reworkTransition } from './transitions.mjs';
+import { applyRequirementSummary, hasGateAgents, markGateAgent, approvedExecutionState, qaReportTransition, assertQaSubmittable, assertDeliverySubmittable, deliveryTransition, reworkTransition } from './transitions.mjs';
 import { sessionIdentity, recoveryIdentity, persistForgeCheckpoint, loadForgeCheckpointCandidates, loadForgeCheckpointRecord, pruneForgeCheckpoints, candidateFromSessionEntries, prepareHumanRecovery, isValidRestoreCandidate } from './checkpoint-recovery.mjs';
 import { normalizeForgeState } from './forge-state.mjs';
 import { mkdirSync, readFileSync, writeFileSync, lstatSync, renameSync, readdirSync, unlinkSync, realpathSync, statSync, rmdirSync } from 'node:fs';
@@ -49,12 +49,13 @@ import {
   renderQaReport,
   renderForgeWidget,
   getForgeArgumentCompletions,
+  forgePlanPath,
 } from './core.mjs';
 
 /**
  * Global OMP Forge Harness v6.1 — OMP adapter over the shared Forge core.
  *
- * Plan mode -> native approval -> execution -> independent QA ->
+ * Forge plan mode -> Forge approval dialog -> execution -> independent QA ->
  * FAIL: rework planning -> renewed approval -> execute -> QA;
  * PASS: delivery summary + pasteable commit message; never auto-commit.
  *
@@ -81,12 +82,12 @@ export default function forgeExtension(pi: ExtensionAPI) {
   const checkpointRoot = process.env.FORGE_CHECKPOINT_DIR || join(agentRoot, 'forge-checkpoints');
   let autoStart = false;
   const runningTasks = new Map<string, { key: string; agents: string[]; qaStatus: string | null; reworkCycles: number }>();
-  const planWriteCalls = new Map<string, { path: string; phase: string; reworkCycles: number }>();
-  // Native mode changes cannot run during an OMP streaming/tool turn. A plan
-  // proposal may therefore need to wait until the session is *actually idle*.
-  // This is control-plane recovery only; it never authorizes code writes.
-  let planRecoveryScheduled = false;
-  let planRecoveryEpoch = 0;
+  // Forge's own plan review opens once the proposing turn is idle. The epoch
+  // invalidates a scheduled review after a session/branch change or cancel.
+  // This is control-plane only; it never authorizes code writes.
+  let reviewScheduled = false;
+  let reviewEpoch = 0;
+  let reviewOpen = false;
   let recoveryPopupScheduled = false;
   let recoveryPopupEpoch = 0;
   const skippedRecovery = new Set<string>();
@@ -94,34 +95,9 @@ export default function forgeExtension(pi: ExtensionAPI) {
   // Mutating tools are blocked while an orphaned workflow is UNRESOLVED; a
   // decline releases that block but keeps the Git-write guard.
   const declinedRecovery = new Set<string>();
-  // In-process, single-use carry-forward of a native Plan Approval that the
-  // human granted seconds ago, for the branch switch OMP performs as part of
-  // leaving Plan Mode. Never read from disk; never survives a restart.
-  const APPROVAL_HANDOFF_MS = 15_000;
-  let approvalHandoff: { sessionId: string; sessionFile: string | null; state: any; at: number; seq: number } | null = null;
-  // OMP v19 "Approve and execute" (choice `execute`, preserveContext=false)
-  // runs handleClearCommand(): a NEW session (new id + file) followed by
-  // session_switch{reason:'new', previousSessionFile}. plan_review_resolved can
-  // arrive before OR after that switch, so Forge tracks the open native review.
-  const NEW_SESSION_HANDOFF_MS = 60_000;
-  let nativeReview: { reviewId: string | null; sessionId: string; sessionFile: string | null; slug: string; planHash: string; planFilePath: string | null; at: number } | null = null;
-  let stateWriteSeq = 0;
   let checkpointsPruned = false;
   const READ_ONLY_TOOLS = ['read', 'grep', 'glob', 'ls', 'ask'];
   const orphanKey = (c: any) => c ? `missing-branch:${c.identity.fingerprint}:${c.state.slug}:${c.state.phase}` : '';
-  // local:// plan artifacts belong to OMP's session-local plan sandbox, NOT
-  // the checked-out repository. They stay writable throughout Forge's PLAN
-  // gate, even when OMP reports native Plan Mode as paused/inactive.
-  // Limit the exception to a single root-level *-plan.md basename, then pin it.
-  // All project paths remain denied before native human approval.
-  const isSandboxPlanPath = (target: string) =>
-    /^local:\/\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}-plan\.md$/.test(target);
-  const isPlanWritePath = (target: string) =>
-    Boolean(workflow && isSandboxPlanPath(target) &&
-      (workflow.reworkBasePlanPath && !workflow.planWritten
-        ? target !== (workflow.reworkBasePlanPath ?? `local://${workflow.slug}-plan.md`)
-        : (!workflow.planPath || target === workflow.planPath)));
-
 
   // Gate transitions occur as soon as a required tool has SUCCESSFULLY finished.
   // Relying on session_stop alone can strand OMP when there are pending messages,
@@ -367,16 +343,6 @@ export default function forgeExtension(pi: ExtensionAPI) {
     // a human-confirmed recovery hint when a later branch hides this entry.
     const tombstone = { active: false, version: 9, ...(cancelledSlug ? { cancelledSlug } : {}) };
     pi.appendEntry(stateEntry, workflow ?? tombstone);
-    stateWriteSeq++;
-    // Keep an armed approval handoff in step with writes that belong to the
-    // SAME approved execution (e.g. executionObserved); anything else disarms it.
-    if (approvalHandoff) {
-      const h = approvalHandoff.state;
-      if (workflow?.active && workflow.phase === 'EXECUTING' && workflow.approved === true &&
-          workflow.slug === h.slug && workflow.approvedPlanHash === h.approvedPlanHash) {
-        approvalHandoff = { ...approvalHandoff, state: workflow, seq: stateWriteSeq };
-      } else approvalHandoff = null;
-    }
     if (!currentSessionIdentity && activeSessionManager) currentSessionIdentity = sessionIdentity(activeSessionManager, workspaceDir);
     if (currentSessionIdentity) {
       try { persistForgeCheckpoint(checkpointRoot, currentSessionIdentity, workflow ?? tombstone); }
@@ -476,7 +442,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
     pendingCheckpointRecovery = null;
     currentSessionIdentity = sessionIdentity(ctx.sessionManager, ctx.cwd || workspaceDir);
     saveState(); updateDashboard(ctx);
-    notify(ctx, `Recovered ${chosen.state.phase} as ${workflow.phase} in the CURRENT branch. Prior execution permission was not transferred. ${chosen.state.approved ? 'A fresh native Plan Approval is mandatory.' : 'No approval was inferred.'} Use /forge resume to continue.`, 'warning');
+    notify(ctx, `Recovered ${chosen.state.phase} as ${workflow.phase} in the CURRENT branch. Prior execution permission was not transferred. ${chosen.state.approved ? 'A fresh Forge plan approval is mandatory.' : 'No approval was inferred.'} Use /forge resume to continue.`, 'warning');
     return true;
   }
 
@@ -669,118 +635,167 @@ export default function forgeExtension(pi: ExtensionAPI) {
     return { deliveryPath, commitMessagePath, commitMessage };
   }
 
-  async function enterPlan(ctx: any): Promise<boolean> {
-    if (ctx.agent?.kind !== 'main' || ctx.mode !== 'tui' || !ctx.sessionModes) {
-      notify(ctx, 'Forge requires interactive OMP TUI and native Plan Mode.', 'warning');
-      return false;
+  const REVIEW_KEEP = 'Approve and keep context';
+  const REVIEW_COMPACT = 'Approve and compact context';
+  const REVIEW_REFINE = 'Refine plan';
+  const REVIEW_LATER = 'Not now — keep plan for /forge review';
+  const PLAN_FILE_PATTERN = /^local:\/\/([A-Za-z0-9][A-Za-z0-9._-]{0,127}-plan\.md)$/;
+  const MAX_PLAN_BYTES = 512 * 1024;
+
+  /** Forge plan files live in OMP's session-local root (<session file minus .jsonl>/local/),
+   * never in the checked-out repository. Only a root-level *-plan.md regular file is read. */
+  function readPlanFile(ctx: any, planPath: string): { ok: true; content: string } | { ok: false; error: string } {
+    const name = typeof planPath === 'string' ? planPath.match(PLAN_FILE_PATTERN)?.[1] : undefined;
+    if (!name) return { ok: false, error: `Invalid Forge plan path "${planPath}".` };
+    const sessionFile = ctx.sessionManager?.getSessionFile?.();
+    if (typeof sessionFile !== 'string' || !sessionFile.endsWith('.jsonl')) {
+      return { ok: false, error: 'This OMP session has no session file, so local:// plan files are unavailable.' };
     }
-    const current = ctx.sessionModes.getState();
-    if (current?.plan === 'active') return true;
-    // Native OMP Plan Mode supports enter/exit (resume is for Goal Mode).
-    // An inactive/paused Plan Mode must be entered with the supported action.
-    const action = 'enter';
-    const result = await ctx.sessionModes.set({ mode: 'plan', action });
-    if (!result.ok) {
-      notify(ctx, `Cannot ${action} Plan Mode: ${result.message ?? result.code}`, 'warning');
-      return false;
+    const file = join(sessionFile.slice(0, -6), 'local', name);
+    try {
+      const stat = lstatSync(file);
+      if (!stat.isFile() || stat.isSymbolicLink()) return { ok: false, error: `${planPath} is not a regular file.` };
+      if (stat.size === 0) return { ok: false, error: `${planPath} is empty.` };
+      if (stat.size > MAX_PLAN_BYTES) return { ok: false, error: `${planPath} is larger than 512 KiB.` };
+      return { ok: true, content: readFileSync(file, 'utf8') };
+    } catch {
+      return { ok: false, error: `${planPath} does not exist yet.` };
     }
-    return true;
   }
 
-  function deferNativePlanUntilIdle(ctx: any, purpose: 'planning' | 'review' | 'rework') {
-    if (!workflow?.active || planRecoveryScheduled) return;
-    if (typeof ctx.isIdle !== 'function') {
-      notify(ctx, 'Native OMP idle detection is unavailable. Plan preserved; use /forge resume when idle.', 'warning');
+  /** Forge runs its own plan mode; native OMP Plan Mode would block approved
+   * implementation writes. "exit" leaves it without approving or deleting a draft. */
+  async function exitNativePlanMode(ctx: any): Promise<boolean> {
+    const plan = ctx.sessionModes?.getState?.().plan;
+    if (!plan || plan === 'inactive') return true;
+    try {
+      const result = await ctx.sessionModes.set({ mode: 'plan', action: 'exit' });
+      return result?.ok === true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** The proposed plan can no longer be reviewed: return to an unproposed PLAN gate. */
+  function resetProposal(ctx: any, reason: string) {
+    workflow = { ...workflow, planWritten: false, planValid: false, approvedPlanHash: null, reviewRequested: false };
+    saveState(); updateDashboard(ctx);
+    notify(ctx, reason, 'error');
+    pi.sendUserMessage(`${reason}\n\n${phaseInstruction(workflow)}`, { attribution: 'agent' });
+  }
+
+  /** Open the approval dialog once the proposing turn has settled. */
+  function scheduleReviewWhenIdle(ctx: any) {
+    if (!workflow?.active || reviewScheduled) return;
+    if (typeof ctx.setTimeout !== 'function' || typeof ctx.isIdle !== 'function') {
+      notify(ctx, 'Forge cannot detect an idle session. Plan kept; run /forge review to open the approval dialog.', 'warning');
       return;
     }
-    if (typeof ctx.setTimeout !== 'function') {
-      notify(ctx, 'Native Plan Mode recovery is unavailable. When idle, use /forge resume.', 'warning');
-      return;
-    }
-    if (ctx.mode !== 'tui' || typeof ctx.sessionModes?.getState !== 'function' ||
-        typeof ctx.sessionModes?.set !== 'function') {
-      notify(ctx, 'Native OMP Plan Mode requires an interactive TUI.', 'error');
-      return;
-    }
-    planRecoveryScheduled = true;
-    const epoch = ++planRecoveryEpoch;
+    reviewScheduled = true;
+    const epoch = ++reviewEpoch;
     const slug = workflow.slug;
+    const hash = workflow.approvedPlanHash;
     const sessionId = ctx.sessionManager?.getSessionId?.();
-    let reviewFailures = 0;
-    const isCurrentRecovery = () => {
-      const sameSession = !sessionId || ctx.sessionManager?.getSessionId?.() === sessionId;
-      return epoch === planRecoveryEpoch && workflow?.active && workflow.slug === slug && sameSession &&
-        workflow.phase === 'PLAN';
-    };
-    const releaseRecovery = () => {
-      if (epoch === planRecoveryEpoch) planRecoveryScheduled = false;
-    };
-    const schedule = () => {
-      if (typeof ctx.setTimeout !== 'function') {
-        releaseRecovery();
-        notify(ctx, 'Native Plan Mode recovery is unavailable. When idle, use /forge resume.', 'warning');
-        return;
-      }
-      ctx.setTimeout(async () => {
-        if (!isCurrentRecovery()) { releaseRecovery(); return; }
-        if (typeof ctx.isIdle !== 'function') {
-          releaseRecovery();
-          notify(ctx, 'Native OMP idle detection is unavailable. Plan preserved; use /forge resume when idle.', 'warning');
-          return;
-        }
-        if (ctx.getPendingPlanReview?.()) { releaseRecovery(); return; }
-        if (!ctx.isIdle() || ctx.hasPendingMessages?.()) { schedule(); return; }
+    const release = () => { if (epoch === reviewEpoch) reviewScheduled = false; };
+    const isCurrent = () => epoch === reviewEpoch && workflow?.active && workflow.phase === 'PLAN' &&
+      workflow.slug === slug && workflow.approvedPlanHash === hash &&
+      (!sessionId || ctx.sessionManager?.getSessionId?.() === sessionId);
+    const tick = () => ctx.setTimeout(async () => {
+      if (!isCurrent()) { release(); return; }
+      if (!ctx.isIdle() || ctx.hasPendingMessages?.()) { tick(); return; }
+      reviewScheduled = false;
+      await openForgeReview(ctx);
+    }, 250);
+    tick();
+  }
 
-        const state = ctx.sessionModes.getState();
-        if (state?.plan !== 'active') {
-          const result = await ctx.sessionModes.set({ mode: 'plan', action: 'enter' });
-          if (!isCurrentRecovery()) { releaseRecovery(); return; }
-          if (!result?.ok) {
-            if (result?.code === 'busy') { schedule(); return; }
-            releaseRecovery();
-            notify(ctx, `OMP Plan Mode could not be activated: ${result?.message ?? result?.code ?? 'unknown error'}. Plan preserved; use /forge resume.`, 'warning');
-            return;
-          }
-        }
-        if (!isCurrentRecovery()) { releaseRecovery(); return; }
-        if (ctx.getPendingPlanReview?.()) { releaseRecovery(); return; }
-        if (typeof ctx.isIdle !== 'function') {
-          releaseRecovery();
-          notify(ctx, 'Native OMP idle detection is unavailable. Plan preserved; use /forge resume when idle.', 'warning');
-          return;
-        }
-        if (ctx.sessionModes.getState()?.plan !== 'active' || !ctx.isIdle() || ctx.hasPendingMessages?.()) {
-          schedule();
-          return;
-        }
+  /** Send the execution turn for an approved plan, optionally after compaction.
+   * `send` is single-use, so compaction callbacks can never dispatch twice. */
+  async function dispatchApprovedExecution(ctx: any, mode: 'keep' | 'compact', planContent: string) {
+    if (!(await exitNativePlanMode(ctx))) {
+      workflow = { ...workflow, active: false };
+      saveState(); updateDashboard(ctx);
+      notify(ctx, 'Plan approved, but native OMP Plan Mode is active and would block implementation writes. Exit it with /plan, then run /forge resume.', 'warning');
+      return;
+    }
+    let sent = false;
+    const send = () => {
+      if (sent) return;
+      sent = true;
+      pi.sendUserMessage(`[FORGE PLAN APPROVED — ${workflow.planPath}]\nThe operator approved this plan in the Forge plan review. Execute it now.\n\n${planContent}`, { attribution: 'agent' });
+    };
+    if (mode === 'compact' && typeof ctx.compact === 'function') {
+      const fallback = (err: unknown) => {
+        notify(ctx, `Compaction failed (${String(err)}); executing with the full context.`, 'warning');
+        send();
+      };
+      void Promise.resolve(ctx.compact({ suppressContinuation: true, onComplete: send, onError: fallback })).catch(fallback);
+      return;
+    }
+    if (mode === 'compact') notify(ctx, 'Compaction is unavailable here; executing with the full context.', 'warning');
+    send();
+  }
 
-        if (purpose === 'review' || workflow.proposalDeferred || workflow.planWritten) {
-          if (typeof ctx.openPlanReview !== 'function') {
-            releaseRecovery();
-            notify(ctx, 'OMP could not open the native Plan Review from this session. Keep the plan; check /plan-review or use /forge resume.', 'warning');
-            return;
-          }
-          const opened = await ctx.openPlanReview();
-          if (!isCurrentRecovery()) { releaseRecovery(); return; }
-          if (!opened) {
-            reviewFailures++;
-            if (reviewFailures < 3) { schedule(); return; }
-            releaseRecovery();
-            notify(ctx, 'OMP could not open the native Plan Review from this session. Keep the plan; check /plan-review or use /forge resume.', 'warning');
-            return;
-          }
-          workflow = { ...workflow, proposalDeferred: false };
+  /** Forge's own plan approval dialog. Only an explicit human choice approves. */
+  async function openForgeReview(ctx: any): Promise<boolean> {
+    if (reviewOpen) return false;
+    if (!(workflow?.active && workflow.phase === 'PLAN' && workflow.planWritten && workflow.planValid &&
+        workflow.approvedPlanHash && !workflow.approved)) {
+      notify(ctx, 'No proposed Forge plan awaits review.', 'warning');
+      return false;
+    }
+    if (ctx.mode !== 'tui' || typeof ctx.ui?.select !== 'function') {
+      notify(ctx, 'Forge plan review needs the interactive OMP TUI.', 'warning');
+      return false;
+    }
+    const file = readPlanFile(ctx, workflow.planPath);
+    if (!file.ok) {
+      resetProposal(ctx, `Forge cannot read ${workflow.planPath}: ${file.error} Write the plan again and call forge_plan_propose.`);
+      return false;
+    }
+    const content = file.content;
+    if (validatePlanContract(content).hash !== workflow.approvedPlanHash) {
+      resetProposal(ctx, `Plan ${workflow.planPath} changed after it was proposed. Call forge_plan_propose again.`);
+      return false;
+    }
+    reviewOpen = true;
+    try {
+      workflow = { ...workflow, reviewRequested: false };
+      saveState(); updateDashboard(ctx);
+      pi.sendMessage({ customType: 'forge-plan-review', content: `Forge plan review · ${workflow.planPath}\n\n${content}`, display: true, excludeFromContext: true });
+      const choices = [REVIEW_KEEP, REVIEW_COMPACT, ...(typeof ctx.ui.editor === 'function' ? [REVIEW_REFINE] : []), REVIEW_LATER];
+      const snapshot = { slug: workflow.slug, hash: workflow.approvedPlanHash };
+      const stale = () => !workflow?.active || workflow.phase !== 'PLAN' || workflow.approved ||
+        workflow.slug !== snapshot.slug || workflow.approvedPlanHash !== snapshot.hash;
+      const staleNotice = () => notify(ctx, 'Forge state changed while the review was open. Nothing was approved; run /forge review again.', 'warning');
+      for (;;) {
+        const choice = await ctx.ui.select(`Forge · Approve plan ${workflow.planPath}?`, choices);
+        if (stale()) { staleNotice(); return false; }
+        if (choice === REVIEW_KEEP || choice === REVIEW_COMPACT) {
+          const mode = choice === REVIEW_COMPACT ? 'compact' : 'keep';
+          workflow = { ...approvedExecutionState(workflow, `forge-plan-review:${mode}`, 'forge-plan-review'), reviewRequested: false };
           saveState(); updateDashboard(ctx);
-          releaseRecovery();
-          return;
+          notify(ctx, 'Forge approved. Execution starts now; QA runs automatically afterward.');
+          await dispatchApprovedExecution(ctx, mode, content);
+          return true;
         }
-        // The native mode itself is the source of truth for readiness.
-        saveState(); updateDashboard(ctx);
-        releaseRecovery();
-        pi.sendUserMessage(phaseInstruction(workflow), { attribution: 'agent' });
-      }, 250);
-    };
-    schedule();
+        if (choice === REVIEW_REFINE) {
+          const feedback = await ctx.ui.editor('Forge · What should change in the plan?', '');
+          if (stale()) { staleNotice(); return false; }
+          if (feedback == null || !String(feedback).trim()) continue;
+          workflow = { ...workflow, approved: false, planWritten: false, planValid: false, approvedPlanHash: null,
+            reviewRequested: false, proposalRetries: 0, businessTopics: [], requirements: [], testCases: [], qualityGates: [],
+            gateAgents: { ...(workflow.gateAgents ?? {}), PLAN: [] }, agentRetries: { ...(workflow.agentRetries ?? {}), PLAN: 0 } };
+          saveState(); updateDashboard(ctx);
+          pi.sendUserMessage(`[FORGE PLAN REFINE]\nThe operator requested changes to ${workflow.planPath}:\n${String(feedback).trim()}\n\n${phaseInstruction(workflow)}`, { attribution: 'agent' });
+          return false;
+        }
+        notify(ctx, 'Plan kept for review; nothing was approved. Run /forge review when ready.');
+        return false;
+      }
+    } finally {
+      reviewOpen = false;
+    }
   }
 
   function recoveryKey(ctx: any, suggestion: any) {
@@ -792,17 +807,16 @@ export default function forgeExtension(pi: ExtensionAPI) {
   async function showStateRecovery(ctx: any, force = false): Promise<boolean> {
     if (ctx.agent?.kind !== 'main' || ctx.mode !== 'tui' || typeof ctx.ui?.select !== 'function') return false;
     if (!workflow && pendingCheckpointRecovery) return await showMissingBranchRecovery(ctx, force);
-    const nativePlan = ctx.sessionModes?.getState?.().plan ?? 'unknown';
-    const suggestion = recoveryProposal(workflow, nativePlan);
+    const suggestion = recoveryProposal(workflow);
     if (!suggestion) {
-      if (force) notify(ctx, 'Forge checkpoint and native mode have no detectable contradiction. No state change needed.');
+      if (force) notify(ctx, 'Forge checkpoint has no detectable contradiction. No state change needed.');
       return false;
     }
     const key = recoveryKey(ctx, suggestion);
     if (!force && skippedRecovery.has(key)) return false;
     const stateAtPrompt = workflow;
     const options = [
-      `Switch: ${suggestion.current} → ${suggestion.target}${suggestion.category === 'native-mode' ? ' (activate OMP Plan Mode)' : ''}`,
+      `Switch: ${suggestion.current} → ${suggestion.target}`,
       'Keep current state — do not change anything',
       'Explain why Forge suggested this',
     ];
@@ -823,19 +837,10 @@ export default function forgeExtension(pi: ExtensionAPI) {
       notify(ctx, 'Forge state changed while recovery was open. No change applied; use /forge recover again.', 'warning');
       return false;
     }
-    if (suggestion.category === 'native-mode') {
-      if (await enterPlan(ctx)) {
-        notify(ctx, `OMP Plan Mode activated; Forge remains in ${workflow.phase}. Native human approval is still required.`);
-        return true;
-      }
-      notify(ctx, 'OMP Plan Mode is still unavailable. Forge state was not changed. Retry when the session is idle.', 'warning');
-      return false;
-    }
     try {
       workflow = applyRecoveryProposal(workflow, suggestion);
       saveState(); updateDashboard(ctx);
       notify(ctx, `Forge state switched to ${workflow.phase} after your confirmation. ${suggestion.explanation} No approval or QA PASS was granted.`);
-      if (workflow.phase === 'PROPOSAL') deferNativePlanUntilIdle(ctx, 'review');
       return true;
     } catch (err) {
       notify(ctx, `Forge recovery refused: ${String(err)}`, 'error');
@@ -845,12 +850,11 @@ export default function forgeExtension(pi: ExtensionAPI) {
 
   function scheduleStateRecoveryPopup(ctx: any) {
     if (recoveryPopupScheduled || ctx.agent?.kind !== 'main' || ctx.mode !== 'tui') return;
-    const current = recoveryProposal(workflow, ctx.sessionModes?.getState?.().plan ?? 'unknown');
+    const current = recoveryProposal(workflow);
     const pendingKey = workflow ? '' : orphanKey(pendingCheckpointRecovery);
     if (!current && !pendingKey) return;
     if (current && skippedRecovery.has(recoveryKey(ctx, current))) return;
     if (!current && skippedRecovery.has(pendingKey)) return;
-    if (planRecoveryScheduled && current?.category === 'native-mode') return;
     if (typeof ctx.setTimeout !== 'function') return;
     recoveryPopupScheduled = true;
     const epoch = ++recoveryPopupEpoch;
@@ -880,14 +884,14 @@ export default function forgeExtension(pi: ExtensionAPI) {
     workspaceDir = ctx.cwd || workspaceDir;
     activeSessionManager = ctx.sessionManager;
     currentSessionIdentity = sessionIdentity(ctx.sessionManager, workspaceDir);
-    if (ctx.agent?.kind !== 'main' || ctx.mode !== 'tui' || !ctx.sessionModes) {
-      notify(ctx, 'Forge requires interactive OMP TUI for native Plan Approval.', 'warning');
+    if (ctx.agent?.kind !== 'main' || ctx.mode !== 'tui') {
+      notify(ctx, 'Forge requires the interactive OMP TUI for its plan approval dialog.', 'warning');
       return null;
     }
-    // Discovery is protected by Forge's own read-only tool policy. Plan Mode
-    // may transiently be inactive/paused; retry before composing any plan.
-    const planReady = await enterPlan(ctx);
-    if (!planReady) notify(ctx, 'Forge continues read-only Discovery. Plan Mode must be available before Planning/Approval.', 'warning');
+    if (!(await exitNativePlanMode(ctx))) {
+      notify(ctx, 'Forge runs its own plan mode, but native OMP Plan Mode is active and could not be exited. Exit it with /plan, then start Forge again.', 'warning');
+      return null;
+    }
     let skillPins;
     try { skillPins = snapshotSkillPins(configuredSkills); }
     catch (err) { notify(ctx, `Forge cannot start: ${String(err)}`, 'error'); return null; }
@@ -898,7 +902,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
       return null;
     }
     workflow = initialState(requirement, undefined, configuredAgents, configuredSkills, skillPins);
-    pendingCheckpointRecovery = null; approvalHandoff = null; nativeReview = null;
+    pendingCheckpointRecovery = null; reviewEpoch++; reviewScheduled = false;
     saveState();
     updateDashboard(ctx);
     notify(ctx, 'Forge: REQUIREMENT (one forge-requirement pass + your review) → Planning → Approval → Execute → QA → Delivery');
@@ -932,10 +936,49 @@ export default function forgeExtension(pi: ExtensionAPI) {
       const head = `Forge: requirement summary recorded (${applied.summarizedHigh} CRITICAL/HIGH, ${applied.summary.blockers.length} open blocker(s)) → Planning.`;
       workflow = applied.state;
       saveState(); updateDashboard(ctx);
-      if (!(await enterPlan(ctx))) {
-        return { content: [{ type: 'text', text: `${head}\n[FORGE REQUIREMENT COMPLETE] Native Plan Mode is temporarily unavailable during this turn. Do NOT write local:// or xd://propose yet. Finish this turn; Forge will activate Plan Mode and start Planning automatically.` }], details: { next: 'PLAN' } };
-      }
       return { content: [{ type: 'text', text: `${head}\n\n${phaseInstruction(workflow)}` }], details: { next: 'PLAN' } };
+    },
+  });
+
+  pi.registerTool({
+    name: 'forge_plan_propose',
+    label: 'Propose Forge Plan for Approval',
+    description: 'Forge plan mode: submit the Forge plan file for human approval (replaces xd://propose). Write the complete plan to the local:// path named in the PLAN gate first. Forge validates the plan contract and opens its approval dialog after this turn ends. Changes no project files.',
+    loadMode: 'essential',
+    approval: 'read',
+    parameters: z.object({}),
+    async execute(_id, _params, _signal, _onUpdate, ctx) {
+      const fail = (text: string) => ({ content: [{ type: 'text', text: `Forge plan proposal rejected: ${text}` }], isError: true });
+      if (ctx.agent?.kind !== 'main') return fail('only the main Forge session can propose the plan.');
+      if (!workflow?.active || workflow.phase !== 'PLAN') return fail('only valid during the Forge PLAN gate.');
+      if (workflow.planWritten && workflow.planValid && !workflow.approved) {
+        return fail('a plan is already awaiting human review. End your turn and wait for the decision.');
+      }
+      if (!hasAgents('PLAN')) return fail(`run ${missingGateAgentsFor(workflow).join(', ')} through task and await its report first.`);
+      const planPath = forgePlanPath(workflow);
+      const file = readPlanFile(ctx, planPath);
+      if (!file.ok) return fail(`${file.error} Write the complete plan to ${planPath} first.`);
+      const contract = validatePlanContract(file.content);
+      if (workflow.reworkBaseHash && contract.hash === workflow.reworkBaseHash) {
+        contract.valid = false;
+        contract.issues.push('Rework plan is identical to the previously approved plan. Address the QA failures first.');
+      }
+      if (!contract.valid) {
+        workflow = { ...workflow, planIssues: contract.issues };
+        saveState();
+        return fail(`fix the plan contract, rewrite ${planPath}, then call forge_plan_propose again:\n${contract.issues.join('\n')}`);
+      }
+      workflow = {
+        ...workflow, planWritten: true, planValid: true, planPath, approvedPlanHash: contract.hash,
+        businessTopics: contract.topics, requirements: contract.requirements, testCases: contract.testCases,
+        qualityGates: contract.qualityGates, planIssues: [], reviewRequested: true, proposalRetries: 0,
+      };
+      saveState(); updateDashboard(ctx);
+      notify(ctx, `Forge VALID PLAN: ${contract.topics.length} business topics, ${contract.requirements.length} requirements, ${contract.testCases.length} test cases; the approval dialog opens when this turn ends.`);
+      return {
+        content: [{ type: 'text', text: `[FORGE PLAN PROPOSED] ${planPath} passed the plan contract. Forge opens the human approval dialog when this turn ends. End your turn now: do not implement, do not call forge_plan_propose again, and do not ask the user to approve in chat.` }],
+        details: { planPath, hash: contract.hash },
+      };
     },
   });
 
@@ -1017,131 +1060,19 @@ export default function forgeExtension(pi: ExtensionAPI) {
     },
   });
 
-  const approvedExecutionState = (w: any, auditReason?: string) => coreApprovedExecutionState(w, auditReason);
-
-  /** OMP v19 "Approve and execute" starts a brand-new session. Carry the
-   * workflow across ONLY for session_switch{reason:'new'} whose
-   * previousSessionFile is the session that owned the native review, and only
-   * while that approval/review is fresh. The new session must be empty of
-   * Forge entries. Two orders are handled:
-   *  A) plan_review_resolved already ran: carry the EXECUTING approval.
-   *  B) review still resolving: carry AWAITING_APPROVAL + nativeApprovalPending;
-   *     the later plan_review_resolved, or OMP's own approval mode_change entry
-   *     in the new session, completes it. Nothing else can promote it. */
-  function carryAcrossNewSession(ctx: any, event: any, before: any, branchHasForgeEntry: boolean): boolean {
-    if (event?.reason !== 'new' || branchHasForgeEntry || workflow) return false;
-    const prevFile = typeof event.previousSessionFile === 'string' && event.previousSessionFile ? resolve(event.previousSessionFile) : null;
-    if (!prevFile) return false;
-    const now = Date.now();
-    const h = approvalHandoff;
-    if (h && h.sessionFile === prevFile && now - h.at <= NEW_SESSION_HANDOFF_MS) {
-      const s = h.state;
-      approvalHandoff = null;
-      if (s?.active && s.phase === 'EXECUTE' && s.approved === true && s.planValid === true && s.approvedPlanHash) {
-        workflow = { ...s, carriedFromSessionFile: prevFile, recoveryAudit: [ ...(s.recoveryAudit ?? []), {
-          from: 'EXECUTE', to: 'EXECUTE', reason: 'plan-approval-new-session-handoff',
-          reviewedBy: 'native-plan-review', at: new Date().toISOString(),
-        } ].slice(-20) };
-        nativeReview = null; pendingCheckpointRecovery = null;
-        saveState();
-        return true;
-      }
-    }
-    const r = nativeReview;
-    if (r?.reviewId && r.sessionFile === prevFile && now - r.at <= 24 * 60 * 60 * 1000 &&
-        before?.active && before.phase === 'PLAN' && before.planValid === true &&
-        before.slug === r.slug && before.approvedPlanHash === r.planHash) {
-      workflow = { ...before, approved: false, carriedFromSessionFile: prevFile,
-        nativeApprovalPending: { reviewId: r.reviewId, planFilePath: r.planFilePath, fromSessionFile: prevFile },
-        recoveryAudit: [ ...(before.recoveryAudit ?? []), {
-          from: 'PLAN', to: 'PLAN', reason: 'plan-review-new-session-carry',
-          reviewedBy: 'native-plan-review', at: new Date().toISOString(),
-        } ].slice(-20) };
-      pendingCheckpointRecovery = null;
-      saveState();
-      return true;
-    }
-    return false;
-  }
-
-  /** Completes a carried review from OMP's OWN durable approval record:
-   * #approvePlan appends mode_change{mode:'none', data.approvedPlanFilePath}
-   * to the new session before dispatching the execution turn. Agents/tools
-   * cannot append mode_change entries; Forge never fabricates one. */
-  function promoteFromNativeApprovalEntry(ctx: any): boolean {
-    const p = workflow?.nativeApprovalPending;
-    if (!p || !workflow?.active || workflow.phase !== 'PLAN' || workflow.planValid !== true || !workflow.approvedPlanHash) return false;
-    if (typeof p.planFilePath !== 'string' || !p.planFilePath) return false;
-    const approvedHere = (ctx.sessionManager?.getBranch?.() ?? []).some((e: any) =>
-      e?.type === 'mode_change' && e.mode === 'none' && e.data?.approvedPlanFilePath === p.planFilePath);
-    if (!approvedHere) return false;
-    workflow = approvedExecutionState(workflow, 'native-approval-mode-change-entry');
-    nativeReview = null;
-    saveState(); updateDashboard(ctx);
-    notify(ctx, 'Forge approved (native OMP approval recorded in this new session). Execution continues; QA runs afterward.');
-    return true;
-  }
-
-  /** OMP may move to a fresh branch as part of leaving Plan Mode after the
-   * human approves. Carry that approval to the new branch ONLY when all hold:
-   * the approval happened in this process moments ago, it is single-use, the
-   * session id is unchanged, no other Forge write happened since, and the new
-   * branch has no Forge entry of its own (a tombstone or other workflow wins). */
-  function applyApprovalHandoff(ctx: any, branchHasForgeEntry: boolean) {
-    const handoff = approvalHandoff;
-    if (!handoff) return;
-    const s = handoff.state;
-    if (Date.now() - handoff.at > APPROVAL_HANDOFF_MS || handoff.seq !== stateWriteSeq ||
-        ctx.sessionManager?.getSessionId?.() !== handoff.sessionId ||
-        !s?.active || s.phase !== 'EXECUTE' || s.approved !== true || s.planValid !== true || !s.approvedPlanHash) {
-      approvalHandoff = null; return;
-    }
-    if (branchHasForgeEntry) {
-      // Still on (or back on) the approving branch: stay armed for the real switch.
-      // Any other Forge state on this branch is authoritative: disarm.
-      const same = workflow?.phase === 'EXECUTING' && workflow.slug === s.slug && workflow.approvedPlanHash === s.approvedPlanHash;
-      if (!same) approvalHandoff = null;
-      return;
-    }
-    approvalHandoff = null;
-    if (workflow) return;
-    workflow = { ...s, recoveryAudit: [ ...(s.recoveryAudit ?? []), {
-      from: 'EXECUTING', to: 'EXECUTING', reason: 'plan-approval-branch-handoff',
-      reviewedBy: 'native-plan-review', at: new Date().toISOString(),
-    } ].slice(-20) };
-    pendingCheckpointRecovery = null;
-    saveState();
-  }
-
   pi.on('session_start', async (_event, ctx) => {
     if (ctx.agent?.kind !== 'main') return;
     workspaceDir = ctx.cwd || workspaceDir;
-    approvalHandoff = null;
-    nativeReview = null;
     if (!checkpointsPruned) { checkpointsPruned = true; try { pruneForgeCheckpoints(checkpointRoot); } catch { /* best effort */ } }
-    planRecoveryEpoch++; planRecoveryScheduled = false;
+    reviewEpoch++; reviewScheduled = false;
     recoveryPopupEpoch++; recoveryPopupScheduled = false; readConfig(); restoreState(ctx); updateDashboard(ctx); scheduleStateRecoveryPopup(ctx);
   });
   for (const eventName of ['session_switch', 'session_branch', 'session_tree'] as const) {
-    pi.on(eventName, async (event: any, ctx) => {
+    pi.on(eventName, async (_event: any, ctx) => {
       if (ctx.agent?.kind !== 'main') return;
-      planRecoveryEpoch++; planRecoveryScheduled = false; recoveryPopupEpoch++; recoveryPopupScheduled = false;
+      reviewEpoch++; reviewScheduled = false; recoveryPopupEpoch++; recoveryPopupScheduled = false;
       workspaceDir = ctx.cwd || workspaceDir;
-      const before = workflow;
-      const branchHasForgeEntry = restoreState(ctx);
-      const carried = eventName === 'session_switch' && carryAcrossNewSession(ctx, event, before, branchHasForgeEntry);
-      if (!carried && !(eventName === 'session_switch' && event?.reason === 'new')) applyApprovalHandoff(ctx, branchHasForgeEntry);
-      if (!carried && nativeReview && (workflow?.phase !== 'PLAN' ||
-          workflow.slug !== nativeReview.slug || workflow.approvedPlanHash !== nativeReview.planHash ||
-          ctx.sessionManager?.getSessionId?.() !== nativeReview.sessionId ||
-          (nativeReview.sessionFile && currentSessionIdentity?.sessionFile !== nativeReview.sessionFile))) {
-        nativeReview = null;
-      }
-      if (carried) {
-        notify(ctx, workflow.phase === 'EXECUTE'
-          ? 'Forge followed the approved plan into OMP\'s new execution session: EXECUTE.'
-          : 'Forge followed the plan review into OMP\'s new session; waiting for the native approval result.');
-      }
+      restoreState(ctx);
       updateDashboard(ctx); scheduleStateRecoveryPopup(ctx);
     });
   }
@@ -1197,18 +1128,17 @@ export default function forgeExtension(pi: ExtensionAPI) {
         return;
       }
       if (command.type === 'status') {
-        promoteFromNativeApprovalEntry(ctx);
         if (!workflow && pendingCheckpointRecovery) {
           const p = pendingCheckpointRecovery;
           const declined = declinedRecovery.has(orphanKey(p));
           notify(ctx, `Forge: RECOVERY_AVAILABLE | previousGate: ${p.state.phase} | requirement: ${String(p.state.requirement).replace(/[\r\n]/g, ' ').slice(0, 80)} | saved: ${p.savedAt ?? 'unknown'} | source: ${p.source} | other workflows: ${(p.alternatives ?? []).length} | approved in current branch: no | edits: ${declined ? 'allowed (recovery declined; Git writes still blocked)' : 'paused until recovery decision'} | action: /forge recover. Historical approval cannot be transferred across branches.`, 'warning');
           return;
         }
-        const mismatch = recoveryProposal(workflow, ctx.sessionModes?.getState?.().plan ?? 'unknown');
+        const mismatch = recoveryProposal(workflow);
         if (mismatch) notify(ctx, `Forge state warning: ${mismatch.explanation} Run /forge recover to confirm a safe correction.`, 'warning');
         const missingAgents = missingGateAgentsFor(workflow);
-        if (workflow?.phase === 'PLAN' && workflow.planValid && !nativeReview && !workflow.nativeApprovalPending) {
-          notify(ctx, 'Forge is awaiting a native plan review, but no review is tracked in this session. Open /plan-review and approve the plan there; approval is never inferred from a restored checkpoint.', 'warning');
+        if (workflow?.phase === 'PLAN' && workflow.planWritten && workflow.planValid && !workflow.approved) {
+          notify(ctx, 'Forge plan awaits your approval. Run /forge review to open the approval dialog.', 'info');
         }
         notify(ctx, `Forge: ${workflow?.phase ?? 'inactive'} | requirement: ${workflow?.requirement ? String(workflow.requirement).replace(/[\r\n]/g, ' ').slice(0, 80) : '(none)'} | slug: ${workflow?.slug ?? '-'} | approved: ${workflow?.approved === true ? 'yes' : 'no'} | QA: ${workflow?.qaStatus ?? 'pending'} | rework: ${workflow?.reworkCycles ?? 0} | waiting agents: ${missingAgents.join(',') || 'none'}${workflow?.phase === 'EXECUTE' && !workflow.active ? ' | action: /forge qa reviews existing work without rerunning implementation; /forge resume retries execution.' : ''} | global auto: ${autoStart ? 'ON' : 'OFF'}`);
         return;
@@ -1237,10 +1167,15 @@ export default function forgeExtension(pi: ExtensionAPI) {
         pi.sendUserMessage(reworkInstruction(workflow), { attribution: 'agent' });
         return;
       }
+      if (command.type === 'review') {
+        await ctx.waitForIdle?.();
+        await openForgeReview(ctx);
+        return;
+      }
       if (command.type === 'cancel') {
-        planRecoveryEpoch++; planRecoveryScheduled = false;
+        reviewEpoch++; reviewScheduled = false;
         const cancelledSlug = workflow?.slug;
-        workflow = null; pendingCheckpointRecovery = null; approvalHandoff = null; nativeReview = null;
+        workflow = null; pendingCheckpointRecovery = null;
         saveState(typeof cancelledSlug === 'string' ? cancelledSlug : undefined); updateDashboard(ctx);
         notify(ctx, 'Forge workflow cancelled. Native Plan Mode remains unchanged.');
         return;
@@ -1268,7 +1203,6 @@ export default function forgeExtension(pi: ExtensionAPI) {
         }
         if (!workflow.active && workflow.phase === 'REQUIREMENT') {
           workflow = { ...workflow, active: true, gateAgents: {}, agentRetries: {}, requirementSummaryRequested: false }; saveState();
-          await enterPlan(ctx);
           pi.sendUserMessage(phaseInstruction(workflow), { attribution: 'agent' });
           return;
         }
@@ -1281,10 +1215,6 @@ export default function forgeExtension(pi: ExtensionAPI) {
           workflow = { ...workflow, active: true }; saveState();
         }
         if (!workflow?.active) return notify(ctx, 'No active Forge workflow.', 'warning');
-        if (workflow.phase === 'PLAN' && workflow.reworkBasePlanPath && !workflow.planWritten) {
-          pi.sendUserMessage(reworkInstruction(workflow), { attribution: 'agent' });
-          return;
-        }
         if (workflow.phase === 'QA' && workflow.qaStatus === 'PASS') {
           pi.sendUserMessage(deliveryInstruction(workflow), { attribution: 'agent' });
           return;
@@ -1298,13 +1228,12 @@ export default function forgeExtension(pi: ExtensionAPI) {
           pi.sendUserMessage(qaInstruction(workflow), { attribution: 'agent' });
           return;
         }
-        if (workflow.phase === 'REQUIREMENT') {
-          // Mode availability is not a prerequisite for read-only analysis.
-          await enterPlan(ctx);
-        } else if (!(await enterPlan(ctx))) return;
-        if (workflow.phase === 'PLAN' && (workflow.planWritten || workflow.proposalDeferred)) {
-          const opened = await ctx.openPlanReview?.();
-          if (!opened) notify(ctx, 'Native Plan Review could not open. Verify the existing plan is in this OMP session.', 'warning');
+        if (workflow.phase === 'PLAN') {
+          if (workflow.planWritten && workflow.planValid && !workflow.approved) {
+            await openForgeReview(ctx);
+            return;
+          }
+          pi.sendUserMessage(phaseInstruction(workflow), { attribution: 'agent' });
           return;
         }
         pi.sendUserMessage(phaseInstruction(workflow), { attribution: 'agent' });
@@ -1331,18 +1260,15 @@ export default function forgeExtension(pi: ExtensionAPI) {
   });
 
   pi.on('before_agent_start', async (event, ctx) => {
-    if (ctx.agent?.kind === 'main') promoteFromNativeApprovalEntry(ctx);
     if (ctx.agent?.kind !== 'main' || !workflow?.active || workflow.phase !== 'EXECUTE') return;
     if (event.reason === 'revive') return;
     return { message: { customType: 'forge-execution-gate-v5', content: executionInstruction(workflow), display: true, attribution: 'agent' } };
   });
 
-  // The native plan review approval creates a new execution turn. Observe that
-  // agent run; never trigger QA just because the review overlay closed.
+  // Forge's approval sends the execution turn itself. Observe that agent run;
+  // never trigger QA just because the review dialog closed.
   pi.on('agent_start', async (_event, ctx) => {
-    // Native plan-mode exit can rebuild the composer after review resolution.
-    // Reapply the persisted Forge phase at the beginning of the next turn.
-    if (ctx.agent?.kind === 'main') { promoteFromNativeApprovalEntry(ctx); updateDashboard(ctx); }
+    if (ctx.agent?.kind === 'main') updateDashboard(ctx);
     if (ctx.agent?.kind !== 'main' || !workflow?.active) return;
     if (workflow.phase === 'EXECUTE' && workflow.approved && !workflow.executionObserved) {
       workflow = { ...workflow, executionObserved: true };
@@ -1363,12 +1289,11 @@ export default function forgeExtension(pi: ExtensionAPI) {
     }
     scheduleStateRecoveryPopup(ctx);
     if (ctx.agent?.kind !== 'main' || !workflow?.active) return;
-    if (ctx.getPendingPlanReview?.() || ctx.hasPendingMessages?.()) return;
+    if (ctx.hasPendingMessages?.()) return;
 
 
     if (workflow.phase === 'EXECUTE') {
       if (!workflow.approved || !workflow.executionObserved) return;
-      if (ctx.sessionModes?.getState?.().plan === 'active') return;
       if (!hasAgents('EXECUTE')) {
         if ((workflow.agentRetries?.EXECUTE ?? 0) < 1) {
           workflow = { ...workflow, agentRetries: { ...(workflow.agentRetries ?? {}), EXECUTE: 1 } }; saveState();
@@ -1381,22 +1306,6 @@ export default function forgeExtension(pi: ExtensionAPI) {
       workflow = { ...workflow, phase: 'QA', qaStatus: null, qaRetries: 0, gateAgents: { ...(workflow.gateAgents ?? {}), QA: [] } };
       saveState(); updateDashboard(ctx);
       return { continue: true, additionalContext: qaInstruction(workflow) };
-    }
-    if (workflow.phase === 'PLAN' && workflow.reworkBasePlanPath) {
-      if (workflow.planWritten) {
-        deferNativePlanUntilIdle(ctx, 'review');
-        return;
-      }
-      if (!hasAgents('PLAN')) {
-        const retries = workflow.agentRetries?.PLAN ?? 0;
-        if (retries < 1) {
-          workflow = { ...workflow, agentRetries: { ...(workflow.agentRetries ?? {}), PLAN: 1 } }; saveState();
-          return { continue: true, additionalContext: reworkInstruction(workflow) };
-        }
-        notify(ctx, 'Forge rework needs a successful forge-planner report before the new plan can be saved.', 'warning');
-        return;
-      }
-      return { continue: true, additionalContext: reworkInstruction(workflow) };
     }
     if (workflow.phase === 'QA' && workflow.qaStatus === 'PASS') {
       if ((workflow.deliveryRetries ?? 0) < 2) {
@@ -1428,16 +1337,10 @@ export default function forgeExtension(pi: ExtensionAPI) {
       return;
     }
 
-    // Read-only analysis must NEVER depend on the native Plan Mode flag:
-    // OMP may pause/exit that mode while running subagents. The Tool Guard
-    // enforces no project writes until a real human approval.
     if (!['REQUIREMENT', 'PLAN'].includes(workflow.phase)) return;
-    if (workflow.phase === 'PLAN') {
-      const reviewReady = workflow.planWritten || workflow.proposalDeferred === true;
-      if (ctx.sessionModes?.getState?.().plan !== 'active' || reviewReady) {
-        deferNativePlanUntilIdle(ctx, reviewReady ? 'review' : 'planning');
-        return;
-      }
+    if (workflow.phase === 'PLAN' && workflow.planWritten && workflow.planValid && !workflow.approved) {
+      if (workflow.reviewRequested) scheduleReviewWhenIdle(ctx);
+      return;
     }
     if (workflow.phase === 'REQUIREMENT' && hasAgents('REQUIREMENT')) {
       const key = 'REQUIREMENT:summary';
@@ -1447,6 +1350,15 @@ export default function forgeExtension(pi: ExtensionAPI) {
         saveState(); updateDashboard(ctx);
         return { continue: true, additionalContext: requirementSummaryInstruction(workflow) };
       }
+      return;
+    }
+    if (workflow.phase === 'PLAN' && workflow.reworkBaseHash && !hasAgents('PLAN')) {
+      const retries = workflow.agentRetries?.PLAN ?? 0;
+      if (retries < 1) {
+        workflow = { ...workflow, agentRetries: { ...(workflow.agentRetries ?? {}), PLAN: 1 } }; saveState();
+        return { continue: true, additionalContext: phaseInstruction(workflow) };
+      }
+      notify(ctx, 'Forge rework needs a successful forge-planner report before the new plan can be saved.', 'warning');
       return;
     }
     if (!hasAgents(workflow.phase)) {
@@ -1462,115 +1374,15 @@ export default function forgeExtension(pi: ExtensionAPI) {
       return;
     }
     if (workflow.phase === 'PLAN' && !workflow.planWritten) {
-      return { continue: true, additionalContext: `${phaseInstruction(workflow)}\n\nForge is still awaiting a successful write of the plan file. Do not claim it exists until the write tool succeeds.` };
+      return { continue: true, additionalContext: `${phaseInstruction(workflow)}\n\nForge is still waiting for forge_plan_propose. Write the complete plan to ${forgePlanPath(workflow)}, then call forge_plan_propose. Do not claim the plan exists until the write succeeds.` };
     }
-  });
-
-  pi.on('plan_review_requested', async (event, ctx) => {
-    if (!workflow?.active || ctx.agent?.kind !== 'main') return;
-    // A native OMP plan_review_requested event is stronger evidence than Forge's
-    // write bookkeeping: OMP has already found the session-local plan and opened
-    // its review workflow. Some versions do not emit a matching tool_result ID
-    // for local:// writes, leaving Forge in PLANNING even though the file exists.
-    // Accept the NATIVE review event in PLANNING as well; never accept text-only
-    // agent claims or use this as permission to modify the working tree.
-    if (workflow.phase !== 'PLAN') {
-      notify(ctx, 'Forge cannot review a plan outside Planning/Proposal.', 'error');
-      return;
-    }
-    planRecoveryEpoch++; planRecoveryScheduled = false;
-    const contract = validatePlanContract(event.planContent ?? '');
-    if (!hasAgents('PLAN')) {
-      contract.valid = false;
-      contract.issues.push('The required planner must complete and report before native plan approval.');
-    }
-    if (workflow.reworkBaseHash && contract.hash === workflow.reworkBaseHash) {
-      contract.valid = false;
-      contract.issues.push('Rework submission is identical to the previously approved plan. Save a revised plan addressing the QA failures before requesting fresh approval.');
-    }
-    workflow = {
-      ...workflow, phase: 'PLAN', planWritten: true, proposalDeferred: false, businessTopics: contract.topics,
-      requirements: contract.requirements, testCases: contract.testCases,
-      qualityGates: contract.qualityGates, planValid: contract.valid,
-      approvedPlanHash: contract.valid ? contract.hash : null,
-      planPath: event.planPath ?? event.path ?? workflow.planPath ?? `local://${workflow.slug}-plan.md`,
-      // OMP v19 reports the reviewed file as `planFilePath`; kept separately so
-      // Forge's own local:// write pin is unchanged.
-      nativePlanFilePath: typeof event.planFilePath === 'string' ? event.planFilePath : (workflow.nativePlanFilePath ?? null),
-      nativeApprovalPending: null,
-      planIssues: contract.issues,
-    };
-    saveState(); updateDashboard(ctx);
-    const reviewSessionId = typeof event.sessionId === 'string' && event.sessionId ? event.sessionId : ctx.sessionManager?.getSessionId?.();
-    nativeReview = contract.valid && typeof reviewSessionId === 'string'
-      ? { reviewId: typeof event.reviewId === 'string' && event.reviewId ? event.reviewId : null, sessionId: reviewSessionId,
-          sessionFile: sessionIdentity(ctx.sessionManager, ctx.cwd || workspaceDir)?.sessionFile ?? null,
-          slug: workflow.slug, planHash: contract.hash, planFilePath: workflow.nativePlanFilePath, at: Date.now() }
-      : null;
-    if (!contract.valid) {
-      notify(ctx, `Forge PLAN BLOCKED: ${contract.issues.slice(0,3).join(' | ')}`, 'error');
-      // The native UI can execute an in-overlay edit that is not included in event.planContent.
-      // Fail closed: when invalid, request Refine automatically rather than permitting approval.
-      if (event.reviewId && ctx.resolvePlanReview) {
-        const id = event.reviewId;
-        const feedback = `Forge v5 plan contract is invalid. Fix before approval:\n${contract.issues.join('\n')}`;
-        queueMicrotask(() => { void ctx.resolvePlanReview(id, 'refine', {feedback}).catch?.(() => undefined); });
-      }
-    } else notify(ctx, `Forge VALID PLAN: ${contract.topics.length} business topics, ${contract.requirements.length} requirements, ${contract.testCases.length} test cases; awaiting human approval.`);
-  });
-
-  pi.on('plan_review_resolved', async (event, ctx) => {
-    if (ctx.agent?.kind !== 'main') return;
-    const review = nativeReview;
-    if (!workflow?.active || workflow.phase !== 'PLAN') return;
-    // A resolution belongs to one review, not any workflow awaiting approval.
-    // Older OMP versions omit IDs from both review events.
-    const pending = workflow.nativeApprovalPending;
-    if (pending && event.reviewId !== pending.reviewId) return;
-    if (!pending && workflow.planValid && !review) return;
-    if (!pending && review && (event.reviewId || review.reviewId) && event.reviewId !== review.reviewId) return;
-    if (review && !pending) {
-      const identity = sessionIdentity(ctx.sessionManager, ctx.cwd || workspaceDir);
-      if (workflow.slug !== review.slug || workflow.approvedPlanHash !== review.planHash ||
-          ctx.sessionManager?.getSessionId?.() !== review.sessionId ||
-          (review.sessionFile && identity?.sessionFile !== review.sessionFile)) return;
-    }
-    if (nativeReview && (!event.reviewId || event.reviewId === nativeReview.reviewId)) nativeReview = null;
-    const choice = typeof event.choice === 'string' ? event.choice : (event.choice?.id ?? event.choiceId ?? event.selectedChoice);
-    if (['execute', 'compact', 'keep'].includes(choice) && !workflow.planValid) {
-      workflow = { ...workflow, approved: false };
-      saveState(); updateDashboard(ctx);
-      notify(ctx, 'Forge refused an invalid plan approval. Refine the plan and reopen review.', 'error');
-      ctx.abort?.();
-      return;
-    }
-    if (['execute', 'compact', 'keep'].includes(choice)) {
-      workflow = approvedExecutionState(workflow);
-      saveState();
-      const sid = (typeof event.sessionId === 'string' && event.sessionId) ? event.sessionId : ctx.sessionManager?.getSessionId?.();
-      const reviewFile = review && review.reviewId === event.reviewId ? review.sessionFile : (currentSessionIdentity?.sessionFile ?? null);
-      approvalHandoff = typeof sid === 'string' && sid ? { sessionId: sid, sessionFile: reviewFile, state: workflow, at: Date.now(), seq: stateWriteSeq } : null;
-      updateDashboard(ctx);
-      notify(ctx, 'Forge approved. Native OMP execution starts; QA will run automatically afterward.');
-    } else if (choice === 'refine') {
-      workflow = { ...workflow, phase: 'PLAN', approved: false, planWritten: false, proposalRetries: 0, businessTopics: [], requirements: [], testCases: [], qualityGates: [], planValid: false, approvedPlanHash: null, gateAgents: { ...(workflow.gateAgents ?? {}), PLAN: [] }, agentRetries: { ...(workflow.agentRetries ?? {}), PLAN: 0 } };
-      saveState();
-    } else {
-      // Dismiss/cancel is NOT approval. Keep state but do not execute.
-      workflow = { ...workflow, approved: false };
-      saveState();
-    }
-    // A Plan Review choice may switch OMP's mode immediately afterward.
-    // Reapply the footer on subsequent agent_start/agent_end as well.
-    updateDashboard(ctx);
   });
 
   // Before spawning a task, route only the named specialist for this gate.
   // During execution the executor's tool list omits shell; reviewer agents are read-only.
   pi.on('before_subagent_spawn', async (event, ctx) => {
-    if (ctx.agent?.kind === 'main') promoteFromNativeApprovalEntry(ctx);
     if (ctx.agent?.kind !== 'main' || !workflow?.active) return;
-    const conflict = recoveryProposal(workflow, 'unknown');
+    const conflict = recoveryProposal(workflow);
     if (conflict?.category === 'safety') {
       scheduleStateRecoveryPopup(ctx);
       return { block:true, reason:`Forge state needs human review before spawning agents: ${conflict.explanation}. Run /forge recover.` };
@@ -1595,20 +1407,6 @@ export default function forgeExtension(pi: ExtensionAPI) {
   pi.on('tool_result', async (event: any, ctx: any) => {
     if (ctx.agent?.kind !== 'main' || !workflow?.active) return;
     const id = String(event.toolCallId ?? event.id ?? '');
-    if (event.toolName === 'write' && id && planWriteCalls.has(id)) {
-      const pendingWrite = planWriteCalls.get(id)!;
-      planWriteCalls.delete(id);
-      if (!event.isError && workflow.phase === pendingWrite.phase &&
-          (workflow.reworkCycles ?? 0) === pendingWrite.reworkCycles &&
-          workflow.phase === 'PLAN' && isSandboxPlanPath(pendingWrite.path) &&
-          hasAgents('PLAN')) {
-        workflow = { ...workflow, planWritten: true, planPath: pendingWrite.path, planValid: false, approvedPlanHash: null, proposalRetries: 0, proposalDeferred: true };
-        saveState(); updateDashboard(ctx);
-        deferNativePlanUntilIdle(ctx, 'review');
-        return { additionalContext: '[FORGE PLAN SAVED] The local:// plan is recorded. Stop calling xd://propose. Forge will restore Native Plan Mode and open the human approval UI when this turn settles; do not modify source code or ask the user to advance gates.' };
-      }
-      return;
-    }
     if (event.toolName !== 'task') return;
     const pending = runningTasks.get(id);
     if (id) runningTasks.delete(id);
@@ -1640,7 +1438,6 @@ export default function forgeExtension(pi: ExtensionAPI) {
     const childName = String(ctx.agent?.name ?? '');
     const isForgeChild = ctx.agent?.kind === 'sub' && (guardedAgentNames.has(childName) || listAssignedAgentNames(workflow?.agentAssignments).includes(childName));
     const tool = String(event.toolName ?? '');
-    if (ctx.agent?.kind === 'main') promoteFromNativeApprovalEntry(ctx);
     if (!workflow && !isForgeChild) {
       // An orphaned workflow is known for this session (e.g. OMP switched
       // branch after approval). Never fail open: keep the Git guard, and pause
@@ -1673,7 +1470,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
       }
     }
     const input = event.input ?? {};
-    const stateConflict = recoveryProposal(workflow, 'unknown');
+    const stateConflict = recoveryProposal(workflow);
     if (stateConflict?.category === 'safety' && !READ_ONLY_TOOLS.includes(tool)) {
       scheduleStateRecoveryPopup(ctx);
       return { block:true, reason:`Forge state conflict: ${stateConflict.explanation} Run /forge recover and confirm the safe state before executing tools.` };
@@ -1733,67 +1530,28 @@ export default function forgeExtension(pi: ExtensionAPI) {
     if (['read', 'grep', 'glob', 'ls', 'task', 'ask'].includes(tool)) return;
     // Control-plane only: records the requirement synthesis in Forge state.
     if (tool === 'forge_requirement_summary' && workflow.phase === 'REQUIREMENT') return;
+    // Control-plane only: proposes the Forge plan file for human review.
+    if (tool === 'forge_plan_propose' && workflow.phase === 'PLAN') return;
 
     if (['write', 'edit', 'apply_patch'].includes(tool)) {
-      // xd://propose is a CONTROL-PLANE operation, not a repository write.
-      // Native OMP validates the slug, presence of the real local:// plan, and
-      // active Plan Mode before it opens the human review. Do not require
-      // Forge's planWritten flag: it can be stale when write result telemetry
-      // is missing, causing an endless blocked-proposal loop.
-      // No other xd:// targets are allowed before approval.
+      // Forge's own plan mode: the single plan file of the current PLAN gate is
+      // the only writable path before human approval. xd://propose stays blocked.
       const target = String(input.path ?? input.file_path ?? input.filePath ?? input.target ?? input.url ?? '');
-      if (tool === 'write' && target === 'xd://propose' &&
-          workflow.phase === 'PLAN') {
-        const slug = typeof input.content === 'string' ? input.content.trim() : '';
-        if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(slug) || slug.endsWith('-plan.md')) {
-          return { block: true, reason: 'Forge plan proposal requires the bare plan slug (e.g. forge-abc123), not a path or full plan text.' };
+      if (tool === 'write' && workflow.phase === 'PLAN' && target === forgePlanPath(workflow)) {
+        if (workflow.planWritten && workflow.planValid) {
+          return { block: true, reason: 'The plan is awaiting human review in Forge. Wait for the decision (or /forge review); do not change it now.' };
         }
-        if (workflow.planPath && slug !== workflow.planPath.replace(/^local:\/\//, '').replace(/-plan\.md$/, '')) {
-          return { block: true, reason: `Forge requires the CURRENT canonical plan slug ${workflow.planPath}. Do not propose an old or unrelated plan.` };
-        }
-        if (workflow.reworkBasePlanPath && !workflow.planWritten) {
-          return { block: true, reason: `Forge rework must first save a NEW reviewed version to ${workflow.planPath ?? `local://${workflow.slug}-plan.md`} and finish forge-planner. Do not propose the previously approved plan.` };
-        }
-        if (ctx.sessionModes?.getState?.().plan !== 'active') {
-          workflow = { ...workflow, proposalDeferred: true };
-          saveState(); updateDashboard(ctx);
-          deferNativePlanUntilIdle(ctx, 'review');
-          return { block: true, reason: 'Native Plan Mode is temporarily paused. Forge will enter it and open review automatically once the current turn is idle. Do NOT retry xd://propose or ask the user to advance a gate.' };
-        }
+        if (!hasAgents('PLAN')) return { block: true, reason: 'Forge requires the planner report before the plan can be saved.' };
         return;
       }
-      // During Planning only OMP virtual local:// *-plan.md artifacts are
-      // writable. Never require ctx.sessionModes.getState().plan === 'active'
-      // here: the mode may be paused during tool execution; the workflow
-      // stage and the path are the actual Forge authorization criteria.
-      if (tool === 'write' && workflow.phase === 'PLAN' && (nativeReview || workflow.nativeApprovalPending)) {
-        return { block: true, reason: 'A native plan review is pending. Resolve or refine that review before changing the plan.' };
-      }
-      if (tool === 'write' && workflow.phase === 'PLAN' && isPlanWritePath(target)) {
-        if (!hasAgents('PLAN')) {
-          return { block: true, reason: 'Forge requires the planner report before the plan can be saved.' };
-        }
-        const id = String(event.toolCallId ?? event.id ?? '');
-        if (id) planWriteCalls.set(id, { path: target, phase: workflow.phase, reworkCycles: workflow.reworkCycles ?? 0 });
-        return;
-      }
-      if (tool === 'write' && workflow.phase === 'PLAN' && workflow.planWritten &&
-          target === workflow.planPath && isSandboxPlanPath(target)) return;
       const pending = workflow.phase === 'REQUIREMENT' ? ` Finish the requirement analysis: ${missingGateAgentsFor(workflow).join(', ') || 'call forge_requirement_summary'}. The harness advances automatically; do NOT ask the user to send a next-gate message.` : '';
       const planHint = workflow.phase === 'PLAN' && tool === 'write'
-        ? ` Only a root-level local://*-plan.md file is allowed; received ${JSON.stringify(target)}.` : '';
-      return { block: true, reason: `Forge ${workflow.phase} is read-only: implementation writes require explicit native Plan Approval.${planHint}${pending}` };
+        ? ` Only ${forgePlanPath(workflow)} is writable during Forge PLAN; received ${JSON.stringify(target)}.` : '';
+      return { block: true, reason: `Forge ${workflow.phase} is read-only: implementation writes require explicit human plan approval.${planHint}${pending}` };
     }
 
     if (['bash', 'shell', 'terminal', 'exec', 'run'].includes(tool)) {
       const command = String(input.command ?? input.cmd ?? '');
-      // OMP's `propose <slug>` CLI is a native plan-review control-plane call,
-      // not a shell command. Permit only the already-written canonical plan in
-      // PROPOSAL; OMP still owns validation and human approval.
-      const proposal = command.match(/^propose\s+([A-Za-z0-9][A-Za-z0-9._-]{0,127})$/);
-      const canonicalSlug = workflow.planPath?.replace(/^local:\/\//, '').replace(/-plan\.md$/, '');
-      if (workflow.phase === 'PLAN' && workflow.planWritten &&
-          proposal?.[1] === canonicalSlug) return;
       if (isAllowedDiscoveryCommand(command)) return;
       return { block: true, reason: `Forge ${workflow.phase} permits only safe read-only inspection commands before Approval.` };
     }
@@ -1801,7 +1559,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
 
     // Unknown tools may write to the filesystem or external services. Fail
     // closed until an explicit audited read-only capability is added.
-    return { block: true, reason: `Forge ${workflow.phase}: unknown tool ${tool} cannot run before native Approval. Use read/grep/glob/task/ask.` };
+    return { block: true, reason: `Forge ${workflow.phase}: unknown tool ${tool} cannot run before human plan approval. Use read/grep/glob/task/ask.` };
 
   });
 }

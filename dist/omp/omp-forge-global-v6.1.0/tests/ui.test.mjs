@@ -18,8 +18,8 @@ for (const [phase, title, fraction] of cases) {
     assert.match(result[0], /▰/);
   });
 }
-test('native review hides widget only for a valid written unapproved plan', () => {
-  assert.equal(renderForgeWidget({phase:'PLAN',active:true,planWritten:true,planValid:true,approved:false}), null);
+test('Forge review shows Plan review status only for a valid written unapproved plan', () => {
+  assert.deepEqual(renderForgeWidget({phase:'PLAN',active:true,planWritten:true,planValid:true,approved:false}), ['FORGE  ▰▰▱▱  Plan review  2/4']);
   for (const state of [
     {planWritten:false,planValid:true,approved:false},
     {planWritten:true,planValid:false,approved:false},

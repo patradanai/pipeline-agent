@@ -15,13 +15,12 @@ export function markGateAgent(state, agentName) {
   return { ...state, gateAgents: { ...(state.gateAgents ?? {}), [key]: [...seen] } };
 }
 
-/** Human approved the plan through the platform's native approval. */
-export function approvedExecutionState(state, auditReason) {
+/** Human approved the plan through the platform's approval dialog. */
+export function approvedExecutionState(state, auditReason, reviewedBy = 'native-plan-review') {
   return { ...state, phase: 'EXECUTE', approved: true, reworkBaseHash: null, executionObserved: false,
-    nativeApprovalPending: null,
     gateAgents: { ...(state.gateAgents ?? {}), EXECUTE: [] }, agentRetries: { ...(state.agentRetries ?? {}), EXECUTE: 0 },
     ...(auditReason ? { recoveryAudit: [ ...(state.recoveryAudit ?? []), {
-      from: state.phase, to: 'EXECUTE', reason: auditReason, reviewedBy: 'native-plan-review', at: new Date().toISOString(),
+      from: state.phase, to: 'EXECUTE', reason: auditReason, reviewedBy, at: new Date().toISOString(),
     } ].slice(-20) } : {}) };
 }
 

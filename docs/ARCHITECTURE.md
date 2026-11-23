@@ -44,8 +44,8 @@ are normalized on restore without deriving approval or QA PASS from a phase.
 | Instruction wording | ✔ `platform.mjs` | OMP text (unchanged) | translated, tested for leaks |
 
 Next step: move the OMP controller onto `engine.mjs` (OMP-specific pieces —
-native Plan Mode switching, branch/new-session recovery, TUI pickers — stay in
-the adapter).
+Forge's own plan approval dialog, branch recovery, TUI pickers — stay in the
+adapter).
 
 ## Event mapping
 
@@ -54,16 +54,16 @@ the adapter).
 | command (human) | `/forge` command handler | `UserPromptExpansion` for `/forge` (fires only for user-typed commands; the command has `disable-model-invocation: true`) |
 | tool.pre | `tool_call`, `before_subagent_spawn` | `PreToolUse` (all tools, main + subagents via `agent_id`/`agent_type`) |
 | tool.post | `tool_result` | `PostToolUse` (`Agent` result = specialist report) |
-| plan submitted | write `local://…-plan.md` + `xd://propose` → `plan_review_requested` | `PreToolUse(ExitPlanMode)`: contract check; deny with issues if invalid |
-| plan approved | `plan_review_resolved` (+ new-session handoff) | `PostToolUse(ExitPlanMode)` succeeded; `/forge approve` as human fallback |
-| plan rejected | resolved with refine/dismiss | `PostToolUseFailure(ExitPlanMode)` |
+| plan submitted | write `local://…-plan.md` + `forge_plan_propose` (contract check) | `PreToolUse(ExitPlanMode)`: contract check; deny with issues if invalid |
+| plan approved | Forge approval dialog (`ui.select`) after the turn ends, or `/forge review`; Forge sends the execution turn | `PostToolUse(ExitPlanMode)` succeeded; `/forge approve` as human fallback |
+| plan rejected | dialog Refine (editor feedback) or Not now | `PostToolUseFailure(ExitPlanMode)` |
 | turn end → QA | `session_stop` | `Stop` → `decision: block` with the QA instruction |
 | Forge tools | `pi.registerTool` | plugin MCP server declares schemas; hooks validate (pre) and apply (post) |
 | state | OMP session custom entries (+ checkpoint mirror) | `${CLAUDE_PLUGIN_DATA}/sessions/<session_id>.json`, per-session lock |
 
-OMP review resolutions are accepted only for the currently tracked review and
-workflow. Stale resolutions and duplicate events cannot advance another branch.
-After restart, an untracked review must be reopened; approval is never inferred.
+The OMP approval dialog re-reads the plan file and approves only when its hash
+still matches the proposed plan. It also refuses when the workflow changed while
+the dialog was open. Approval is never inferred from a restored checkpoint.
 Recovery suggestions are bound to the exact checkpoint they were generated
 from, so an outdated confirmation cannot overwrite newer state.
 

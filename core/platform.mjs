@@ -10,16 +10,18 @@
 const CC_PLAN_SUBMIT = 'Claude Code submission: make sure the session is in plan mode (call EnterPlanMode, or ask the user to press Shift+Tab until plan mode is shown). Write the COMPLETE plan to the plan file Claude Code assigns in plan mode (or pass it as the `plan` argument), then call ExitPlanMode. The plan must include a visible \'Requirement & Gap Analysis\' section. Forge checks the plan contract before Claude Code shows the approval prompt; if Forge denies the call, fix the listed issues and call ExitPlanMode again. Do not implement or self-approve.';
 
 const CLAUDE_CODE_RULES = [
+  [/Forge runs its own plan mode: a read-only safety boundary holds until the human approves the plan in Forge's approval dialog\./g,
+    'Forge enforces a read-only safety boundary until the human approves the plan through Claude Code\'s native plan approval.'],
   [/\[OMP FORGE/g, '[FORGE'],
-  [/Submit the plan for approval after writing a real local:\/\/ plan file\.[^\n]*?requires human approval\./g,
+  [/Submit the plan for approval only after writing a real local:\/\/ plan file[^\n]*?only the human can approve\./g,
     'Submit the plan for human approval only through Claude Code\'s native plan approval: call ExitPlanMode with the complete plan text while in plan mode. Forge validates the plan contract before the approval prompt opens.'],
   [/then the orchestrator composes the canonical local:\/\/ plan file/g, 'then the orchestrator composes the complete plan'],
-  [/Write the complete proposed plan into OMP's plan-mode sandbox[\s\S]*?Do not implement or self-approve\./g, CC_PLAN_SUBMIT],
-  [/\[GATE 2\/4: NATIVE OMP PLAN APPROVAL\][\s\S]*?Do not finish with just a textual 'ready' response\./g,
+  [/Write the complete proposed plan to Forge's plan file[\s\S]*?Do not implement or self-approve\./g, CC_PLAN_SUBMIT],
+  [/\[GATE 2\/4: FORGE PLAN APPROVAL\][\s\S]*?Do not finish with just a textual 'ready' response\./g,
     `[GATE 2/4: NATIVE PLAN APPROVAL]\n${CC_PLAN_SUBMIT}`],
   [/Forge PLAN owns rework drafting\.[^\n]*?change modes\./g,
     'Forge planning owns rework drafting. Use Claude Code plan mode for the revision; the platform opens native approval only after the plan is ready. Do not ask the user to change modes.'],
-  [/After the planner report and a successful rework-plan write, Forge will enter OMP Native Plan Mode and open the human Plan Review UI when this turn settles\. Do not call xd:\/\/propose or ask the user to submit\/advance a gate\./g,
+  [/After the planner report and a successful rework-plan write, call forge_plan_propose; Forge opens the human approval dialog when this turn ends\. Do not ask the user to submit or advance a gate\./g,
     'After the planner report, submit the complete revised plan once with ExitPlanMode to open human approval. Do not ask the user to advance the gate.'],
   [/Save a revised plan to local:\/\/[A-Za-z0-9._-]+-plan\.md; never overwrite the previous approved plan\./g,
     'Write the revised plan to the native plan file; preserve the previously approved plan as the rework baseline.'],
@@ -51,4 +53,4 @@ export function adaptInstruction(text, platform = 'omp') {
 }
 
 /** OMP-only concepts that must never appear in another platform's instructions. */
-export const OMP_ONLY_PATTERN = /local:\/\/|xd:\/\/|\bOMP\b|native task/;
+export const OMP_ONLY_PATTERN = /local:\/\/|xd:\/\/|\bOMP\b|native task|forge_plan_propose/;

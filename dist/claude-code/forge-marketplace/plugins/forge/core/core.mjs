@@ -172,16 +172,16 @@ export function routeAgentNames(instruction, state) {
 
 /**
  * Minimal, always-on terminal progress: five work stages, no approval node.
- * Native OMP Plan Review owns approval, so its overlay has no duplicate widget.
+ * Forge's own plan review shows 'Plan review' while a proposed plan awaits the human.
  * This is presentation-only; it never modifies the workflow state or gating.
  */
 export function renderForgeWidget(state) {
   if (!state?.active) return null;
   const phase = String(state.phase ?? '');
-  if (phase === 'PLAN' && state.planWritten && state.planValid && !state.approved) return null;
+  const awaitingReview = phase === 'PLAN' && state.planWritten && state.planValid && !state.approved;
   const stages = {
     REQUIREMENT: [0, 'Requirement'],
-    PLAN: [1, 'Planning'],
+    PLAN: [1, awaitingReview ? 'Plan review' : 'Planning'],
     EXECUTE: [2, 'Execution'],
     QA: [3, state.qaStatus === 'PASS' ? 'Delivery' : state.qaEvidencePending ? 'QA evidence needed' : 'QA review'],
   };
@@ -313,10 +313,10 @@ export function nextPhase(phase) {
 }
 
 const HEADER = `[OMP FORGE — GLOBAL REQUIREMENT HARNESS]
-You are an orchestration lead, NOT an implementation agent before human approval. Forge enforces a read-only safety boundary before native Plan Approval, even if Plan Mode is paused or inactive. Do not edit the project, run mutating commands, commit, install dependencies, or create implementation code before explicit approval. Work with any domain, project, or no repository at all.
+You are an orchestration lead, NOT an implementation agent before human approval. Forge runs its own plan mode: a read-only safety boundary holds until the human approves the plan in Forge's approval dialog. Do not edit the project, run mutating commands, commit, install dependencies, or create implementation code before explicit approval. Work with any domain, project, or no repository at all.
 Never run git add, git commit, git push, git tag, git merge, git rebase, or publish changes on behalf of the user, at any stage. The user performs Git writes manually after delivery. Existing user constraints override your suggestions. Never invent evidence, tests, subagent calls, approvals, or locked decisions. Clearly distinguish observed facts, assumptions, recommendations, and unresolved decisions.
 Use short progress headings and structured outputs. Prefer automatic continuation; interrupt the user only for an irreversible, material, or genuinely ambiguous business decision. If necessary, use the native ask tool. Avoid unnecessary questions.
-Submit the plan for approval after writing a real local:// plan file. If Forge still displays PLAN after a successful native write, xd://propose is allowed; the native OMP plan handler verifies the file and requires human approval.`;
+Submit the plan for approval only after writing a real local:// plan file: call forge_plan_propose. Forge validates the plan contract and opens its own approval dialog; only the human can approve.`;
 
 function phaseInstructionTemplate(state) {
   const { phase, requirement, slug } = state;
@@ -339,8 +339,8 @@ Do not run your own intake or workspace exploration first: the agent reads what 
   if (phase === 'PLAN' && state.planWritten && state.planValid) return `${HEADER}\nThe plan is awaiting explicit operator approval. Do not implement.`;
   if (phase === 'PLAN' && state.planWritten) return `${HEADER}
 
-[GATE 2/4: NATIVE OMP PLAN APPROVAL]
-Review ${state.planPath ?? `local://${slug}-plan.md`} for completeness and unresolved blockers. If ready, submit it to OMP's built-in Plan Review overlay: use the native write tool to write the exact slug '${(state.planPath ?? `local://${slug}-plan.md`).replace(/^local:\/\//, '').replace(/-plan\.md$/, '')}' as plain text to xd://propose. This opens the user's approval UI. Never self-approve. If the plan file was not written, create it first. Do not finish with just a textual 'ready' response.`;
+[GATE 2/4: FORGE PLAN APPROVAL]
+Review ${state.planPath ?? forgePlanPath(state)} for completeness and unresolved blockers. If ready, call forge_plan_propose: Forge validates the plan contract and opens the human approval dialog when this turn ends. Never self-approve. If the plan file was not written, write it first. Do not finish with just a textual 'ready' response.`;
   if (phase === 'PLAN' && state.reworkBaseHash) return reworkInstructionTemplate(state);
 
   if (phase === 'PLAN') return `${HEADER}
@@ -359,7 +359,7 @@ MANDATORY QA CONTRACT IN THE PLAN:
 - Include '## Code Quality Gates' with parseable lines '- QG-001: <quality gate>' for language-appropriate tests, lint/static analysis, typecheck/build where applicable, security/error handling, and maintainability review. Mark not-applicable checks explicitly.
 - Include '## Execution & QA Handoff': after implementation, QA must compare the *approved* plan against actual code, run feasible checks, and report every test by Business Topic. Never mark a check PASS without observed evidence; unrun checks are NOT_RUN.
 
-Write the complete proposed plan into OMP's plan-mode sandbox at local://${slug}-plan.md (not a workspace file). If OMP has already assigned a different root-level local://*-plan.md filename for this session, that OMP-local plan filename is also accepted; never use a repository path. The plan must include a visible 'Requirement & Gap Analysis' section. After a successful write, submit the bare plan slug using write xd://propose; native OMP will verify that the file exists and open human review. Do not implement or self-approve.`;
+Write the complete proposed plan to Forge's plan file local://${slug}-plan.md (OMP session storage, not a workspace file); no other path is writable during PLAN. The plan must include a visible 'Requirement & Gap Analysis' section. After a successful write, call forge_plan_propose; Forge validates the plan contract and opens the human approval dialog when this turn ends. Do not implement or self-approve.`;
 
 
   return `${HEADER}\nThe plan is awaiting explicit operator approval. Do not implement.`;
@@ -417,6 +417,11 @@ function reworkPlanPath(state) {
     : `local://${state.slug}-rework-${cycle}-plan.md`;
 }
 
+/** The only plan file Forge's own plan mode accepts in the current PLAN gate. */
+export function forgePlanPath(state) {
+  return state?.reworkBaseHash ? reworkPlanPath(state) : `local://${state.slug}-plan.md`;
+}
+
 function reworkInstructionTemplate(state) {
   const nextPlanPath = reworkPlanPath(state);
   return `[OMP FORGE — QA FAILED: REWORK PLAN, NEW APPROVAL REQUIRED]
@@ -426,9 +431,9 @@ Previous approved plan: ${state.reworkBasePlanPath ?? `local://${state.slug}-pla
 QA failure evidence (read this report): ${state.qaReportPath ?? 'not available'}
 
 MANDATORY: invoke the named \`forge-planner\` agent via native task and await its report before saving the rework plan.
-Forge PLAN owns rework drafting. Keep the revision in Forge's planning gate; do not manually enter or exit OMP Native Plan Mode, and do not ask the user to change modes. Absolutely no implementation, code edits, test fixes, git add/commit/push or mutating commands. Read the QA report and compare failures with the previous approved plan and original requirements. Group repairs by Business Topic and Test Case (BIZ/REQ/TC/QG), identify root causes and risks, and preserve stable IDs. Save a revised plan to ${nextPlanPath}; never overwrite the previous approved plan. The revised plan must include remediation tasks and a new test matrix. Do NOT erase unfinished or blocked tests. Explicitly explain what changes, why, and what will be reverified.
+Forge PLAN owns rework drafting. Keep the revision in Forge's own plan mode; do not enter OMP's native Plan Mode, and do not ask the user to change modes. Absolutely no implementation, code edits, test fixes, git add/commit/push or mutating commands. Read the QA report and compare failures with the previous approved plan and original requirements. Group repairs by Business Topic and Test Case (BIZ/REQ/TC/QG), identify root causes and risks, and preserve stable IDs. Save a revised plan to ${nextPlanPath}; never overwrite the previous approved plan. The revised plan must include remediation tasks and a new test matrix. Do NOT erase unfinished or blocked tests. Explicitly explain what changes, why, and what will be reverified.
 
-Maintain the mandatory sections ## Business Topics, ## Requirement Traceability, ## Business Test Cases, ## Code Quality Gates, ## Execution & QA Handoff, and ## QA Rework Changes. If the user selects Refine, keep editing the same rework revision at ${nextPlanPath}. After the planner report and a successful rework-plan write, Forge will enter OMP Native Plan Mode and open the human Plan Review UI when this turn settles. Do not call xd://propose or ask the user to submit/advance a gate. Do NOT auto-approve or implement.`;
+Maintain the mandatory sections ## Business Topics, ## Requirement Traceability, ## Business Test Cases, ## Code Quality Gates, ## Execution & QA Handoff, and ## QA Rework Changes. If the user selects Refine, keep editing the same rework revision at ${nextPlanPath}. After the planner report and a successful rework-plan write, call forge_plan_propose; Forge opens the human approval dialog when this turn ends. Do not ask the user to submit or advance a gate. Do NOT auto-approve or implement.`;
 }
 
 function deliveryInstructionTemplate(state) {
@@ -882,6 +887,7 @@ export function parseCommand(args) {
   if (/^auto(?:\s|$)/i.test(trimmed)) return { type: 'autoHelp' };
   if (/^status$/i.test(trimmed)) return { type: 'status' };
   if (/^recover$/i.test(trimmed)) return { type: 'recover' };
+  if (/^review$/i.test(trimmed)) return { type: 'review' };
   if (/^resume$/i.test(trimmed)) return { type: 'resume' };
   if (/^resume\s+current$/i.test(trimmed)) return { type: 'resumeCurrent' };
   if (/^qa$/i.test(trimmed)) return { type: 'qa' };
@@ -928,6 +934,7 @@ export function getForgeArgumentCompletions(argumentPrefix, options = {}) {
       {token:'status', detail:'Show workflow status'},
       {token:'recover', detail:'Review inconsistent state (human confirmation)'},
       {token:'resume', detail:'Choose Forge session to resume'},
+      {token:'review', detail:'Open the Forge plan approval dialog'},
       {token:'auto', detail:'Configure auto-start', more:true},
       {token:'qa', detail:'Run post-execution QA'},
       {token:'report', detail:'Show QA report'},

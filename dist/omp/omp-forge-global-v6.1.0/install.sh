@@ -85,7 +85,7 @@ if ! cmp -s "$ROOT/agents/forge-requirement.md" "$AGENTS/forge-requirement.md"; 
 fi
 printf 'Restart OMP. Then type: /forge (opens multiline requirement editor)\n'
 printf 'Manage agent models/prompts with OMP /agents; view fixed Forge map with /forge agents\n'
-printf 'Native Plan Review; no automatic git commits or pushes.\n'
+printf 'Forge plan mode with its own approval dialog; no automatic git commits or pushes.\n'
 printf 'Requirement gate: one forge-requirement pass (intake, gaps, critique, architecture, QA strategy, self-challenge), then your review via forge_requirement_summary\n'
 printf 'Gate Skills: /forge skill (interactive), /forge skill list, /forge skill add qa go-testing\n'
 printf 'Paste a new SKILL.md: /forge skill create (or /forge skill create qa)\n'

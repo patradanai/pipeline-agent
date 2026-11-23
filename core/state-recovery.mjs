@@ -27,7 +27,7 @@ function reworkPin(state) {
   };
 }
 
-export function recoveryProposal(input, nativePlan = 'unknown') {
+export function recoveryProposal(input) {
   const state = normalizeForgeState(input);
   if (!state || typeof state.phase !== 'string' || !state.active) return null;
   const phase = state.phase;
@@ -60,7 +60,7 @@ export function recoveryProposal(input, nativePlan = 'unknown') {
   if (phase === 'PLAN' && state.planWritten === true && !written) {
     return issue('proposal-without-plan', 'PLAN',
       'Forge has no successfully recorded canonical plan write.',
-      { phase: 'PLAN', proposalDeferred: false, planWritten: false, planValid: false, approved: false, approvedPlanHash: null }, 'plan');
+      { phase: 'PLAN', reviewRequested: false, planWritten: false, planValid: false, approved: false, approvedPlanHash: null }, 'plan');
   }
   if (phase === 'REQUIREMENT' && state.approved === true) {
     // An inconsistent record is not proof that the implementation gate can
@@ -69,24 +69,18 @@ export function recoveryProposal(input, nativePlan = 'unknown') {
       'Requirement state and an approval flag conflict. A prior approval cannot be replayed without matching native review evidence.',
       {phase:'PLAN', approved:false, approvedPlanHash:null, planValid:false, planWritten:false}, 'safety');
   }
-  if (phase === 'PLAN' && nativePlan === 'inactive') {
-    return issue('native-plan-mode-inactive', phase,
-      'Forge is planning, but native OMP Plan Mode is inactive. Activate Plan Mode before saving/submitting the plan; keep the same Gate.',
-      {}, 'native-mode');
-  }
   return null;
 }
 
 /** Only mutate the exact candidate derived from the CURRENT checkpoint. */
 export function applyRecoveryProposal(state, proposal) {
   if (!state || !proposal || !normalizeForgeState(state).active) throw new Error('No active state to recover');
-  const current = recoveryProposal(state, proposal.category === 'native-mode' ? 'inactive' : 'unknown');
+  const current = recoveryProposal(state);
   if (!current || current.key !== proposal.key || current.current !== proposal.current ||
       current.target !== proposal.target || current.category !== proposal.category ||
       current.checkpointFingerprint !== proposal.checkpointFingerprint) {
     throw new Error('Recovery suggestion expired; re-check state');
   }
-  if (proposal.category === 'native-mode') return normalizeForgeState(state);
   return { ...normalizeForgeState(state), ...current.patch, recoveryAudit: [ ...(state.recoveryAudit ?? []), {
     from: current.current, to: current.target, reason: current.key,
     reviewedBy: 'human', at: new Date().toISOString(),
