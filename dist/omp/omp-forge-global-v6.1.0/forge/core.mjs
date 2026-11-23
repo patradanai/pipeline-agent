@@ -191,7 +191,8 @@ export function renderForgeWidget(state) {
   const meter = '▰'.repeat(index + 1) + '▱'.repeat(3 - index);
   const rework = phase === 'PLAN' && Number(state.reworkCycles) > 0
     ? `  ·  Rework ${Math.max(1, Math.trunc(Number(state.reworkCycles)))}` : '';
-  return [`FORGE  ${meter}  ${label}  ${index + 1}/4${rework}`];
+  const steering = Number(state.steeringRevision) > 0 ? `  ·  Steering ${Math.trunc(Number(state.steeringRevision))}` : '';
+  return [`FORGE  ${meter}  ${label}  ${index + 1}/4${rework}${steering}`];
 }
 
 /** Requirement gate: ONE `forge-requirement` pass covers intake, gaps, critique,
@@ -239,6 +240,16 @@ export function formatRequirementSummary(summary, { maxChars = 5000 } = {}) {
   const text = lines.join('\n');
   return text.length > maxChars ? text.slice(0, maxChars) + '\n…(truncated)' : text;
 }
+/** Prompts the user typed while a workflow ran. Each amends the original requirement (newest last). */
+export function formatRequirementSteering(state) {
+  const entries = Array.isArray(state?.requirementSteering) ? state.requirementSteering : [];
+  if (!entries.length) return '';
+  return `Requirement steering — prompts from the user while Forge was running (newest last). Each amends the original requirement and wins where they conflict; carry every one into the analysis, the plan and its traceability:\n${entries.map(e => `${e.revision ?? '-'}. [during ${e.phase}] ${e.text}`).join('\n')}`;
+}
+const steeringBlock = state => {
+  const text = formatRequirementSteering(state);
+  return text ? `\n\n${text}` : '';
+};
 export function requiredAgentsFor(state) {
   if (!state) return [];
   const agents = effectiveAgentAssignments(state);
@@ -324,16 +335,17 @@ function phaseInstructionTemplate(state) {
 
 [GATE 1/4: REQUIREMENT — single-pass analysis]
 Original user requirement:
-${requirement}
+${requirement}${steeringBlock(state)}
 
 MANDATORY: invoke the installed global agent \`forge-requirement\` ONCE through the native task tool and await its report. It is this gate's only specialist and covers every lens in one pass. If it cannot run, report the gate BLOCKED; never simulate it.
-Its task text must contain: the original requirement verbatim; decisions and constraints already confirmed in this conversation; paths you already know are relevant (a starting point, not a fence); and the demand that its report covers all six lenses, every finding labelled CRITICAL|HIGH|MEDIUM|LOW and fact|assumption with evidence:
+Its task text must contain: the original requirement verbatim;${state.requirementSteering?.length ? ' every requirement steering prompt verbatim;' : ''} decisions and constraints already confirmed in this conversation; paths you already know are relevant (a starting point, not a fence); and the demand that its report covers all six lenses, every finding labelled CRITICAL|HIGH|MEDIUM|LOW and fact|assumption with evidence:
 (1) intake: goals, stakeholders, scope and non-goals, numbered BIZ/REQ candidates with acceptance criteria;
 (2) gaps: ambiguities, conflicts and unanswered decisions;
 (3) critique: counterexamples, hidden assumptions, failure modes;
 (4) architecture: boundaries, alternatives and trade-offs;
 (5) QA strategy: acceptance, negative and edge cases for every critical REQ;
-(6) self-challenge of its own draft: what it revised, BLOCKERs vs safe defaults.
+(6) self-challenge of its own draft: what it revised, BLOCKERs vs safe defaults.${(state.agentCompletions ?? []).some(c => c?.gate === 'REQUIREMENT' && c.superseded) ? `
+DELTA RUN (steering): an earlier \`forge-requirement\` report is in this conversation. Pass it with the steering and ask the agent to re-examine only what the steering changes, re-reading only files that change touches. Its report lists every earlier finding by ID with its current severity and gives changed or new findings in full.` : ''}
 Do not run your own intake or workspace exploration first: the agent reads what it needs once. When its report arrives, Forge asks you to review it and call \`forge_requirement_summary\`. Do not implement or write the plan yet.`;
 
   if (phase === 'PLAN' && state.planWritten && state.planValid) return `${HEADER}\nThe plan is awaiting explicit operator approval. Do not implement.`;
@@ -348,6 +360,9 @@ Review ${state.planPath ?? forgePlanPath(state)} for completeness and unresolved
 [GATE 2/4: PLANNING]${state.requirementSummary ? `
 Use this requirement synthesis as the starting point (do not re-run requirement discovery):
 ${formatRequirementSummary(state.requirementSummary)}
+` : ''}${state.requirementSteering?.length ? `
+${formatRequirementSteering(state)}
+The \`forge-planner\` task text must include every steering prompt verbatim.${state.planPath ? ` DELTA RUN: an earlier draft exists at ${state.planPath}. Give the planner that path and ask only for the sections the steering changes; keep unaffected sections and stable BIZ/REQ/TC/QG IDs unchanged.` : ''}
 ` : ''}
 MANDATORY: invoke the named \`forge-planner\` global agent via native task, await its plan analysis, then the orchestrator composes the canonical local:// plan file. Never treat a self-authored fake report as agent output.
 Create a detailed, domain-appropriate plan: problem statement, requirement IDs, decisions, alternatives and rationale, architecture at conceptual level, risks and mitigations, implementation phases, dependency DAG, verification matrix, rollback/recovery, and unresolved blockers. Do not write code or change the working tree. If there are unresolved critical blockers, ask for the decision before preparing an executable plan.
@@ -424,14 +439,24 @@ export function forgePlanPath(state) {
 
 function reworkInstructionTemplate(state) {
   const nextPlanPath = reworkPlanPath(state);
-  return `[OMP FORGE — QA FAILED: REWORK PLAN, NEW APPROVAL REQUIRED]
+  const steered = state.reworkReason === 'STEERING';
+  const trigger = steered
+    ? `[OMP FORGE — USER STEERING: REWORK PLAN, NEW APPROVAL REQUIRED]
+Trigger: a prompt from the user while the approved plan was running; its approval is revoked. Rework cycle #${state.reworkCycles ?? 1}.
+Original requirement: ${state.requirement}
+Previous approved plan: ${state.reworkBasePlanPath ?? `local://${state.slug}-plan.md`}`
+    : `[OMP FORGE — QA FAILED: REWORK PLAN, NEW APPROVAL REQUIRED]
 QA gate: ${state.qaStatus ?? 'BLOCKED'}; rework cycle #${state.reworkCycles ?? 1}.
 Original requirement: ${state.requirement}
 Previous approved plan: ${state.reworkBasePlanPath ?? `local://${state.slug}-plan.md`}
-QA failure evidence (read this report): ${state.qaReportPath ?? 'not available'}
+QA failure evidence (read this report): ${state.qaReportPath ?? 'not available'}`;
+  const compare = steered
+    ? 'Compare the requirement steering with the previous approved plan, the original requirement and the work already in the working tree. DELTA RUN: give the planner the previous approved plan path and ask only for the sections the steering changes; keep what still holds and its stable IDs unchanged, and add BIZ/REQ/TC entries for new scope.'
+    : 'Read the QA report and compare failures with the previous approved plan and original requirements.';
+  return `${trigger}${steeringBlock(state)}
 
-MANDATORY: invoke the named \`forge-planner\` agent via native task and await its report before saving the rework plan.
-Forge PLAN owns rework drafting. Keep the revision in Forge's own plan mode; do not enter OMP's native Plan Mode, and do not ask the user to change modes. Absolutely no implementation, code edits, test fixes, git add/commit/push or mutating commands. Read the QA report and compare failures with the previous approved plan and original requirements. Group repairs by Business Topic and Test Case (BIZ/REQ/TC/QG), identify root causes and risks, and preserve stable IDs. Save a revised plan to ${nextPlanPath}; never overwrite the previous approved plan. The revised plan must include remediation tasks and a new test matrix. Do NOT erase unfinished or blocked tests. Explicitly explain what changes, why, and what will be reverified.
+MANDATORY: invoke the named \`forge-planner\` agent via native task and await its report before saving the rework plan.${state.requirementSteering?.length ? ' Its task text must include every steering prompt verbatim.' : ''}
+Forge PLAN owns rework drafting. Keep the revision in Forge's own plan mode; do not enter OMP's native Plan Mode, and do not ask the user to change modes. Absolutely no implementation, code edits, test fixes, git add/commit/push or mutating commands. ${compare} Group repairs by Business Topic and Test Case (BIZ/REQ/TC/QG), identify root causes and risks, and preserve stable IDs. Save a revised plan to ${nextPlanPath}; never overwrite the previous approved plan. The revised plan must include remediation tasks and a new test matrix. Do NOT erase unfinished or blocked tests. Explicitly explain what changes, why, and what will be reverified.
 
 Maintain the mandatory sections ## Business Topics, ## Requirement Traceability, ## Business Test Cases, ## Code Quality Gates, ## Execution & QA Handoff, and ## QA Rework Changes. If the user selects Refine, keep editing the same rework revision at ${nextPlanPath}. After the planner report and a successful rework-plan write, call forge_plan_propose; Forge opens the human approval dialog when this turn ends. Do not ask the user to submit or advance a gate. Do NOT auto-approve or implement.`;
 }
@@ -465,6 +490,18 @@ export const executionInstruction = state => `Load and follow the forge-execute-
 export const qaInstruction = state => `Load and follow the forge-qa-gate skill.\n\n${routeAgentNames(qaInstructionTemplate(state), state)}`;
 export const reworkInstruction = state => `Load and follow the forge-plan-gate skill.\n\n${routeAgentNames(reworkInstructionTemplate(state), state)}`;
 export const deliveryInstruction = state => routeAgentNames(deliveryInstructionTemplate(state), state);
+const STEERING_EFFECT = {
+  REQUIREMENT: 'Requirement analysis restarts with this steering; the earlier forge-requirement report is superseded.',
+  PLAN: 'Any proposed plan is withdrawn; plan again with this steering before approval.',
+  REVOKED: 'Approval of the running plan is revoked: stop implementation and QA work now. A revised plan needs new human approval.',
+};
+/** Replaces a prompt the user typed while a workflow ran: the steering status, then the
+ * re-entered gate. The prompt itself appears once, verbatim, in that gate's steering list. */
+export const steeringInstruction = (state, { from, revoked = false }) => `[FORGE STEERING — PROMPT FROM USER]
+Steering status: #${state.steeringRevision ?? 1} · ${from} → ${state.phase}. ${revoked ? STEERING_EFFECT.REVOKED : STEERING_EFFECT[state.phase] ?? STEERING_EFFECT.PLAN}
+The user's prompt is steering #${state.steeringRevision ?? 1} in the list below. Start your reply with the steering status line. If the prompt asks a question, answer it briefly, then continue the gate with the steering applied.
+
+${phaseInstruction(state)}`;
 
 /** This guard covers obvious agent-authored Git writes, not subprocesses or arbitrary user scripts. */
 export function isProhibitedGitCommand(command) {

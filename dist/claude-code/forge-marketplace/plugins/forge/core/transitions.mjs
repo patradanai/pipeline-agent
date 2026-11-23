@@ -44,6 +44,7 @@ export function qaReportTransition(state, report, { reportPath, workingTree = nu
     qaReportPath: reportPath,
     workingTreeAtQa: workingTree,
     reworkCycles: failed ? (state.reworkCycles ?? 0) + 1 : (state.reworkCycles ?? 0),
+    ...(failed ? { reworkReason: 'QA_FAIL' } : {}),
     gateAgents: { ...(state.gateAgents ?? {}), ...(failed ? { PLAN: [], EXECUTE: [], QA: [] } : {}) },
     agentRetries: { ...(state.agentRetries ?? {}), ...(failed ? { PLAN: 0, EXECUTE: 0, QA: 0 } : {}) },
   };
@@ -78,8 +79,49 @@ export function reworkTransition(state) {
   return { ...state, active: true, approved: false, qaEvidencePending: false, phase: 'PLAN', planWritten: false, planValid: false, approvedPlanHash: null,
     reworkBaseHash: previousHash, reworkBasePlanPath: state.reworkBasePlanPath ?? state.planPath, planPath: null,
 
-    reworkCycles: (state.reworkCycles ?? 0) + (state.qaStatus === 'BLOCKED' ? 1 : 0),
+    reworkCycles: (state.reworkCycles ?? 0) + (state.qaStatus === 'BLOCKED' ? 1 : 0), reworkReason: state.qaStatus === 'FAIL' ? 'QA_FAIL' : 'QA_BLOCKED',
     gateAgents: { ...(state.gateAgents ?? {}), PLAN: [] }, agentRetries: { ...(state.agentRetries ?? {}), PLAN: 0 } };
+}
+
+const STEERABLE_PHASES = new Set(['REQUIREMENT', 'PLAN', 'EXECUTE', 'QA']);
+const MAX_STEERING = 20;
+
+/** Where a steering prompt would take the workflow, or null when nothing can be steered.
+ * Lets an adapter ask the human before anything changes. */
+export function steeringRoute(state) {
+  if (!state?.active || state.deliveryPath || !STEERABLE_PHASES.has(state.phase)) return null;
+  const restartsRequirement = state.phase === 'REQUIREMENT';
+  return { from: state.phase, to: restartsRequirement ? 'REQUIREMENT' : 'PLAN', revoked: !restartsRequirement && state.approved === true };
+}
+
+/** A prompt the user typed while the workflow ran. It amends the requirement, so the
+ * workflow re-enters the gate that must absorb it: REQUIREMENT re-runs its analysis,
+ * PLAN withdraws any proposal, and EXECUTE/QA lose their approval and re-plan.
+ * Throws when no running workflow can take steering. */
+export function steerTransition(state, text, { at = new Date().toISOString() } = {}) {
+  const directive = String(text ?? '').trim();
+  if (!directive) throw new Error('Steering prompt is empty.');
+  if (!steeringRoute(state)) throw new Error('No running Forge workflow to steer.');
+  const steeringRevision = (state.steeringRevision ?? 0) + 1;
+  const next = {
+    ...state, steeringRevision,
+    requirementSteering: [...(state.requirementSteering ?? []), { revision: steeringRevision, phase: state.phase, text: directive, at }].slice(-MAX_STEERING),
+  };
+  if (state.phase === 'REQUIREMENT') {
+    return { ...next, requirementSummary: null, requirementSummaryRequested: false,
+      gateAgents: { ...(state.gateAgents ?? {}), REQUIREMENT: [] },
+      agentRetries: { ...(state.agentRetries ?? {}), REQUIREMENT: 0, 'REQUIREMENT:summary': 0 },
+      // The earlier report no longer covers the requirement; keep it for audit only.
+      agentCompletions: (state.agentCompletions ?? []).map(c => c?.gate === 'REQUIREMENT' ? { ...c, superseded: true } : c) };
+  }
+  const draft = { phase: 'PLAN', planWritten: false, planValid: false, approvedPlanHash: null, reviewRequested: false, proposalRetries: 0,
+    gateAgents: { ...(state.gateAgents ?? {}), PLAN: [] }, agentRetries: { ...(state.agentRetries ?? {}), PLAN: 0 } };
+  if (state.approved !== true) return { ...next, ...draft };
+  // The approved plan becomes the read-only rework base; a revised plan needs new approval.
+  return { ...next, ...draft, approved: false, executionObserved: false, qaStatus: null, qaEvidencePending: false, qaRetries: 0, deliveryRetries: 0,
+    reworkReason: 'STEERING', reworkBaseHash: state.approvedPlanHash ?? null, reworkBasePlanPath: state.planPath ?? null, planPath: null,
+    reworkCycles: (state.reworkCycles ?? 0) + 1,
+    gateAgents: { ...draft.gateAgents, EXECUTE: [], QA: [] }, agentRetries: { ...draft.agentRetries, EXECUTE: 0, QA: 0 } };
 }
 
 /** Validate and apply forge_requirement_summary: the requirement gate then opens PLANNING.
@@ -91,7 +133,7 @@ export function applyRequirementSummary(state, params) {
   const summary = normalizeRequirementSummary(params);
   // Cross-check: the requirement agent's OWN severity labels for this gate.
   // A summary may merge duplicates but must not make CRITICAL/HIGH vanish.
-  const reported = (state.agentCompletions ?? []).filter(c => c.gate === 'REQUIREMENT')
+  const reported = (state.agentCompletions ?? []).filter(c => c.gate === 'REQUIREMENT' && !c.superseded)
     .reduce((acc, c) => ({ critical: acc.critical + (c.reportedSeverities?.critical ?? 0), high: acc.high + (c.reportedSeverities?.high ?? 0) }), { critical: 0, high: 0 });
   const summarizedHigh = summary.findings.filter(f => ['CRITICAL','HIGH'].includes(f.severity)).length;
   if (reported.critical + reported.high > 0 && summarizedHigh === 0) {

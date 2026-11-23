@@ -508,6 +508,151 @@ test('QA failure stays in Forge PLAN and reopens Forge review after the rework p
   assert.equal(state.reworkCycles,1);
 });
 
+/** Type a prompt while Forge runs and answer the steering popup ('steer' or 'cancel'). */
+async function typePrompt(x, text, pick = 'steer') {
+  const asked = {};
+  x.ctx.ui.select = async (title, options) => {
+    Object.assign(asked, {title, options});
+    return pick === 'steer' ? options.find(o=>o.startsWith('Steer · ')) : options.find(o=>o.startsWith('Cancel · '));
+  };
+  try { return {result: await x.events.get('input')({source:'interactive',text},x.ctx), asked}; }
+  finally { delete x.ctx.ui.select; }
+}
+
+test('a prompt typed during QA asks first, then steers: approval revoked, rework planned, no QA report fabricated', async () => {
+  const x=setup(); await advanceToReview(x);
+  await approvePlan(x);
+  await x.events.get('agent_start')({},x.ctx); await runCompletedAgent(x,'forge-executor');
+  await x.events.get('session_stop')({},x.ctx);
+  const approved=x.entries.at(-1).data;
+  assert.equal(approved.phase,'QA');
+  const qaTask='qa-in-flight';
+  await x.events.get('tool_call')({toolName:'task',toolCallId:qaTask,input:{agent:'forge-qa',task:'Verify'}},x.ctx);
+  await x.events.get('before_subagent_spawn')({agent:'forge-qa'},x.ctx);
+
+  assert.equal(await x.events.get('input')({source:'interactive',text:'/forge status'},x.ctx),undefined,'slash commands are not steering');
+  const {result,asked}=await typePrompt(x,'Also export bookings as CSV');
+  assert.equal(asked.title,'Forge steering · prompt "Also export bookings as CSV" from user');
+  assert.deepEqual(asked.options,['Steer · QA → PLAN · revokes approval, re-plan and approve again','Cancel · keep working on QA']);
+  assert.match(result.text,/\[FORGE STEERING — PROMPT FROM USER\]/);
+  assert.match(result.text,/Steering status: #1 · QA → PLAN\. Approval of the running plan is revoked/);
+  assert.match(result.text,/USER STEERING: REWORK PLAN, NEW APPROVAL REQUIRED/);
+  assert.match(result.text,/DELTA RUN: give the planner the previous approved plan path/);
+  assert.equal(result.text.split('Also export bookings as CSV').length-1,1,'the prompt is sent once, inside the steering list');
+  assert.match(result.text,/1\. \[during QA\] Also export bookings as CSV/);
+  assert.doesNotMatch(result.text,/QA FAILED/);
+  assert.match(x.notifications.at(-1).message,/^Forge steering #1 · QA → PLAN · approval revoked.*prompt "Also export bookings as CSV" from user$/);
+
+  const state=x.entries.at(-1).data;
+  assert.equal(state.phase,'PLAN');
+  assert.equal(state.approved,false);
+  assert.equal(state.approvedPlanHash,null);
+  assert.equal(state.qaStatus,null);
+  assert.equal(state.qaReportPath,null,'no QA report is written for a user steering prompt');
+  assert.equal(state.reworkReason,'STEERING');
+  assert.equal(state.reworkBaseHash,approved.approvedPlanHash);
+  assert.equal(state.reworkBasePlanPath,approved.planPath);
+  assert.equal(state.reworkCycles,1);
+  assert.deepEqual(state.requirementSteering.map(s=>[s.revision,s.phase,s.text]),[[1,'QA','Also export bookings as CSV']]);
+  assert.equal((await x.events.get('tool_call')({toolName:'edit',input:{path:'src/booking.ts'}},x.ctx)).block,true);
+
+  // The QA specialist dispatched before the steering cannot complete the new gate.
+  await x.events.get('tool_result')({toolName:'task',toolCallId:qaTask,isError:false,content:[{type:'text',text:'late QA report'}]},x.ctx);
+  assert.deepEqual(x.entries.at(-1).data.gateAgents.PLAN,[]);
+  const next=await x.events.get('session_stop')({},x.ctx);
+  assert.equal(next.continue,true);
+  assert.match(next.additionalContext,/USER STEERING: REWORK PLAN/);
+  assert.equal(x.entries.at(-1).data.qaReportPath,null);
+
+  await runCompletedAgent(x,'forge-planner');
+  const reworkPath=`local://${state.slug}-rework-1-plan.md`;
+  await writeCanonicalPlan(x,reworkPath,PLAN+'\n## QA Rework Changes\n- Add CSV export.\n');
+  const proposed=await proposePlan(x);
+  assert.notEqual(proposed.isError,true,proposed.content[0].text);
+  await approvePlan(x);
+  assert.equal(x.entries.at(-1).data.phase,'EXECUTE');
+  assert.equal(x.entries.at(-1).data.approved,true);
+});
+
+test('cancelling the steering popup changes nothing and returns the prompt to the editor', async () => {
+  const x=setup(); await advanceToReview(x);
+  await approvePlan(x);
+  await x.events.get('agent_start')({},x.ctx); await runCompletedAgent(x,'forge-executor');
+  await x.events.get('session_stop')({},x.ctx);
+  const before=structuredClone(x.entries.at(-1).data);
+  const savedEntries=x.entries.length, sentMessages=x.sent.length;
+  let editor=null, aborted=false;
+  x.ctx.ui.setEditorText=t=>{ editor=t; };
+  x.ctx.isIdle=()=>false;
+  x.ctx.abort=async()=>{ aborted=true; };
+  const {result}=await typePrompt(x,'Also export bookings as CSV','cancel');
+  assert.deepEqual(result,{handled:true});
+  assert.equal(editor,'Also export bookings as CSV');
+  assert.equal(aborted,false,'cancel keeps the running QA turn');
+  assert.deepEqual(x.entries.at(-1).data,before);
+  assert.equal(x.entries.length,savedEntries);
+  assert.equal(x.sent.length,sentMessages);
+  assert.match(x.notifications.at(-1).message,/^Forge steering cancelled\. Forge continues QA; your prompt is back in the editor\.$/);
+});
+
+test('steering a busy execution turn aborts it and revokes the running executor write permission', async () => {
+  const x=setup(); await advanceToReview(x);
+  await approvePlan(x);
+  await x.events.get('agent_start')({},x.ctx);
+  const executor={...x.ctx,agent:{kind:'sub',name:'forge-executor'}};
+  assert.equal(await x.events.get('tool_call')({toolName:'edit',input:{path:'src/a.ts'}},executor),undefined);
+  let busy=true, aborts=0;
+  x.ctx.isIdle=()=>!busy;
+  x.ctx.abort=async()=>{ aborts++; busy=false; };
+  const {result}=await typePrompt(x,'Use UUID ids instead of integers');
+  assert.equal(aborts,1,'the obsolete execution turn stops instead of running to its end');
+  assert.match(result.text,/Steering status: #1 · EXECUTE → PLAN\. Approval of the running plan is revoked/);
+  assert.match((await x.events.get('tool_call')({toolName:'edit',input:{path:'src/a.ts'}},executor)).reason,/approval is not active \(PLAN\)/);
+  assert.equal(x.entries.at(-1).data.reworkReason,'STEERING');
+  const aborted={last_assistant_message:{role:'assistant',content:[],stopReason:'aborted'}};
+  assert.equal(await x.events.get('session_stop')(aborted,x.ctx),undefined,'the aborted turn never nudges a gate');
+});
+
+test('a prompt typed during requirement analysis restarts it as a delta run', async () => {
+  const x=setup();
+  await x.events.get('session_start')({},x.ctx);
+  await x.commands.get('forge').handler('Create a CRM',x.ctx);
+  await runCompletedAgent(x,'forge-requirement');
+  assert.deepEqual(x.entries.at(-1).data.gateAgents.REQUIREMENT,['forge-requirement']);
+  const {result,asked}=await typePrompt(x,'Only B2B customers, no consumers');
+  assert.deepEqual(asked.options,['Steer · REQUIREMENT → REQUIREMENT · re-run requirement analysis','Cancel · keep working on REQUIREMENT']);
+  assert.match(result.text,/Steering status: #1 · REQUIREMENT → REQUIREMENT\. Requirement analysis restarts/);
+  assert.match(result.text,/GATE 1\/4: REQUIREMENT[\s\S]*Create a CRM\n\nRequirement steering[\s\S]*\[during REQUIREMENT\] Only B2B customers, no consumers/);
+  assert.match(result.text,/every requirement steering prompt verbatim/);
+  assert.match(result.text,/DELTA RUN \(steering\): an earlier `forge-requirement` report/);
+  const state=x.entries.at(-1).data;
+  assert.equal(state.phase,'REQUIREMENT');
+  assert.deepEqual(state.gateAgents.REQUIREMENT,[]);
+  assert.ok(state.agentCompletions.filter(c=>c.gate==='REQUIREMENT').every(c=>c.superseded===true));
+  await completeRequirement(x);
+  assert.equal(x.entries.at(-1).data.phase,'PLAN');
+  assert.equal(x.notifications.some(n=>/prompt "Only B2B customers, no consumers" from user/.test(n.message)),true);
+});
+
+test('a prompt typed while a plan awaits review withdraws the proposal and re-plans as a delta', async () => {
+  const x=setup(); await advanceToReview(x);
+  const before=x.entries.at(-1).data;
+  assert.equal(before.planValid,true);
+  const {result,asked}=await typePrompt(x,'Drop the approval step');
+  assert.deepEqual(asked.options,['Steer · PLAN → PLAN · re-plan before approval','Cancel · keep working on PLAN']);
+  assert.match(result.text,/Steering status: #1 · PLAN → PLAN\. Any proposed plan is withdrawn/);
+  assert.match(result.text,/GATE 2\/4: PLANNING[\s\S]*\[during PLAN\] Drop the approval step/);
+  assert.ok(result.text.includes(`DELTA RUN: an earlier draft exists at ${before.planPath}.`));
+  const state=x.entries.at(-1).data;
+  assert.equal(state.planWritten,false);
+  assert.equal(state.planValid,false);
+  assert.equal(state.approvedPlanHash,null);
+  assert.equal(state.reworkBaseHash ?? null,null,'an unapproved proposal is not a rework base');
+  assert.deepEqual(state.gateAgents.PLAN,[]);
+  await x.commands.get('forge').handler('review',x.ctx);
+  assert.equal(x.notifications.at(-1).message,'No proposed Forge plan awaits review.');
+});
+
 test('delivery cannot be prepared before QA PASS', async () => {
   const x=setup(); await advanceToReview(x);
   const result=await x.tools.get('forge_delivery_submit').execute('call',{subject:'feat: add booking',body:'',highlights:[],changedFiles:[]},null,null,x.ctx);

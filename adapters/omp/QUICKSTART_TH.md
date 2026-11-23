@@ -31,6 +31,21 @@ QA ตรวจโดย `forge-qa` และ `forge-code-reviewer` อย่า
 
 ---
 
+## Steering: พิมพ์ prompt ระหว่าง Forge ทำงาน
+
+ถ้าผู้ใช้พิมพ์ prompt ขณะ workflow ยังทำงานอยู่ (prompt ที่ไม่ขึ้นต้นด้วย `/`) Forge จะเด้งหน้าต่าง `Forge steering · prompt "…" from user` ให้เลือก 2 ทาง
+
+- **`Steer · <gate เดิม> → <gate ใหม่> · <ผล>`**: บันทึก prompt เป็น requirement steering แล้วกลับไปที่ gate ตามตารางด้านล่าง ถ้า turn ที่กำลังรันยังไม่จบ Forge จะหยุด turn นั้นทันที เพราะงานที่เหลือไม่ใช้แล้ว (ประหยัด token และเวลา) จากนั้นแจ้ง `Forge steering #N · <from> → <to> · prompt "…" from user`
+- **`Cancel · keep working on <gate>`**: state ไม่เปลี่ยน งานเดิมทำต่อ และ prompt กลับไปอยู่ในช่องพิมพ์
+
+| พิมพ์ระหว่าง | ผลเมื่อเลือก Steer |
+|---|---|
+| REQUIREMENT | `forge-requirement` รันใหม่แบบ delta: ได้รายงานเดิมไปด้วย และตรวจเฉพาะส่วนที่ steering เปลี่ยน รายงานเดิมเก็บไว้เป็น audit |
+| PLAN | ถอนแผนที่เสนอไว้ แล้ว `forge-planner` แก้แผนเดิมแบบ delta (ID เดิมคงไว้) |
+| EXECUTE / QA (รวม QA PASS ก่อนส่งมอบ) | ยกเลิกการอนุมัติ แผนเดิมกลายเป็นฐาน rework แบบอ่านอย่างเดียว planner แก้เฉพาะส่วนที่ steering เปลี่ยน แล้วต้องอนุมัติใหม่ Forge ไม่สร้างรายงาน QA BLOCKED ปลอม และ executor ที่ยังรันอยู่แก้ไฟล์ต่อไม่ได้ |
+
+steering ทุกข้อ (เก็บสูงสุด 20 ข้อล่าสุด) อยู่ใน state และแนบไปกับคำสั่ง Requirement, Planning และ Rework ทุกครั้ง จึงไม่หายเมื่อ resume หรือ compact ข้อความ prompt ส่งให้ model ครั้งเดียว ไม่ซ้ำ ดูจำนวน steering ได้จาก `/forge status` (`steering: N`) และแถบสถานะ (`Steering N`)
+
 ## v6.1: Requirement รอบเดียว agent เดียว
 
 Gate 1 เหลือ `forge-requirement` รันครั้งเดียว (เดิม 4 agent 3 รอบ รวม 7 ครั้ง) แล้ว Main ตรวจรายงานซ้ำและส่ง `forge_requirement_summary` เพื่อเข้า Planning

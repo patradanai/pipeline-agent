@@ -7,6 +7,19 @@ checks that made the old gate rigorous.
 
 ## Changed
 
+- OMP: a prompt the user types while a workflow runs opens a steering popup:
+  `Steer · <from> → <to>` or `Cancel · keep working on <gate>`. Cancel changes
+  nothing and returns the prompt to the editor. Steer records it in state
+  (`requirementSteering`, `steeringRevision`), aborts the running turn whose
+  remaining work is obsolete, reports
+  `Forge steering #N · <from> → <to> · prompt "…" from user`, and re-enters
+  the gate that absorbs it: REQUIREMENT re-runs analysis, PLAN withdraws the
+  proposal, EXECUTE/QA revoke approval and plan a rework
+  (`reworkReason: STEERING`). Re-runs are delta runs against the earlier
+  report, draft or approved plan. Every Requirement, Planning and Rework
+  instruction carries all steering prompts, and the prompt is sent once. A
+  prompt during QA no longer ends in a fabricated QA BLOCKED report, and a
+  still-running executor loses write access once approval is revoked.
 - Gate 1 is one `forge-requirement` run. Its prompt merges the analyst, critic,
   architect and QA-strategist duties plus the former challenge round. The report
   covers six lenses (intake, gaps, critique, architecture, QA strategy,

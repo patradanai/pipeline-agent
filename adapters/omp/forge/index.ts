@@ -2,7 +2,7 @@ import type { ExtensionAPI } from '@oh-my-pi/pi-coding-agent';
 import { discoverForgeSessions, forgeSessionLabel, resolvePickerSessions, sameResumeCheckpoint } from './session-resume.mjs';
 import { recoveryProposal, applyRecoveryProposal } from './state-recovery.mjs';
 import { snapshotWorkingTree as coreSnapshotWorkingTree, inspectWorkspaceScope } from './workspace.mjs';
-import { applyRequirementSummary, hasGateAgents, markGateAgent, approvedExecutionState, qaReportTransition, assertQaSubmittable, assertDeliverySubmittable, deliveryTransition, reworkTransition } from './transitions.mjs';
+import { applyRequirementSummary, hasGateAgents, markGateAgent, approvedExecutionState, qaReportTransition, assertQaSubmittable, assertDeliverySubmittable, deliveryTransition, reworkTransition, steeringRoute, steerTransition } from './transitions.mjs';
 import { sessionIdentity, recoveryIdentity, persistForgeCheckpoint, loadForgeCheckpointCandidates, loadForgeCheckpointRecord, pruneForgeCheckpoints, candidateFromSessionEntries, prepareHumanRecovery, isValidRestoreCandidate } from './checkpoint-recovery.mjs';
 import { normalizeForgeState } from './forge-state.mjs';
 import { mkdirSync, readFileSync, writeFileSync, lstatSync, renameSync, readdirSync, unlinkSync, realpathSync, statSync, rmdirSync } from 'node:fs';
@@ -45,6 +45,7 @@ import {
   requirementSummaryInstruction,
   qaInstruction,
   reworkInstruction,
+  steeringInstruction,
   renderDeliveryReport,
   renderQaReport,
   renderForgeWidget,
@@ -82,7 +83,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
   const checkpointRoot = process.env.FORGE_CHECKPOINT_DIR || join(agentRoot, 'forge-checkpoints');
   const attachmentRoot = join(agentRoot, 'forge-attachments');
   let autoStart = false;
-  const runningTasks = new Map<string, { key: string; agents: string[]; qaStatus: string | null; reworkCycles: number }>();
+  const runningTasks = new Map<string, { key: string; agents: string[]; qaStatus: string | null; reworkCycles: number; steeringRevision: number }>();
   // Forge's own plan review opens once the proposing turn is idle. The epoch
   // invalidates a scheduled review after a session/branch change or cancel.
   // This is control-plane only; it never authorizes code writes.
@@ -883,14 +884,14 @@ export default function forgeExtension(pi: ExtensionAPI) {
     return img.type === 'image' && typeof img.data === 'string' && img.data.length > 0;
   }
 
-  function saveRequirementImages(slug: string, images: unknown[]): string[] {
+  function saveRequirementImages(slug: string, images: unknown[], prefix = 'image'): string[] {
     const valid = images.filter(isPastedImage);
     if (!valid.length) return [];
     const dir = join(attachmentRoot, slug);
     mkdirSync(dir, { recursive: true });
     return valid.map((img, index) => {
       const ext = String(img.mimeType ?? '').split('/')[1]?.toLowerCase().replace(/[^a-z0-9]/g, '') || 'img';
-      const file = join(dir, `image-${index + 1}.${ext}`);
+      const file = join(dir, `${prefix}-${index + 1}.${ext}`);
       writeFileSync(file, Buffer.from(img.data, 'base64'));
       return file;
     });
@@ -898,7 +899,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
 
   async function begin(requirement: string, ctx: any, useInputReplacement = false, images: unknown[] = []) {
     if (workflow?.active) {
-      notify(ctx, 'A Forge workflow is active. Steer it, or use /forge off.', 'warning');
+      notify(ctx, 'A Forge workflow is active. Type a prompt to steer it, or use /forge off.', 'warning');
       return null;
     }
     if (!requirement.trim()) return null;
@@ -937,6 +938,29 @@ export default function forgeExtension(pi: ExtensionAPI) {
     const instruction = phaseInstruction(workflow);
     if (!useInputReplacement) pi.sendUserMessage(instruction, { attribution: 'agent' });
     return instruction;
+  }
+
+  const promptPreview = (text: string) => {
+    const flat = text.replace(/\s+/g, ' ');
+    return flat.length > 80 ? `${flat.slice(0, 80)}…` : flat || '(images only)';
+  };
+
+  /** A prompt the user types while the workflow runs steers it: it is recorded as a
+   * requirement amendment and the workflow re-enters the gate that must absorb it. */
+  function steer(text: string, images: unknown[], ctx: unknown): string | null {
+    const from = workflow.phase;
+    const revoked = workflow.approved === true;
+    let paths: string[];
+    try { paths = saveRequirementImages(workflow.slug, images, `steering-${(workflow.steeringRevision ?? 0) + 1}-image`); }
+    catch (err) { notify(ctx, `Forge steering not applied: could not save pasted images: ${String(err)}`, 'error'); return null; }
+    const directive = [text, paths.length ? `Attached images (pasted with this prompt; open each with the read tool):\n${paths.map((p, i) => `- [Image #${i + 1}] ${p}`).join('\n')}` : '']
+      .filter(Boolean).join('\n\n');
+    try { workflow = steerTransition(workflow, directive); }
+    catch (err) { notify(ctx, `Forge steering not applied: ${err instanceof Error ? err.message : String(err)}`, 'warning'); return null; }
+    reviewEpoch++; reviewScheduled = false;
+    saveState(); updateDashboard(ctx);
+    notify(ctx, `Forge steering #${workflow.steeringRevision} · ${from} → ${workflow.phase}${revoked ? ' · approval revoked, the revised plan needs new approval' : ''} · prompt "${promptPreview(text)}" from user`, revoked ? 'warning' : 'info');
+    return steeringInstruction(workflow, { from, revoked });
   }
 
   readConfig();
@@ -1108,9 +1132,37 @@ export default function forgeExtension(pi: ExtensionAPI) {
   pi.on('input', async (event, ctx) => {
     if (ctx.agent?.kind !== 'main' || ctx.mode !== 'tui') return;
     const text = String(event.text ?? '').trim();
+    const images = Array.isArray(event.images) ? event.images : [];
+    // A prompt typed while the workflow runs may steer it. The human decides: steer
+    // (re-enter the gate that absorbs it) or cancel (nothing changes, work continues).
+    if (workflow?.active && !workflow.deliveryPath && event.source === 'interactive' && !text.startsWith('/') && (text || images.length)) {
+      const prompt = text.replace(/^forge\s*:\s*/i, '').trim();
+      const route = steeringRoute(workflow);
+      const keepWorking = (reason: string) => {
+        ctx.ui?.setEditorText?.(text);
+        notify(ctx, `${reason} Forge continues ${workflow?.phase ?? 'its current gate'}; your prompt is back in the editor${images.length ? ' (attach images again)' : ''}.`);
+        return { handled: true };
+      };
+      if (!route) return keepWorking('Forge steering is unavailable here.');
+      if (typeof ctx.ui?.select !== 'function') return keepWorking('Forge needs the interactive selector to confirm steering.');
+      const effect = route.revoked ? 'revokes approval, re-plan and approve again' : route.to === 'REQUIREMENT' ? 're-run requirement analysis' : 're-plan before approval';
+      const steerChoice = `Steer · ${route.from} → ${route.to} · ${effect}`;
+      const cancelChoice = `Cancel · keep working on ${route.from}`;
+      const choice = await ctx.ui.select(`Forge steering · prompt "${promptPreview(prompt)}" from user`, [steerChoice, cancelChoice]);
+      if (choice !== steerChoice) return keepWorking('Forge steering cancelled.');
+      const instruction = steer(prompt, images, ctx);
+      if (!instruction) return keepWorking('Forge steering was not applied.');
+      // The running turn now works for a superseded gate: stop it instead of paying
+      // for its remaining tokens and time. Its specialists' late results are ignored.
+      if (ctx.isIdle?.() === false) await ctx.abort?.();
+      if (ctx.isIdle?.() === false) {
+        pi.sendUserMessage(instruction, { deliverAs: 'followUp' });
+        return { handled: true };
+      }
+      return { text: instruction };
+    }
     const explicitPrefix = /^forge\s*:\s*/i.test(text);
     if (!explicitPrefix && !autoStart) return;
-    const images = Array.isArray(event.images) ? event.images : [];
     if (!isAutoEligible(text, event.source, Boolean(workflow?.active), images.length > 0 && !explicitPrefix)) return;
     if (ctx.sessionModes?.getState?.().plan !== 'inactive') return;
     const requirement = explicitPrefix ? text.replace(/^forge\s*:\s*/i, '').trim() : text;
@@ -1169,7 +1221,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
         if (workflow?.phase === 'PLAN' && workflow.planWritten && workflow.planValid && !workflow.approved) {
           notify(ctx, 'Forge plan awaits your approval. Run /forge review to open the approval dialog.', 'info');
         }
-        notify(ctx, `Forge: ${workflow?.phase ?? 'inactive'} | requirement: ${workflow?.requirement ? String(workflow.requirement).replace(/[\r\n]/g, ' ').slice(0, 80) : '(none)'} | slug: ${workflow?.slug ?? '-'} | approved: ${workflow?.approved === true ? 'yes' : 'no'} | QA: ${workflow?.qaStatus ?? 'pending'} | rework: ${workflow?.reworkCycles ?? 0} | waiting agents: ${missingAgents.join(',') || 'none'}${workflow?.phase === 'EXECUTE' && !workflow.active ? ' | action: /forge qa reviews existing work without rerunning implementation; /forge resume retries execution.' : ''} | global auto: ${autoStart ? 'ON' : 'OFF'}`);
+        notify(ctx, `Forge: ${workflow?.phase ?? 'inactive'} | requirement: ${workflow?.requirement ? String(workflow.requirement).replace(/[\r\n]/g, ' ').slice(0, 80) : '(none)'} | slug: ${workflow?.slug ?? '-'} | approved: ${workflow?.approved === true ? 'yes' : 'no'} | QA: ${workflow?.qaStatus ?? 'pending'} | rework: ${workflow?.reworkCycles ?? 0} | steering: ${workflow?.steeringRevision ?? 0} | waiting agents: ${missingAgents.join(',') || 'none'}${workflow?.phase === 'EXECUTE' && !workflow.active ? ' | action: /forge qa reviews existing work without rerunning implementation; /forge resume retries execution.' : ''} | global auto: ${autoStart ? 'ON' : 'OFF'}`);
         return;
       }
       if (command.type === 'report') {
@@ -1437,7 +1489,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
     if (id) runningTasks.delete(id);
     // No matching dispatch or errored task: never count as completed.
     if (!pending || pending.key !== workflow.phase || pending.qaStatus !== (workflow.qaStatus ?? null) ||
-        pending.reworkCycles !== (workflow.reworkCycles ?? 0) || event.isError) return;
+        pending.reworkCycles !== (workflow.reworkCycles ?? 0) || pending.steeringRevision !== (workflow.steeringRevision ?? 0) || event.isError) return;
     const outputs = (event.content ?? []).filter((x: any)=>x?.type==='text' && typeof x.text==='string' && x.text.trim()).map((x: any)=>x.text);
     // Empty successful tool results are not meaningful completed agent reports.
     if (!outputs.length && !event.details) return;
@@ -1484,7 +1536,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
       const id = String(event.toolCallId ?? event.id ?? '');
       // Keep task-agent tracking in sync with the input that will actually be executed.
       // An OMP tool_call hook can replace task arguments before native task dispatch.
-      if (id) runningTasks.set(id, { key: workflow.phase, agents: taskAgents(event.input), qaStatus: workflow.qaStatus ?? null, reworkCycles: workflow.reworkCycles ?? 0 });
+      if (id) runningTasks.set(id, { key: workflow.phase, agents: taskAgents(event.input), qaStatus: workflow.qaStatus ?? null, reworkCycles: workflow.reworkCycles ?? 0, steeringRevision: workflow.steeringRevision ?? 0 });
       let skillBrief = '';
       try { skillBrief = skillBriefForGate(); }
       catch (err) { if (id) runningTasks.delete(id); return { block: true, reason: `Forge gate skill verification failed: ${String(err)}` }; }
@@ -1517,6 +1569,10 @@ export default function forgeExtension(pi: ExtensionAPI) {
     if (isForgeChild) {
       if (childName !== configuredAgents.execution.executor && ['write','edit','apply_patch','bash','shell','terminal','exec','run','python'].includes(tool)) {
         return { block: true, reason: 'Forge specialist is read-only. Only executor may edit approved code; no Git writes.' };
+      }
+      // Steering can revoke approval while the executor is still running.
+      if (workflow && !(workflow.active && workflow.phase === 'EXECUTE' && workflow.approved === true) && ['write','edit','apply_patch'].includes(tool)) {
+        return { block: true, reason: `Forge approval is not active (${workflow.phase}): a user steering prompt or QA result revoked it. Stop and report what you already changed; a revised plan needs new approval.` };
       }
       return;
     }
