@@ -1361,9 +1361,9 @@ test('v5.21: Forge plan approval restores Forge EXECUTION status in the footer',
   x.ctx.ui.setWidget=(key,value)=>widgets.push({key,value});
   await x.events.get('session_start')({},x.ctx);
   await advanceToReview(x);
-  assert.match(footer.at(-1).value,/Plan review 2\/4/);
+  assert.equal(footer.at(-1).value,'FORGE ▰▰▱▱ Plan review 2/4');
   await approvePlan(x);
-  assert.match(footer.at(-1).value,/Execution 3\/4/);
+  assert.equal(footer.at(-1).value,'FORGE ▰▰▰▱ Execution 3/4');
   assert.equal(widgets.at(-1).value,undefined,'legacy above-editor status was removed');
   footer.length=0;
   await x.events.get('agent_start')({},x.ctx);

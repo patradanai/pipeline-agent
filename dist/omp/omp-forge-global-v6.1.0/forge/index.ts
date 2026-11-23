@@ -578,10 +578,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
             ? 'FORGE  ·  Recovery declined  ·  /forge recover'
             : 'FORGE  ·  Recovery needed (edits paused)  ·  /forge recover']
         : null);
-    const status = lines?.[0]
-      ?.replace(/[▰▱]/g, '')
-      .replace(/\s+/g, ' ')
-      .trim();
+    const status = lines?.[0]?.replace(/\s+/g, ' ').trim();
     if (typeof ctx.ui.setStatus === 'function') {
       ctx.ui.setStatus('forge-phase', status || undefined);
       // Clear any above-editor widget installed by older Forge releases to

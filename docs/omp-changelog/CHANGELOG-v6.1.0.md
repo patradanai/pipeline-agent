@@ -86,6 +86,8 @@ checks that made the old gate rigorous.
   whole object to `'inactive'`, so the input hook always bailed and the prompt
   went to the main model unchanged (no gates, no `forge-*` agents, so no
   per-agent model switch). Forge now reads `plan.status`.
+- Keep the four-segment progress meter in OMP's persistent footer status,
+  e.g. `FORGE ▰▱▱▱ Requirement 1/4`, instead of stripping its glyphs.
 
 ## Removed
 
