@@ -280,22 +280,26 @@ async function readStdin() {
   return Buffer.concat(chunks).toString('utf8');
 }
 
+// stdout to a pipe is asynchronous on macOS: exiting before the write callback
+// truncates large hook outputs (~8 KB) into invalid JSON.
+const emit = obj => new Promise(done => process.stdout.write(JSON.stringify(obj), () => done()));
+
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const hookEvent = process.argv[2];
   let raw = '';
   try {
     raw = await readStdin();
     const json = await main(hookEvent, raw);
-    if (json && Object.keys(json).length) process.stdout.write(JSON.stringify(json));
+    if (json && Object.keys(json).length) await emit(json);
     process.exit(0);
   } catch (err) {
     // Fail closed only where a Forge workflow is active and the call could change things.
     let active = false;
     try { const input = JSON.parse(raw || '{}'); active = Boolean(readJson(sessionFile(input.session_id))?.state?.active); } catch {}
     if (hookEvent === 'PreToolUse' && active) {
-      process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: `Forge hook error (failing closed while a workflow is active): ${String(err?.message ?? err)}` } }));
+      await emit({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: `Forge hook error (failing closed while a workflow is active): ${String(err?.message ?? err)}` } });
     } else {
-      process.stdout.write(JSON.stringify({ systemMessage: `Forge hook error: ${String(err?.message ?? err)}` }));
+      await emit({ systemMessage: `Forge hook error: ${String(err?.message ?? err)}` });
     }
     process.exit(0);
   }
