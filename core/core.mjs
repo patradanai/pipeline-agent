@@ -370,10 +370,20 @@ Your turn ends ONLY by (1) the native ask tool gathering a required decision, or
   return `${HEADER}\nThe plan is awaiting explicit operator approval. Do not implement.`;
 }
 
+/** An approved QA fix plan: the earlier plan steps already sit in the working tree. */
+function isQaRework(state) {
+  return Number(state.reworkCycles) > 0 && (state.reworkReason === 'QA_FAIL' || state.reworkReason === 'QA_BLOCKED');
+}
+
 function executionInstructionTemplate(state) {
   const planRef = state.planPath ?? `local://${state.slug}-plan.md`;
+  const rework = isQaRework(state);
+  const fixScope = rework ? `
+QA REWORK cycle #${state.reworkCycles}: the earlier plan steps are already implemented in the working tree. Implement only the remediation steps for the open items below; do not redo or re-verify earlier steps unless a remediation step changes them. Verify each fix with the checks of its TCs and gates; leave the full regression run to QA.
+Open items from the last QA report:
+${formatOpenItems(state.qaOpenItems)}` : '';
   return `[OMP FORGE — APPROVED EXECUTION]
-The operator approved the plan. Execute it yourself, step by step, with full tool access; MUST verify each step before the next. Before you start, initialize todo tracking with one item per plan step; update it after each completed step. NEVER re-read the plan file while the inline plan is intact; read ${planRef} only if the inline plan is compressed or missing.
+The operator approved the plan. Execute it yourself, step by step, with full tool access; MUST verify each step before the next. Before you start, initialize todo tracking with one item per ${rework ? 'remediation' : 'plan'} step; update it after each completed step. NEVER re-read the plan file while the inline plan is intact; read ${planRef} only if the inline plan is compressed or missing.${fixScope}
 Stay within the approved scope. If material scope drift is required, stop and report it; a revised plan needs new approval. You may delegate independent slices to subagents through the native task tool; you own integration and verification. NEVER run git add/commit/push, create PRs, tag or publish; Git commits stay a manual user action.
 When implementation is complete, end your turn with: changed files, checks actually run with their exact results, unfinished work, and deviations from the plan. Do not claim tests passed that you did not run. Forge starts QA automatically after this turn settles.
 Plan reference: ${planRef}
@@ -432,11 +442,18 @@ Previous approved plan: ${state.reworkBasePlanPath ?? `local://${state.slug}-pla
 QA failure evidence (read this report): ${state.qaReportPath ?? 'not available'}`;
   const compare = steered
     ? 'Compare the requirement steering with the previous approved plan, the original requirement and the work already in the working tree. DELTA RUN: read the previous approved plan and change only the sections the steering changes; keep what still holds and its stable IDs unchanged, and add BIZ/REQ/TC entries for new scope.'
-    : 'Read the QA report and compare failures with the previous approved plan and original requirements.';
+    : 'Read the QA report and the previous approved plan; trace each fix-scope item to its root cause.';
+  const explore = steered
+    ? 'explore with glob, grep, read or parallel \`scout\` subagents via the native task tool'
+    : 'targeted lookup only: the previous approved plan already holds the codebase findings, so read just the QA report, that plan and the files the fix-scope items name, with glob, grep and read; spawn \`scout\` subagents only when a root cause lies outside those files';
+  const revise = steered
+    ? 'The revised plan must include remediation tasks and a new test matrix. Do NOT erase unfinished or blocked tests.'
+    : 'Build the revision from the previous approved plan\'s full text, not from scratch: add remediation steps for the fix-scope items to ## Approach, change only their TCs and Verification lines, and keep every other section, passing BIZ/REQ/TC/QG and ID verbatim. Keep the full test matrix; do NOT erase unfinished or blocked tests.';
+  const scope = steered ? '' : `\n\nFix scope (non-PASS items from the QA report; fix only these):\n${formatOpenItems(state.qaOpenItems)}`;
   const notes = state.reworkNotes ? `\n\nOperator notes for this fix (given when the operator chose to plan it):\n${state.reworkNotes}` : '';
-  return `${trigger}${steeringBlock(state)}${notes}
+  return `${trigger}${steeringBlock(state)}${scope}${notes}
 
-Re-plan in Forge plan mode yourself; there is no planner agent. The PLAN gate rules apply: read-only working tree; explore with glob, grep, read or parallel \`scout\` subagents via the native task tool; use the native ask tool only for real preferences. Forge PLAN owns rework drafting. Keep the revision in Forge's own plan mode; do not enter OMP's native Plan Mode, and do not ask the user to change modes. Absolutely no implementation, code edits, test fixes, git add/commit/push or mutating commands. ${compare} Group repairs by Business Topic and Test Case (BIZ/REQ/TC/QG), identify root causes, and preserve stable IDs. Save a revised plan to ${nextPlanPath}; never overwrite the previous approved plan. The revised plan must include remediation tasks and a new test matrix. Do NOT erase unfinished or blocked tests. Explicitly explain what changes, why, and what will be reverified.
+Re-plan in Forge plan mode yourself; there is no planner agent. The PLAN gate rules apply: read-only working tree; ${explore}; use the native ask tool only for real preferences. Forge PLAN owns rework drafting. Keep the revision in Forge's own plan mode; do not enter OMP's native Plan Mode, and do not ask the user to change modes. Absolutely no implementation, code edits, test fixes, git add/commit/push or mutating commands. ${compare} Group repairs by Business Topic and Test Case (BIZ/REQ/TC/QG), identify root causes, and preserve stable IDs. Save a revised plan to ${nextPlanPath}; never overwrite the previous approved plan. ${revise} Explicitly explain what changes, why, and what will be reverified.
 
 Keep the sections ## Context, ## Approach, ## Critical files & anchors, ## Verification, ## Assumptions & contingencies, the Forge QA contract sections ## Business Topics, ## Requirement Traceability, ## Business Test Cases, ## Code Quality Gates, and add ## QA Rework Changes; Approach keeps its 'Open decisions:' and 'Migration & rollback:' lines. If the user selects Refine, keep editing the same rework revision at ${nextPlanPath}. After a successful rework-plan write, call forge_plan_propose; Forge opens the human approval dialog when this turn ends. Do not ask the user to submit or advance a gate. Do NOT auto-approve or implement.${planReviewNote(state)}`;
 }
@@ -721,6 +738,26 @@ function formatTestCases(tests) {
   return Array.isArray(tests) && tests.length
     ? tests.map(t => `- ${t.id} | ${t.topicId} | ${t.requirementIds.join(',')} | ${t.scenario} | ${t.expected} | ${t.method}`).join('\n')
     : '- NONE CAPTURED: QA must BLOCK if plan has no parseable test cases.';
+}
+
+/** Compact list of what a non-PASS QA report left open; a QA rework plan fixes only these. */
+export function qaOpenItems(report) {
+  const clip = s => { const t = norm(s).replace(/\s+/g, ' '); return t.length > 240 ? `${t.slice(0, 239)}…` : t; };
+  return [
+    ...(report?.topics ?? []).flatMap(t => t.tests.filter(x => x.status !== 'PASS').map(x => ({
+      id: x.testId, status: x.status, scope: [t.id, ...x.requirementIds].join(','), detail: clip(x.actual), fileRefs: x.fileRefs }))),
+    ...(report?.qualityChecks ?? []).filter(c => c.status !== 'PASS').map(c => ({
+      id: c.gateId || 'QG', status: c.status, scope: '', detail: clip(c.name), fileRefs: [] })),
+    ...(report?.codeReview?.findings ?? []).filter(f => ['CRITICAL', 'HIGH'].includes(f.severity)).map(f => ({
+      id: f.id, status: f.severity, scope: '', detail: clip(f.title), fileRefs: f.fileRefs })),
+    ...(report?.problems ?? []).map(p => ({ id: 'CONTRACT', status: 'BLOCKED', scope: '', detail: clip(p), fileRefs: [] })),
+  ].slice(0, 30);
+}
+
+function formatOpenItems(items) {
+  return Array.isArray(items) && items.length
+    ? items.map(i => `- ${i.id} ${i.status}${i.scope ? ` (${i.scope})` : ''}: ${i.detail}${i.fileRefs?.length ? ` [${i.fileRefs.slice(0, 5).join(', ')}]` : ''}`).join('\n')
+    : '- Not captured: take the non-PASS items from the QA report.';
 }
 
 /** Calculate a fail-closed result. The tool cannot prove the model's evidence is genuine. */

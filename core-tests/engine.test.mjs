@@ -279,6 +279,38 @@ test('QA status controls delivery without inferring PASS from phase', () => {
   assert.throws(() => assertDeliverySubmittable(failed), /PASS QA gate/);
 });
 
+test('QA FAIL rework prompt lists only the non-PASS items and revises the previous plan', () => {
+  const base = {
+    active: true, phase: 'QA', approved: true, planValid: true, requirement: 'Build bookings', slug: 'bookings',
+    approvedPlanHash: 'approved-hash', planPath: 'local://forge-plan.md', reworkCycles: 0,
+  };
+  const report = {
+    status: 'FAIL',
+    topics: [{ id: 'BIZ-001', tests: [
+      { testId: 'TC-001', requirementIds: ['REQ-001'], status: 'PASS', actual: 'booking created', fileRefs: [] },
+      { testId: 'TC-002', requirementIds: ['REQ-002'], status: 'FAIL', actual: 'double booking\n accepted', fileRefs: ['src/book.ts'] },
+    ] }],
+    qualityChecks: [{ gateId: 'QG-001', name: 'unit tests', status: 'PASS' }, { gateId: 'QG-002', name: 'typecheck', status: 'FAIL' }],
+    codeReview: { findings: [{ id: 'CR-1', title: 'race on slot lock', severity: 'HIGH', fileRefs: ['src/lock.ts'] }, { id: 'CR-2', title: 'naming', severity: 'LOW', fileRefs: [] }] },
+    problems: [],
+  };
+  const rework = JSON.parse(JSON.stringify(qaReportTransition(base, report, { reportPath: '/data/qa.md' })));
+  const instruction = phaseInstruction(rework);
+  assert.match(instruction, /Fix scope \(non-PASS items from the QA report; fix only these\):\n- TC-002 FAIL \(BIZ-001,REQ-002\): double booking accepted \[src\/book\.ts\]\n- QG-002 FAIL: typecheck\n- CR-1 HIGH: race on slot lock \[src\/lock\.ts\]\n\n/);
+  assert.doesNotMatch(instruction, /TC-001 PASS|QG-001 PASS|CR-2/);
+  assert.match(instruction, /targeted lookup only/);
+  assert.match(instruction, /from the previous approved plan's full text, not from scratch/);
+  assert.equal(qaReportTransition(base, { ...report, status: 'PASS' }).qaOpenItems, null);
+
+  const fixing = approvedExecutionState({ ...rework, approvedPlanHash: 'fix-hash', planPath: 'local://bookings-rework-1-plan.md', planWritten: true, planValid: true });
+  const execution = phaseInstruction(fixing);
+  assert.match(execution, /one item per remediation step/);
+  assert.match(execution, /QA REWORK cycle #1: [^\n]*Implement only the remediation steps[\s\S]*- TC-002 FAIL \(BIZ-001,REQ-002\): double booking accepted \[src\/book\.ts\]/);
+  const firstRun = phaseInstruction({ ...base, phase: 'EXECUTE' });
+  assert.match(firstRun, /one item per plan step/);
+  assert.doesNotMatch(firstRun, /QA REWORK/);
+});
+
 
 test('guards: git writes, publish MCP, .git, research agents, reviewer only in QA, specialist read-only', async () => {
   const x = harness(); x.cmd('Build a booking system');

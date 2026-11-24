@@ -1,5 +1,5 @@
 /** Platform-neutral, pure Forge state transitions shared by every adapter. */
-import { requiredAgentsFor, missingGateAgentsFor, agentNameFor, latestHighFindings } from './core.mjs';
+import { requiredAgentsFor, missingGateAgentsFor, agentNameFor, latestHighFindings, qaOpenItems } from './core.mjs';
 
 export function hasGateAgents(state, phase = state?.phase) {
   if (!state) return false;
@@ -43,6 +43,7 @@ export function qaReportTransition(state, report, { reportPath, workingTree = nu
     qaStatus: report.status,
     qaEvidencePending: evidencePending,
     qaReportPath: reportPath,
+    qaOpenItems: report.status === 'PASS' ? null : qaOpenItems(report),
     workingTreeAtQa: workingTree,
     reworkCycles: failed ? (state.reworkCycles ?? 0) + 1 : (state.reworkCycles ?? 0),
     ...(failed ? { reworkReason: 'QA_FAIL', reworkNotes: null } : {}),

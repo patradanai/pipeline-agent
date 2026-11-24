@@ -13,6 +13,7 @@ function allRenderings() {
     ['PLAN:written', phaseInstruction({ ...s, planWritten: true, planValid: false, planPath: 'local://forge-abc-plan.md' })],
     ['AWAITING', phaseInstruction({ ...s, planWritten: true, planValid: true, approved: false })],
     ['EXEC', executionInstruction({ ...s, phase: 'EXECUTE' })],
+    ['EXEC:qa-rework', executionInstruction({ ...s, phase: 'EXECUTE', reworkCycles: 1, reworkReason: 'QA_FAIL', qaOpenItems: [{ id: 'TC-002', status: 'FAIL', scope: 'BIZ-001,REQ-002', detail: 'double booking', fileRefs: ['src/book.ts'] }] })],
     ['QA', qaInstruction({ ...s, phase: 'QA' })],
     ['REWORK', reworkInstruction({ ...s, phase: 'PLAN', qaStatus: 'FAIL', reworkCycles: 1, reworkBaseHash: 'h', reworkBasePlanPath: 'local://forge-abc-plan.md' })],
     ['REWORK:steering', reworkInstruction({ ...s, phase: 'PLAN', reworkReason: 'STEERING', reworkCycles: 1, reworkBaseHash: 'h', reworkBasePlanPath: 'local://forge-abc-plan.md', requirementSteering: steering })],
