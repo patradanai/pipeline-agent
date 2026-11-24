@@ -11,6 +11,7 @@ const CC_PLAN_SUBMIT = 'Claude Code submission: make sure the session is in plan
 
 // Order matters: span rules run before the generic local:// and tool-name rules.
 const CLAUDE_CODE_RULES = [
+  [/\nHashline edit: [^\n]*/g, ''],
   [/Forge runs its own plan mode: a read-only safety boundary holds until the human approves the plan in Forge's approval dialog\./g,
     'Forge enforces a read-only safety boundary until the human approves the plan through Claude Code\'s native plan approval.'],
   [/\[OMP FORGE/g, '[FORGE'],
@@ -53,4 +54,4 @@ export function adaptInstruction(text, platform = 'omp') {
 }
 
 /** OMP-only concepts that must never appear in another platform's instructions. */
-export const OMP_ONLY_PATTERN = /local:\/\/|xd:\/\/|\bOMP\b|native task|native ask tool|forge_plan_propose|`scout`/;
+export const OMP_ONLY_PATTERN = /local:\/\/|xd:\/\/|\bOMP\b|native task|native ask tool|forge_plan_propose|`scout`|Hashline edit:/;
