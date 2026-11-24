@@ -1,4 +1,14 @@
 export const PLAN = `# Plan
+## Context
+Users create bookings and managers approve them.
+## Approach
+1. Add createBooking and approveBooking in booking.ts (REQ-001, REQ-002).
+- Open decisions: none
+- Migration & rollback: not applicable — no data or API change
+## Verification
+- node test: TC-001 and TC-002 pass
+## Assumptions & contingencies
+- none
 ## Business Topics
 - BIZ-001: Booking
 - BIZ-002: Approval
@@ -11,8 +21,6 @@ export const PLAN = `# Plan
 ## Code Quality Gates
 - QG-001: Unit tests
 - QG-002: Lint
-## Requirement & Gap Analysis
-- none
 `;
 export const SUBMISSION = {
   topicResults:[

@@ -1,5 +1,5 @@
 ---
-description: Forge · start a gated workflow (requirement → plan → approval → execute → QA → delivery). Shortcuts: /forge-status, /forge-approve, /forge-qa …
+description: Forge · start a gated workflow (plan → approval → execute → QA → delivery). Shortcuts: /forge-status, /forge-approve, /forge-qa …
 argument-hint: <requirement>
 disable-model-invocation: true
 ---

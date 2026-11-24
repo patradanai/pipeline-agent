@@ -10,7 +10,7 @@ const fakeZ = new Proxy({}, { get:()=> (..._args)=>({ optional(){return this;} }
 const tmp = mkdtempSync(join(tmpdir(), 'forge-session-picker-'));
 const agentDir = join(tmp, 'agents'); mkdirSync(agentDir, {recursive:true});
 process.env.PI_CODING_AGENT_DIR = tmp;
-for (const name of ['forge-requirement-gate','forge-plan-gate','forge-execute-gate','forge-qa-gate']) {
+for (const name of ['forge-plan-gate','forge-execute-gate','forge-qa-gate']) {
   const dir = join(tmp, 'skills', name);
   mkdirSync(dir, {recursive:true});
   copyFileSync(new URL(`../skills/${name}/SKILL.md`, import.meta.url), join(dir, 'SKILL.md'));
@@ -89,7 +89,7 @@ test('/forge resume offers past Forge session, switches natively and continues w
   assert.equal(calls[1][0],'switch');
   assert.equal(calls[1][1],savedPath);
   assert.equal(calls[2][0],'message');
-  assert.match(calls[2][1],/PLANNING/);
+  assert.match(calls[2][1],/\[GATE 1\/3: PLAN — Forge plan mode\]/);
   assert.equal(branch.at(-1).data.phase,'PLAN');
   assert.equal(branch.at(-1).data.approved,false);
 });
@@ -135,17 +135,17 @@ test('/forge resume offers all-projects search and restores blocked plan without
 });
 
 
-test('checkpoint matcher rejects a stale EXECUTING preview if OMP selected branch restored REQUIREMENT auto',()=>{
+test('checkpoint matcher rejects a stale EXECUTING preview if OMP selected branch restored PLAN auto',()=>{
   const executing={active:true,phase:'EXECUTING',requirement:'Add cart validation',slug:'forge-work',approved:true,approvedPlanHash:'sha1'};
-  const wrong={active:true,phase:'REQUIREMENT',requirement:'auto',slug:'forge-other',approved:false};
+  const wrong={active:true,phase:'PLAN',requirement:'auto',slug:'forge-other',approved:false};
   assert.equal(sameResumeCheckpoint(executing,wrong),false);
   assert.equal(sameResumeCheckpoint(executing,{...executing}),true);
   assert.equal(sameResumeCheckpoint(executing,{...executing,approvedPlanHash:'sha2'}),false);
 });
 
-test('/forge resume recovers selected EXECUTING workflow while another REQUIREMENT auto is active',async()=>{
+test('/forge resume recovers selected EXECUTING workflow while another PLAN auto is active',async()=>{
   const executing={active:true,phase:'EXECUTE',requirement:'Add cart validation',slug:'forge-cart',approved:true,planValid:true,approvedPlanHash:'approved-hash',executionObserved:false};
-  const wrong={active:true,phase:'REQUIREMENT',requirement:'auto',slug:'forge-auto',approved:false};
+  const wrong={active:true,phase:'PLAN',requirement:'auto',slug:'forge-auto',approved:false};
   const file=session('execution-saved',[executing]);
   const calls=[]; const notifications=[]; const commands=new Map(); const events=new Map();
   let currentFile='/current.jsonl';let branch=[{type:'custom',customType:FORGE_STATE_ENTRY,data:wrong}];
@@ -176,7 +176,7 @@ test('/forge resume recovers selected EXECUTING workflow while another REQUIREME
 
 test('/forge resume refuses mismatch between picked file and OMP selected branch, with no execution',async()=>{
   const executing={active:true,phase:'EXECUTING',requirement:'Build billing',slug:'forge-billing',approved:true};
-  const wrong={active:true,phase:'REQUIREMENT',requirement:'auto',slug:'forge-auto',approved:false};
+  const wrong={active:true,phase:'PLAN',requirement:'auto',slug:'forge-auto',approved:false};
   const file=session('branch-drift',[executing]);
   const notifications=[]; const commands=new Map(); const events=new Map(); const sent=[];
   let branch=[];let currentFile='/current.jsonl';
@@ -190,7 +190,7 @@ test('/forge resume refuses mismatch between picked file and OMP selected branch
   assert.equal(sent.length,0);
 });
 
-test('bare /forge auto is help, never starts REQUIREMENT auto',async()=>{
+test('bare /forge auto is help, never starts PLAN auto',async()=>{
   const commands=new Map();const sent=[];const notifications=[];
   const pi={zod:fakeZ,setLabel(){},on(){},registerCommand(n,c){commands.set(n,c)},registerTool(){},appendEntry(){},sendUserMessage(x){sent.push(x)}};
   forgeExtension(pi);
@@ -202,7 +202,7 @@ test('bare /forge auto is help, never starts REQUIREMENT auto',async()=>{
 
 
 test('resume picker lets user choose current rather than silently using current requirement',async()=>{
-  const activeCurrent={active:true,phase:'REQUIREMENT',requirement:'auto',slug:'forge-auto'};
+  const activeCurrent={active:true,phase:'PLAN',requirement:'auto',slug:'forge-auto'};
   const commands=new Map();const events=new Map();const notices=[];let switches=0;
   class Manager {static async listForPicker(){return []};getBranch(){return [{type:'custom',customType:FORGE_STATE_ENTRY,data:activeCurrent}]};getSessionFile(){return '/current.jsonl'};getSessionDir(){return tmp}}
   const pi={zod:fakeZ,setLabel(){},on(n,f){events.set(n,f)},registerCommand(n,c){commands.set(n,c)},registerTool(){},appendEntry(){},sendUserMessage(){}};

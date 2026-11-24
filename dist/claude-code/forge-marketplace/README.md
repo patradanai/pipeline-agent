@@ -1,6 +1,6 @@
 # Forge
 
-**A human-approved, evidence-driven workflow for AI coding agents.** Forge turns a coding request into a requirement analysis, an auditable plan, an explicit human approval, implementation, independent QA, and a copy-ready delivery report.
+**A human-approved, evidence-driven workflow for AI coding agents.** Forge turns a coding request into an auditable plan, explicit human approval, implementation, independent code review with evidence-based QA, and a copy-ready delivery report.
 
 [English](README.md) · [ภาษาไทย](README_TH.md) · [User guide](docs/USER_GUIDE.md) · [Custom skills](docs/CUSTOM_SKILLS.md) · [Installation](docs/INSTALL.md) · [Security notes](docs/SECURITY.md)
 
@@ -13,7 +13,7 @@ Forge currently supports **Oh My Pi (OMP)** as an extension and **Claude Code** 
 - **Approval before implementation.** The coding agent cannot approve its own plan. A human reviews and approves the plan before execution.
 - **Traceable requirements and tests.** Plans map business topics, requirements, test cases, and quality gates (`BIZ`, `REQ`, `TC`, `QG`).
 - **Independent QA.** QA checks the approved plan against observed evidence. A test that did not run is not reported as passing.
-- **Rework requires fresh approval.** QA failures and approved scope changes return to planning; execution cannot reuse a superseded approval.
+- **Rework requires your decision and fresh approval.** After QA FAIL/BLOCKED, Forge waits for you to choose a fix; the rework plan then needs a new approval. Execution cannot reuse a superseded approval.
 - **Manual Git publishing.** Forge does not stage, commit, push, merge, or publish changes for you.
 
 ![Forge agent responsibilities](docs/images/agents-public.svg)
@@ -22,14 +22,17 @@ Forge currently supports **Oh My Pi (OMP)** as an extension and **Claude Code** 
 
 | Stage | What happens |
 |---|---|
-| Requirement | `forge-requirement` analyzes goals, scope, gaps, risks, architecture, and QA strategy in one pass. The main agent reviews its report. |
-| Plan | `forge-planner` prepares an implementation plan with traceable BIZ/REQ/TC/QG coverage. |
-| Approval | You inspect and approve the plan in the host's native approval UI. No approval is inferred. |
-| Execute | `forge-executor` implements the approved plan. It has no shell access. |
-| QA | `forge-qa` and `forge-code-reviewer` independently review evidence and code. QA is read-only. |
-| Delivery | After QA passes, `forge-delivery` prepares rollout notes and a commit message for you to review and copy. |
+| Plan | The main agent explores the code itself (with parallel read-only research subagents), asks only real preference questions, and writes a plan with traceable BIZ/REQ/TC/QG coverage. The working tree stays read-only. |
+| Approval | You inspect and approve the plan in Forge's approval dialog (OMP) or Claude Code's native plan prompt. No approval is inferred. |
+| Execute | The main agent implements the approved plan step by step and may delegate slices to subagents. |
+| QA | The main agent runs the plan's checks and verifies every test case while `forge-code-reviewer` independently reviews the diff. Every CRITICAL/HIGH reviewer finding must appear in the QA submission, either kept at CRITICAL/HIGH (gate FAILs) or marked `Disputed:` with counter-evidence. QA is read-only. |
+| Delivery | After QA passes, the main agent prepares rollout notes and a commit message for you to review and copy. |
 
-If QA fails, Forge returns to planning and requires a new approval. If evidence is missing, QA stays blocked until you collect evidence or explicitly request rework.
+After every QA submission, Forge shows a QA summary: a header (`Forge QA ✅ PASS / ❌ FAIL / ⚠️ BLOCKED`) with counts and the report path, one row per test case (✅ ❌ ⚠️ ⏸️), a quality-gate table, code-review findings (🔴 CRITICAL 🟠 HIGH 🟡 MEDIUM ⚪ LOW) and gate blockers. OMP shows it in the TUI; in Claude Code the agent prints it verbatim.
+
+QA FAIL or BLOCKED does not start a fix on its own; the footer shows `QA failed · your decision` / `QA blocked · your decision`. In OMP a dialog opens: plan the fix, plan the fix with your notes, rerun QA (BLOCKED only), or not now (keeps the report; `/forge review` reopens it). In Claude Code, run `/forge-rework`, `/forge-qa` (BLOCKED) or `/forge-off`. A rework plan still needs normal plan approval before any code changes.
+
+The plan must contain `## Context`, `## Approach`, `## Verification`, `## Assumptions & contingencies` and the BIZ/REQ/TC/QG sections. `## Approach` must include an `Open decisions:` line (`none`, or one sub-bullet per decision with `default: …`; a `BLOCKER` item is rejected until the user is asked) and a `Migration & rollback:` line (steps, or `not applicable — <reason>`). Forge rejects a proposal that misses any of these.
 
 ## Custom skills (OMP)
 
@@ -53,7 +56,7 @@ Create it and attach it to planning with `/forge skill create planning`, or plac
 /forge skills
 ```
 
-Skills are pinned for each new workflow and included in that gate's specialist tasks. They cannot override approval, read-only, or no-Git rules. Create, add, remove, or reset bindings only when no Forge workflow is active. See the [custom skills guide](docs/CUSTOM_SKILLS.md) for validation limits and commands.
+Skills are pinned for each new workflow and included in the main agent's gate instructions and required specialist tasks. They cannot override approval, read-only, or no-Git rules. Create, add, remove, or reset bindings only when no Forge workflow is active. See the [custom skills guide](docs/CUSTOM_SKILLS.md) for validation limits and commands.
 
 ![Custom skill lifecycle](docs/images/custom-skill-flow.svg)
 
@@ -98,6 +101,8 @@ From the repository root, build the local plugin package with `npm run build`, t
 
 Restart Claude Code, then start with `/forge <requirement>`. See the [Claude Code guide](PLUGIN.md).
 
+To update an existing local installation, rebuild and replace the marketplace folder you originally registered with the new `dist/claude-code/forge-marketplace` folder. Back up the old folder first; do not overlay it, because removed agents and commands would remain. Then run `claude plugin update forge@forge-local --scope user` and restart Claude Code. Check `/agents` for `forge:forge-code-reviewer` and `forge:forge-plan-critic`.
+
 More detailed update, custom data-directory, and uninstall steps: [Installation guide](docs/INSTALL.md).
 
 ## Example
@@ -106,9 +111,9 @@ More detailed update, custom data-directory, and uninstall steps: [Installation 
 /forge Add CSV export to the booking service. Include authorization checks, tests, and a rollback plan.
 ```
 
-Review the requirement summary, then review the generated plan. **Approve only after the plan matches your intent.** Forge implements after approval, runs independent QA, and prepares a delivery summary if QA passes.
+Review the generated plan. **Approve only after the plan matches your intent.** Forge implements after approval, runs independent QA, and prepares a delivery summary if QA passes.
 
-In OMP, a plain prompt typed while a workflow is active opens a **Steer / Cancel** dialog. Steer applies the prompt to the requirement and returns to the relevant gate; after execution approval, it revokes approval and requires a revised, newly approved plan. Cancel leaves the workflow unchanged and returns the prompt to the editor. This prompt-steering dialog is currently OMP-specific.
+In OMP, a plain prompt typed while a workflow is active opens a **Steer / Cancel** dialog. Steer applies the prompt to the requirement and re-enters planning; after execution approval, it revokes approval and requires a revised, newly approved plan. Cancel leaves the workflow unchanged and returns the prompt to the editor. This prompt-steering dialog is currently OMP-specific.
 
 ![OMP steering confirmation](docs/images/steering-confirmation.svg)
 
@@ -116,12 +121,10 @@ In OMP, a plain prompt typed while a workflow is active opens a **Steer / Cancel
 
 | Agent | Responsibility | Access |
 |---|---|---|
-| `forge-requirement` | Requirement analysis, gaps, risks, architecture, QA strategy, self-challenge | Read-only |
-| `forge-planner` | Implementation plan and test traceability | Read-only |
-| `forge-executor` | Implement the approved plan | Can edit files; no shell |
-| `forge-qa` | Verify planned business tests and evidence | Read-only |
-| `forge-code-reviewer` | Independent code and security review | Read-only |
-| `forge-delivery` | Delivery, rollout/rollback notes, and commit-message draft | Read-only |
+| `forge-code-reviewer` | Independent, diff-scoped code and security review during QA (`CR-001 [HIGH] file:line — evidence — fix`) | Read-only |
+| `forge-plan-critic` | Optional plan critique before proposal, when plan review is ON (`PC-001 [HIGH] …`) | Read-only |
+
+Planning, execution, QA verification and delivery are done by the main agent. Read-only research subagents (`scout` in OMP, `Explore` in Claude Code) may help during planning.
 
 ## Commands
 
@@ -131,15 +134,16 @@ OMP commands use `/forge <subcommand>`; Claude Code also exposes dedicated `/for
 |---|---|---|
 | Start | `/forge <requirement>` | `/forge <requirement>` |
 | Status | `/forge status` | `/forge-status` or `/forge status` |
-| Review a plan | `/forge review` | Native plan approval |
+| Review a plan / reopen QA decision | `/forge review` | Native plan approval |
 | Retry QA | `/forge qa` | `/forge-qa` |
-| Rework after QA FAIL/BLOCKED | `/forge rework` | `/forge-rework` |
+| Plan a fix after QA FAIL/BLOCKED | `/forge rework` | `/forge-rework` |
 | Delivery/report | `/forge delivery`, `/forge report` | `/forge-delivery`, `/forge-report` |
 | Resume/recover | `/forge resume`, `/forge recover` | `/forge-resume` |
 | Cancel workflow | `/forge off` | `/forge-off` |
+| Optional plan critic (new workflows) | `/forge planreview on\|off` | `/forge-planreview on\|off` |
 | Custom skills | `/forge skill`, `/forge skills`, `/forge skill list` | Not available |
 
-OMP also supports `/forge agents` and custom gate skills; Claude Code does not currently expose this skill manager. For all commands and phase behavior, see the [user guide](docs/USER_GUIDE.md).
+OMP also supports `/forge agents` and custom gate skills; Claude Code does not currently expose this skill manager. Plan review is OFF by default; when ON, the main agent must run `forge-plan-critic` once on the written plan and cite every CRITICAL/HIGH PC-id in the plan before Forge accepts the proposal. `/forge status` shows `plan review: ON/OFF`. For all commands and phase behavior, see the [user guide](docs/USER_GUIDE.md).
 
 ## Model profiles and cost
 

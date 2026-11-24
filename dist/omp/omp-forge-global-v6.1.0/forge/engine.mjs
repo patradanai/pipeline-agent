@@ -21,7 +21,7 @@
  * Gate instructions produced at that moment are queued in state.pendingContext
  * and delivered on the next main-agent event.
  * Canonical tools: read grep glob ls web ask todo coord agent bash write edit
- *   plan.enter plan.write (host plan-mode plan file, never a project file) plan.submit forge.requirement_summary forge.qa_scope
+ *   plan.enter plan.write (host plan-mode plan file, never a project file) plan.submit forge.qa_scope
  *   forge.qa_submit forge.delivery_submit other
  *
  * out = { decision?:'deny', reason?, context?, continueReason?, message?, configUpdate? }
@@ -31,15 +31,15 @@
  *   message         → text for the human
  */
 import {
-  parseCommand, initialState, phaseInstruction, requirementSummaryInstruction, executionInstruction, qaInstruction,
+  parseCommand, initialState, phaseInstruction, executionInstruction, qaInstruction,
   reworkInstruction, deliveryInstruction, requiredAgentsFor, missingGateAgentsFor, validatePlanContract,
-  evaluateQaReport, renderQaReport, buildCommitMessage, renderDeliveryReport, isProhibitedGitCommand,
-  isAllowedDiscoveryCommand, isAllowedQaCommand, countReportedSeverities, GATE_AGENTS,
+  evaluateQaReport, renderQaReport, renderQaSummary, buildCommitMessage, renderDeliveryReport, isProhibitedGitCommand,
+  isAllowedDiscoveryCommand, isAllowedQaCommand, extractHighFindings, GATE_AGENTS,
 } from './core.mjs';
 import { recoveryProposal } from './state-recovery.mjs';
 import {
-  hasGateAgents, markGateAgent, approvedExecutionState, qaReportTransition, assertQaSubmittable,
-  assertDeliverySubmittable, deliveryTransition, reworkTransition, applyRequirementSummary,
+  markGateAgent, approvedExecutionState, qaReportTransition, assertQaSubmittable,
+  assertDeliverySubmittable, deliveryTransition, approveReworkTransition, assertPlanProposable,
 } from './transitions.mjs';
 import { adaptInstruction } from './platform.mjs';
 import { isValidRestoreCandidate, prepareHumanRecovery } from './checkpoint-recovery.mjs';
@@ -47,7 +47,7 @@ import { normalizeForgeState } from './forge-state.mjs';
 
 const READ_ONLY = new Set(['read', 'grep', 'glob', 'ls', 'web', 'ask', 'todo', 'coord']);
 const MAX_HANDBACK = 20000;
-const PRE_APPROVAL = new Set(['REQUIREMENT', 'PLAN']);
+const PRE_APPROVAL = new Set(['PLAN']);
 const QA_PHASES = new Set(['QA']);
 const FORGE_AGENTS = new Set(Object.values(GATE_AGENTS).flat());
 const PUBLISH_TOOL = /(?:github|gitlab|bitbucket)/i;
@@ -55,7 +55,7 @@ const PUBLISH_ACTION = /(?:commit|push|merge|create[_-]?pull|update[_-]?file|cre
 const MAX_STOP_NUDGES = 2;
 const RUNNING_TTL_MS = 30 * 60 * 1000; // a run with no SubagentStop (e.g. interrupted) stops blocking after 30 min
 
-/** "forge:forge-planner" (plugin-scoped) and "forge-planner" are the same agent. */
+/** "forge:forge-code-reviewer" (plugin-scoped) and "forge-code-reviewer" are the same agent. */
 export function normalizeAgentName(value) {
   const s = String(value ?? '').trim();
   return s.includes(':') ? s.slice(s.lastIndexOf(':') + 1) : s;
@@ -91,6 +91,10 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
     switch (command.type) {
       case 'start': return start(state, command);
       case 'status': return keep(state, { message: statusLine(state) });
+      case 'planReview': {
+        if (command.enabled === null) return keep(state, { message: `Forge plan review is ${config.planReview ? 'ON' : 'OFF'} for new workflows. Usage: /forge planreview on|off (on: ${agentRef('forge-plan-critic')} reviews every plan before approval).` });
+        return keep(state, { configUpdate: { planReview: command.enabled }, message: `Forge plan review ${command.enabled ? 'ON' : 'OFF'} for new workflows${state?.active ? '; the running workflow keeps its setting' : ''}.` });
+      }
       case 'cancel': {
         const cancelledSlug = state?.slug;
         return keep({ active: false, version: 9, ...(cancelledSlug ? { cancelledSlug } : {}) }, { message: 'Forge workflow cancelled. No files or Git state were changed.' });
@@ -99,12 +103,12 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
         if (!state?.approved || !state.planValid || !['EXECUTE', 'QA'].includes(state.phase)) {
           return keep(state, { message: 'No approved execution is available for QA.' });
         }
-        const next = { ...state, active: true, phase: 'QA', qaStatus: null, qaRetries: 0, qaEvidencePending: false, gateAgents: { ...(state.gateAgents ?? {}), QA: [] } };
+        const next = { ...state, active: true, phase: 'QA', qaStatus: null, qaRetries: 0, qaEvidencePending: false, reworkDecisionPending: false, gateAgents: { ...(state.gateAgents ?? {}), QA: [] } };
         return keep(next, { context: say(qaInstruction(next)), message: 'Forge QA review started.' });
       }
       case 'rework': {
         if (!state || !['FAIL', 'BLOCKED'].includes(state.qaStatus) || !['QA', 'PLAN'].includes(state.phase)) return keep(state, { message: 'Rework requires a previous QA FAIL/BLOCKED.' });
-        const next = state.phase === 'PLAN' ? state : reworkTransition(state);
+        const next = approveReworkTransition(state);
         return keep(next, { context: say(reworkInstruction(next)), message: 'Forge rework planning started. A new native plan approval is required.' });
       }
       case 'delivery': {
@@ -118,7 +122,7 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
       case 'report': return keep(state, { message: state?.qaReportPath ? `Last QA report: ${state.qaReportPath}` : 'No Forge QA report in this session yet.' });
       case 'agents': return keep(state, { message: `Forge agents (manage models/prompts with /agents):\n${[...FORGE_AGENTS].map(a => `  ${agentRef(a)}`).join('\n')}` });
       default:
-        return keep(state, { message: `"/forge ${raw.split(/\s+/)[0]}" is not available in the ${platform} adapter. Available: <requirement>, status, resume [n], trace [on|off], approve, plan, qa, rework, delivery, report, agents, off.` });
+        return keep(state, { message: `"/forge ${raw.split(/\s+/)[0]}" is not available in the ${platform} adapter. Available: <requirement>, status, resume [n], trace [on|off], planreview [on|off], approve, plan, qa, rework, delivery, report, agents, off.` });
     }
   }
 
@@ -126,8 +130,8 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
     if (state?.active) return keep(state, { message: `A Forge workflow is active (${state.phase}). Steer it, or use /forge off.` });
     const requirement = String(command.requirement ?? '').trim();
     if (!requirement) return keep(state, { message: 'Usage: /forge <requirement>' });
-    const next = initialState(requirement);
-    return keep(next, { context: say(phaseInstruction(next)), message: 'Forge started. Gates: requirement (one forge-requirement pass) → plan → native approval → execute → QA → delivery. Forge never runs git writes.' });
+    const next = initialState(requirement, undefined, null, null, {}, { planReview: config.planReview === true });
+    return keep(next, { context: say(phaseInstruction(next)), message: 'Forge started. Gates: plan (you explore and write the plan, read-only) → native approval → execute → QA (+ forge-code-reviewer) → delivery. Forge never runs git writes.' });
   }
 
   /** List Forge workflows saved by other sessions of this project, or adopt one.
@@ -201,12 +205,7 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
       return deny(state, `Forge state conflict: ${conflict.explanation} Run /forge status and /forge off or rework.`);
     }
 
-    if (isForgeChild) {
-      const executor = agentName === 'forge-executor';
-      if (!executor && ['write', 'edit', 'bash'].includes(tool)) return deny(state, 'Forge specialist is read-only. Only forge-executor may edit approved code; no Git writes.');
-      if (executor && tool === 'bash') return deny(state, 'forge-executor has no shell. The main orchestrator runs safe build/test commands.');
-      if (executor && ['write', 'edit'].includes(tool) && (state.phase !== 'EXECUTE' || !state.approved)) return deny(state, `Forge ${state.phase}: implementation writes require the approved EXECUTE gate.`);
-    }
+    if (isForgeChild && ['write', 'edit', 'bash'].includes(tool)) return deny(state, 'Forge specialist is read-only: it reviews and reports; no edits, shell or Git writes.');
 
     // A subagent handing its report back through a host coordination tool.
     if (tool === 'coord' && actor.kind === 'sub' && actor.agentId && /handback/i.test(ev.rawTool ?? '')) {
@@ -218,6 +217,9 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
     let s = state;
     if (s.phase === 'EXECUTE' && s.approved && !s.executionObserved && actor.kind === 'main') s = { ...s, executionObserved: true };
 
+    if (s.reworkDecisionPending && ['plan.write', 'plan.submit', 'forge.qa_submit'].includes(tool)) {
+      return deny(s, `Forge: QA ${s.qaStatus} is waiting for the user's decision. Show the QA summary table and stop; the user runs /forge-rework to plan a fix${s.qaStatus === 'BLOCKED' ? ' or /forge-qa to rerun QA' : ''}.`);
+    }
     if (tool === 'plan.write') {
       if (!PRE_APPROVAL.has(s.phase)) return deny(s, `Forge ${s.phase}: the plan file can be edited only before approval.`);
       return keep({ ...s, planDraftPath: ev.planFile ?? s.planDraftPath ?? null,
@@ -225,10 +227,6 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
     }
     if (tool === 'agent') return routeAgent(s, input);
     if (tool === 'plan.submit') return preSubmitPlan(s, ev);
-    if (tool === 'forge.requirement_summary') {
-      try { applyRequirementSummary(s, input); } catch (err) { return deny(s, `Forge requirement summary rejected: ${err.message}`); }
-      return keep(s);
-    }
     if (tool === 'forge.qa_scope') {
       if (!s.approved || !QA_PHASES.has(s.phase)) return deny(s, 'QA scope is only available for an approved execution under review.');
       return keep(s);
@@ -260,8 +258,7 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
       return deny(s, `Forge ${s.phase} permits only safe read-only inspection commands before approval.`);
     }
     if (tool === 'write' || tool === 'edit') {
-      const pending = s.phase === 'REQUIREMENT' ? ` Finish the requirement analysis: ${missingGateAgentsFor(s).map(agentRef).join(', ') || `call ${toolRef('forge_requirement_summary')}`}.` : '';
-      return deny(s, `Forge ${s.phase} is read-only: implementation writes require explicit native plan approval.${pending}`);
+      return deny(s, `Forge ${s.phase} is read-only: implementation writes require explicit native plan approval.`);
     }
     return deny(s, `Forge ${s.phase}: ${tool === 'other' ? 'this tool' : tool} cannot run before native approval. Use Read/Grep/Glob, the Agent tool and AskUserQuestion.`);
   }
@@ -297,10 +294,6 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
     if (s.phase !== 'PLAN') {
       return deny(s, `Forge ${s.phase}: a plan can be submitted only during planning.`);
     }
-    const plannerGate = s;
-    if (!hasGateAgents(plannerGate)) {
-      return deny(s, `Run ${requiredAgentsFor(plannerGate).map(agentRef).join(', ')} through the Agent tool and await its report before submitting the plan.`);
-    }
     if (ev.permissionMode && ev.permissionMode !== 'plan') {
       return deny(s, 'Native plan approval requires plan mode. Call EnterPlanMode (or ask the user to press Shift+Tab until plan mode is shown), then call ExitPlanMode again.');
     }
@@ -314,6 +307,8 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
     if (!contract.valid) {
       return deny({ ...s, planIssues: contract.issues, planValid: false }, `Forge plan contract is invalid. Fix before approval:\n${contract.issues.join('\n')}`);
     }
+    try { assertPlanProposable(s, content); }
+    catch (err) { return deny({ ...s, planValid: false }, `Forge plan review: ${err.message}`); }
     const planPath = deps.savePlan ? deps.savePlan(s, content) : s.planPath;
     const next = {
       ...s, phase: 'PLAN', planWritten: true, planValid: true, approvedPlanHash: contract.hash,
@@ -334,13 +329,6 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
     const { tool, input = {} } = ev;
     if (tool === 'agent') return keep(state); // completion is counted on agent.stop (works for background agents)
     if (tool === 'plan.submit') return planApproved(state, ev);
-    if (tool === 'forge.requirement_summary') {
-      let applied;
-      try { applied = applyRequirementSummary(state, input); } catch (err) { return keep(state, { context: `Forge requirement summary rejected: ${err.message}` }); }
-      const next = applied.state;
-      const head = `Forge: requirement summary recorded (${applied.summarizedHigh} CRITICAL/HIGH, ${applied.summary.blockers.length} open blocker(s)) → PLAN.`;
-      return keep(next, { context: `${head}\n\n${say(phaseInstruction(next))}` });
-    }
     if (tool === 'forge.qa_scope') {
       const scope = deps.inspectWorkspaceScope ? deps.inspectWorkspaceScope(ev.cwd) : { available: false, files: [] };
       return keep(state, { context: `Forge QA scope (read-only git inventory):\n${JSON.stringify(scope, null, 2)}` });
@@ -379,23 +367,17 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
     }
     const handbacks = { ...(state.handbacks ?? {}) }; if (ev.agentId) delete handbacks[ev.agentId];
     let s = markGateAgent({ ...state, handbacks }, name);
-    s = { ...s, agentCompletions: [...(s.agentCompletions ?? []), { gate: key, agent: name, reportedAt: new Date().toISOString(), resultPreview: text.slice(0, 800), reportedSeverities: countReportedSeverities(text) }].slice(-60) };
+    s = { ...s, agentCompletions: [...(s.agentCompletions ?? []), { gate: key, agent: name, reportedAt: new Date().toISOString(), resultPreview: text.slice(0, 800), highFindings: extractHighFindings(text) }].slice(-60) };
     const missing = missingGateAgentsFor(s);
     if (missing.length) return keep(queue(s, `Forge: ${agentRef(name)} reported for ${key}. Still waiting for: ${missing.map(agentRef).join(', ')}. Do not re-run agents that are still working.`));
     const gate = gateTransitionAfterAgents(s);
     return keep(gate.context ? queue(gate.state, gate.context) : gate.state);
   }
 
-  /** All required specialists of the current gate reported: advance or instruct. */
+  /** All required specialists of the current gate reported: instruct the main agent. */
   function gateTransitionAfterAgents(s) {
-    if (s.phase === 'REQUIREMENT') {
-      return { state: { ...s, requirementSummaryRequested: true }, context: say(requirementSummaryInstruction(s)) };
-    }
-    if (s.phase === 'PLAN') {
-      return { state: s, context: say('[FORGE PLANNER REPORT RECEIVED]\nCompose the complete plan now (all mandatory contract sections) and submit it with ExitPlanMode while in plan mode. Do not implement.') };
-    }
-    if (s.phase === 'QA' && s.qaStatus !== 'PASS') return { state: s, context: `Forge: both independent QA reports arrived. Run safe checks, then call ${toolRef('forge_qa_submit')} exactly once with evidence-backed results.` };
-    if (s.phase === 'QA' && s.qaStatus === 'PASS') return { state: s, context: `Forge: delivery report arrived. Call ${toolRef('forge_delivery_submit')} once, then print the commit message for the user.` };
+    if (s.phase === 'PLAN') return { state: s, context: `Forge: ${agentRef('forge-plan-critic')} reported. Resolve each CRITICAL/HIGH finding and cite its PC-id in the plan, then submit it with ExitPlanMode.` };
+    if (s.phase === 'QA' && s.qaStatus !== 'PASS') return { state: s, context: `Forge: ${agentRef('forge-code-reviewer')} reported. Merge its findings into codeReview (every CRITICAL/HIGH CR-id at CRITICAL/HIGH or marked "Disputed:"), finish your own TC checks, then call ${toolRef('forge_qa_submit')} exactly once with evidence-backed results.` };
     return { state: s };
   }
 
@@ -421,7 +403,7 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
       state = { ...state, approvedPlanHash: contract.hash, businessTopics: contract.topics, requirements: contract.requirements, testCases: contract.testCases, qualityGates: contract.qualityGates, planPath };
     }
     const next = approvedExecutionState(state, 'native-plan-approval');
-    return keep(next, { context: say(executionInstruction(next)), message: 'Forge: plan approved (native). EXECUTE 3/4.' });
+    return keep(next, { context: say(executionInstruction(next)), message: 'Forge: plan approved (native). EXECUTE 2/3.' });
   }
 
   function qaSubmitted(state, ev) {
@@ -432,11 +414,11 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
     const meta = { slug: state.slug, planPath: state.planPath, approvedPlanHash: state.approvedPlanHash, generatedAt: new Date().toISOString() };
     const reportPath = deps.saveQaReport ? deps.saveQaReport(state, renderQaReport(report, meta), { ...meta, ...report }) : null;
     const next = qaReportTransition(state, report, { reportPath, workingTree });
-    const failures = report.topics.flatMap(t => t.tests.filter(x => x.status !== 'PASS').map(x => `- ${t.id} ${t.name} / ${x.testId}: ${x.status} — ${x.scenario}`));
-    const summary = `Forge QA GATE: ${report.status}\nPASS: ${report.counts.pass}, FAIL: ${report.counts.fail}, BLOCKED: ${report.counts.blocked}, NOT_RUN: ${report.counts.notRun}\nReport: ${reportPath ?? '(not saved)'}${failures.length ? `\nNon-passing:\n${failures.join('\n')}` : ''}${report.problems.length ? `\nGate blockers:\n${report.problems.join('\n')}` : ''}`;
+    const summary = `Forge QA GATE: ${report.status}\n\n${renderQaSummary(report, { reportPath })}`;
+    const decide = 'Show the user the QA summary table above exactly as written, then stop and wait. Do NOT draft a fix plan, edit code or rerun checks:';
     const follow = report.status === 'PASS' ? say(deliveryInstruction(next))
-      : report.status === 'FAIL' ? say(reworkInstruction(next))
-      : 'QA is BLOCKED by missing evidence, not an observed failure. The approved plan is retained. Tell the user to collect the evidence and run /forge qa, or /forge rework if code changes are needed. Do NOT edit code.';
+      : report.status === 'FAIL' ? `${decide} the user decides with /forge-rework (plan a fix; the fix plan needs approval again) or /forge-off.`
+      : `QA is BLOCKED by missing evidence, not an observed failure; the approved plan is retained. ${decide} the user collects the evidence and runs /forge-qa, or runs /forge-rework to plan a fix.`;
     return keep(next, { context: `${summary}\n\n${follow}`, message: `Forge QA: ${report.status}` });
   }
 
@@ -461,22 +443,18 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
     if (state.pendingContext) return keep({ ...state, pendingContext: null }, { continueReason: state.pendingContext });
     const running = Object.entries(state.agentsRunning ?? {}).filter(([k, at]) => k.startsWith(`${state.phase}|`) && Date.now() - Date.parse(at) < RUNNING_TTL_MS);
     if (running.length) return keep(state); // specialists still working (e.g. background): wait, never re-run
+    if (state.reworkDecisionPending) return keep(state); // QA FAIL/BLOCKED: the human decides; never nudge
     const nudge = (key, reason) => {
       const retries = state.agentRetries?.[key] ?? 0;
       if (retries >= MAX_STOP_NUDGES) return keep(state);
       return keep({ ...state, agentRetries: { ...(state.agentRetries ?? {}), [key]: retries + 1 } }, { continueReason: reason });
     };
     if (state.phase === 'EXECUTE' && state.approved && state.executionObserved) {
-      if (!hasGateAgents(state)) return nudge('EXECUTE:stop', say(`Forge: the approved plan must be implemented by ${agentRef('forge-executor')} through the Agent tool. Invoke it now (or report execution blocked). Do not claim completion.`));
       const next = { ...state, phase: 'QA', qaStatus: null, qaRetries: 0, gateAgents: { ...(state.gateAgents ?? {}), QA: [] } };
-      return keep(next, { continueReason: say(qaInstruction(next)), message: 'Forge: execution settled → independent QA 4/5.' });
-    }
-    if (state.phase === 'REQUIREMENT' && hasGateAgents(state)) return nudge('REQUIREMENT:summary', say(requirementSummaryInstruction(state)));
-    if (state.phase === 'REQUIREMENT') {
-      return nudge('REQUIREMENT:stop', say(`Forge REQUIREMENT: ${missingGateAgentsFor(state).map(agentRef).join(', ')} has not reported. Invoke it once through the Agent tool and await its report, or report the gate BLOCKED. Ask the user only for genuine business decisions.`));
+      return keep(next, { continueReason: say(qaInstruction(next)), message: 'Forge: execution settled → QA 3/3.' });
     }
     if (state.phase === 'QA' && state.qaStatus !== 'PASS') return nudge('QA:stop', `Forge QA is incomplete: call ${toolRef('forge_qa_submit')} with evidence-backed results. If checks cannot run, submit BLOCKED/NOT_RUN; never fabricate PASS.`);
-    if (state.phase === 'QA' && state.qaStatus === 'PASS') return nudge('QA:delivery', `Forge delivery is incomplete: run ${agentRef('forge-delivery')} if it has not reported, then call ${toolRef('forge_delivery_submit')}.`);
+    if (state.phase === 'QA' && state.qaStatus === 'PASS') return nudge('QA:delivery', `Forge delivery is incomplete: call ${toolRef('forge_delivery_submit')} once, then print the commit message for the user.`);
     return keep(state);
   }
 

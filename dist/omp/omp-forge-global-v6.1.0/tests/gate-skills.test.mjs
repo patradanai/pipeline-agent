@@ -6,13 +6,13 @@ import {
   formatGateSkills, validateSkillMarkdown,
 } from '../forge/core.mjs';
 
-test('new workflows use bundled gate skills across four phases', () => {
+test('new workflows use bundled gate skills across three phases plus delivery', () => {
   const mapping=cloneGateSkills();
   assert.deepEqual(mapping, {
-    requirement:['forge-requirement-gate'], planning:['forge-plan-gate'],
+    planning:['forge-plan-gate'],
     execution:['forge-execute-gate'], qa:['forge-qa-gate'], delivery:[],
   });
-  assert.equal(currentSkillGate('REQUIREMENT'),'requirement');
+  assert.equal(currentSkillGate('REQUIREMENT'),null);
   assert.equal(currentSkillGate('PLAN'),'planning');
   assert.equal(currentSkillGate('EXECUTE'),'execution');
   assert.equal(currentSkillGate('QA'),'qa');
@@ -24,13 +24,13 @@ test('gate skills can be added, removed and reset without mutating input', () =>
   const empty=cloneGateSkills();
   let next=addGateSkill(empty,'qa','go-testing');
   next=addGateSkill(next,'qa','go-testing');
-  next=addGateSkill(next,'requirement','security-review');
+  next=addGateSkill(next,'planning','security-review');
   assert.deepEqual(next.qa,['forge-qa-gate','go-testing']);
   assert.deepEqual(empty.qa,['forge-qa-gate']);
   assert.match(formatGateSkills(next),/go-testing/);
   assert.deepEqual(removeGateSkill(next,'qa','go-testing').qa,['forge-qa-gate']);
   assert.deepEqual(resetGateSkills(next,'qa').qa,[]);
-  assert.deepEqual(resetGateSkills(next,'qa').requirement,['forge-requirement-gate','security-review']);
+  assert.deepEqual(resetGateSkills(next,'qa').planning,['forge-plan-gate','security-review']);
   assert.deepEqual(resetGateSkills(next,'all'),empty);
   assert.throws(()=>removeGateSkill(next,'qa','unknown'),/not attached/);
 });

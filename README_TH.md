@@ -1,8 +1,8 @@
 # Forge · เอกสารภาษาไทย
 **English:** [README](README.md) · [คู่มือผู้ใช้](docs/USER_GUIDE.md) · [Custom skills (OMP)](docs/CUSTOM_SKILLS.md) · [ติดตั้ง](docs/INSTALL.md) · [ความปลอดภัย](docs/SECURITY.md)
 
-**Forge** ทำให้ AI เขียนโค้ดอย่างมีขั้นตอนแบบทีมจริง: วิเคราะห์ requirement → วางแผน → **คุณอนุมัติ** → ลงมือ → QA อิสระ → ส่งมอบ
-แต่ละขั้นมี agent เฉพาะทางทำหน้าที่ของตัวเอง และ Forge จะไม่ยอมให้ข้ามขั้น
+**Forge** ทำให้ AI เขียนโค้ดอย่างมีขั้นตอนแบบทีมจริง: วางแผน → **คุณอนุมัติ** → ลงมือ → QA อิสระ → ส่งมอบ
+main agent ทำงานแต่ละขั้นเอง มี `forge-code-reviewer` รีวิว diff อิสระตอน QA และ Forge จะไม่ยอมให้ข้ามขั้น
 
 ใช้ได้กับ **Claude Code** (plugin) และ **Oh My Pi / OMP** (extension) โดยใช้ core เดียวกัน
 
@@ -12,23 +12,19 @@
 
 - **ไม่แก้ implementation ก่อนอนุมัติ** — agent แก้ไฟล์งานได้หลังคุณอนุมัติแผนเท่านั้น
 - **ตรวจได้ทุกข้อ** — แผนต้องมี Business Topic (BIZ), Requirement (REQ), Test Case (TC) และ Quality Gate (QG) ที่ QA ใช้ตรวจย้อนได้ทีละข้อ
-- **QA ไม่เชื่อคำพูด** — test ที่ไม่ได้รันจริงต้องเป็น `NOT_RUN` ถ้า QA ไม่ผ่าน ต้องทำแผนแก้และอนุมัติใหม่
+- **QA ไม่เชื่อคำพูด** — test ที่ไม่ได้รันจริงต้องเป็น `NOT_RUN` ถ้า QA ไม่ผ่าน Forge รอให้คุณตัดสินใจก่อนวางแผนแก้ และแผนแก้ต้องอนุมัติใหม่
 - **Git เป็นของคุณ** — agent ห้าม `git add/commit/push` และห้าม publish ทุกขั้น Forge แค่ร่าง commit message ให้ copy
 
-## Agents ทั้ง 6 ตัว
+## Agent ของ Forge
 
 ![Forge agents](docs/images/agents.svg)
 
 | Agent | Gate | หน้าที่ | สิทธิ์ |
 |---|---|---|---|
-| `forge-requirement` | 1 | วิเคราะห์ Requirement รอบเดียวครบทุกมุม: เป้าหมาย ขอบเขต เกณฑ์ยอมรับ ช่องโหว่/กรณีที่จะพัง สถาปัตยกรรมพร้อม tradeoff แผนทดสอบ แล้วท้าทายร่างของตัวเองก่อนส่ง | อ่านอย่างเดียว |
-| `forge-planner` | 2 | แตกงานย่อย ลำดับงาน rollback และโครง BIZ/REQ/TC/QG | อ่านอย่างเดียว |
-| `forge-executor` | 4 | เขียนโค้ดตามแผนที่อนุมัติเท่านั้น (ไม่มี shell, ไม่แตะ Git) | **แก้ไฟล์ได้** |
-| `forge-qa` | 5 | ตรวจทุก TC เทียบพฤติกรรมจริงกับแผน | อ่านอย่างเดียว |
-| `forge-code-reviewer` | 5 | รีวิวความถูกต้อง ความปลอดภัย ประสิทธิภาพ พร้อม file:line | อ่านอย่างเดียว |
-| `forge-delivery` | 6 | สรุปงาน วิธี rollout/rollback และร่าง commit message | อ่านอย่างเดียว |
+| `forge-code-reviewer` | 3 (QA) | รีวิวเฉพาะไฟล์ที่เปลี่ยน: ความถูกต้อง ความปลอดภัย ประสิทธิภาพ รายงานบรรทัดละ finding: `CR-001 [HIGH] file:line — evidence — fix` | อ่านอย่างเดียว |
+| `forge-plan-critic` | 1 (เฉพาะเมื่อเปิด plan review) | วิจารณ์แผนที่เขียนแล้วก่อนส่งอนุมัติ รายงาน `PC-001 [HIGH] …` | อ่านอย่างเดียว |
 
-Gate 1 ใช้ agent ตัวเดียว รอบเดียว: `forge-requirement` ครอบคลุม 6 มุม (intake, ช่องว่าง, critique, สถาปัตยกรรม, กลยุทธ์ทดสอบ, self-challenge) → main ตรวจรายงานซ้ำแบบผู้อ่านอิสระ แล้วส่ง `forge_requirement_summary` → Planning
+งานที่เหลือ main agent ทำเอง: Gate 1 วางแผน (สำรวจโค้ดเอง ใช้ research subagent แบบอ่านอย่างเดียวได้: `scout` ใน OMP, `Explore` ใน Claude Code), Gate 2 ลงมือตามแผน, Gate 3 รัน check และตรวจทุก TC แล้วทำ delivery เอง
 
 ## คำสั่ง
 
@@ -37,33 +33,32 @@ Gate 1 ใช้ agent ตัวเดียว รอบเดียว: `forge
 | คำสั่ง | ใช้เมื่อ |
 |---|---|
 | `/forge <requirement>` | เริ่มงานใหม่ |
-| `/forge-status` | ดูว่าอยู่ Gate ไหน และกำลังรอ agent ตัวไหน |
+| `/forge-status` | ดูว่าอยู่ Gate ไหน กำลังรอ agent ตัวไหน และ `plan review: ON/OFF` |
 | `/forge-plan` | ดู path ของแผนที่ส่งอนุมัติ |
 | `/forge-approve` | อนุมัติแผนเอง เมื่อ Forge มองไม่เห็นการอนุมัติ (เช่น context ถูกล้าง) |
-| `/forge-qa` | เริ่มหรือรัน QA ใหม่ |
-| `/forge-rework` | ทำแผนแก้ไขหลัง QA ไม่ผ่าน (ต้องอนุมัติใหม่) |
+| `/forge-qa` | เริ่มหรือรัน QA ใหม่ (เช่น หลังเก็บหลักฐานที่ขาดเมื่อ QA BLOCKED) |
+| `/forge-rework` | สั่งวางแผนแก้หลัง QA ไม่ผ่าน (FAIL/BLOCKED) แผนแก้ต้องอนุมัติใหม่ |
 | `/forge-delivery` | ดู commit message หรือทำขั้นส่งมอบต่อ |
 | `/forge-report` | ดู path รายงาน QA ล่าสุด |
 | `/forge-resume [เลข]` | ดูงาน Forge ใน session อื่นของโปรเจกต์นี้ หรือดึงมาทำต่อ |
 | `/forge-agents` | รายชื่อ agent |
+| `/forge-planreview on\|off` | เปิด/ปิด plan critic (ค่าเริ่มต้น OFF บันทึกใน config ของ Forge มีผลกับงานใหม่) เมื่อเปิด main ต้องรัน `forge-plan-critic` 1 ครั้งกับแผนที่เขียนแล้ว และอ้าง PC-id ระดับ CRITICAL/HIGH ทุกข้อในแผน ไม่งั้น Forge ไม่รับแผน |
 | `/forge-trace [on\|off]` | บันทึก event สำหรับทดสอบ flow (ดู [แผนทดสอบ](docs/E2E-TEST-PLAN_TH.md)) |
 | `/forge-off` | ยกเลิกงาน (ไม่แก้ไฟล์ ไม่แตะ Git) |
 
 AI เรียกคำสั่งเหล่านี้แทนคุณไม่ได้ ทุกคำสั่งต้องพิมพ์เอง
 
-## Requirement Gate รอบเดียว
+## Plan mode แบบ OMP
 
-เดิม Gate 1 ใช้ agent 4 ตัว 3 รอบต่อกัน (7 ครั้ง) แต่ละตัวสำรวจโค้ดซ้ำเอง และ main ต้องสรุปคั่นทุกรอบ ตอนนี้เหลือ `forge-requirement` รันครั้งเดียว:
+เดิม Gate 1–2 ใช้ `forge-requirement` แล้วต่อด้วย `forge-planner` (ถูกเอาออกแล้ว) แต่ละตัวสำรวจโค้ดซ้ำเอง ตอนนี้ main agent วางแผนเองแบบ plan mode ของ OMP:
 
 | สิ่งที่รักษาคุณภาพไว้ | ทำอย่างไร |
 |---|---|
-| ครบทุกมุมเหมือนเดิม | prompt ของ `forge-requirement` รวมหน้าที่ analyst, critic, architect, QA strategist และ challenge ไว้ครบ และคำสั่ง Gate บังคับให้ main ส่ง checklist 6 มุมไปในงานทุกครั้ง |
-| ยังมีรอบท้าทาย | agent ต้องท้าทายร่างของตัวเอง (counterexample กับทุก CRITICAL/HIGH และทุกทางเลือกสถาปัตยกรรม) แล้วบอกว่าแก้อะไร |
-| ยังมีผู้อ่านคนที่สอง | main ตรวจรายงานซ้ำก่อนสรุป เพิ่ม finding ที่ agent พลาด (source `orchestrator`) |
-| ห้ามตัดความเสี่ยงทิ้ง | Forge ปฏิเสธสรุปที่ไม่มี CRITICAL/HIGH ถ้ารายงานของ agent มี |
-| Planner ได้ baseline เดียวกันเสมอ | สรุปถูกเก็บใน state และแนบเข้าคำสั่ง Planning |
-
-สิ่งที่เสียไป: critic ไม่ได้แยกเป็น agent อิสระแล้ว (self-challenge + main ตรวจซ้ำแทน)
+| อ้างอิงโค้ดจริง | main อ่าน/grep/glob เอง หรือส่ง `scout` (Claude Code: `Explore`) หลายตัวขนานกัน ทุก path/symbol ที่อ้างต้องอ่านมาแล้ว |
+| ถามเฉพาะสิ่งที่โค้ดตอบไม่ได้ | ใช้ ask (Claude Code: AskUserQuestion) 2–4 ตัวเลือก พร้อมค่าแนะนำ |
+| แผนลงมือได้ทันที | แผนต้องมี `## Context`, `## Approach`, `## Verification`, `## Assumptions & contingencies` (+ Critical files & anchors) และ 4 ส่วน QA contract (BIZ/REQ/TC/QG) ใน Approach ต้องมีบรรทัด `Open decisions:` (`none` หรือข้อย่อยละเรื่องพร้อม `default: …` ถ้ามีคำว่า BLOCKER ถูกปฏิเสธ ต้องถามผู้ใช้ก่อน) และ `Migration & rollback:` (ขั้นตอน หรือ `not applicable — <เหตุผล>`) ขาดข้อไหน Forge ปฏิเสธการส่งแผน |
+| ห้ามแก้โค้ดก่อนอนุมัติ | working tree อ่านอย่างเดียว เขียนได้แค่ไฟล์แผน แล้วส่งด้วย `forge_plan_propose` (Claude Code: ExitPlanMode) |
+| ไม่จบ turn ลอย ๆ | ถ้าจบ turn โดยไม่ถามหรือไม่ส่งแผน Forge เตือน 2 ครั้ง แล้วขึ้นคำเตือน |
 
 ## ค่าใช้ token
 
@@ -71,11 +66,11 @@ Forge ใช้หลาย agent จึงกิน token มากกว่า
 
 | `FORGE_MODELS` | opus | sonnet | haiku |
 |---|---|---|---|
-| `rigor` (ค่าเริ่มต้น) | requirement, planner | qa, code-reviewer | executor, delivery |
-| `balanced` | requirement, planner, qa, code-reviewer | executor | delivery |
-| `economy` | — | 5 ตัว | delivery |
+| `rigor` (ค่าเริ่มต้น) | plan-critic | code-reviewer | — |
+| `balanced` | code-reviewer, plan-critic | — | — |
+| `economy` | — | code-reviewer, plan-critic | — |
 
-`forge-requirement` ใช้ opus ทั้งใน `rigor` และ `balanced` เพราะรับงาน critic ไปด้วย
+profile กำหนดเฉพาะโมเดลของ `forge-code-reviewer` และ `forge-plan-critic` ส่วน main agent ใช้โมเดลของ session
 
 OMP: build ใส่ `model:` ให้ไฟล์ `forge-*.md` ตาม profile (เช่น `anthropic/claude-opus-5-5, opus` คือลอง id เต็มก่อน แล้ว fallback เป็น alias) แก้ต่อได้ใน OMP `/agents` ส่วน `install.sh` จะไม่ทับไฟล์ agent ที่ติดตั้งไว้แล้ว ถ้าต้องการโมเดลใหม่ให้รัน `FORGE_REINSTALL_AGENTS=1 bash install.sh` (สำรองไฟล์เดิมไว้ใน `forge-backups/`)
 
@@ -91,12 +86,13 @@ Forge ไม่ยอมให้ specialist ตัวเดิมรันซ�
 /forge เพิ่มฟังก์ชันคำนวณอายุจากวันเกิด พร้อม unit test
 ```
 
-1. `forge-requirement` วิเคราะห์รอบเดียว แล้ว Claude ตรวจรายงานซ้ำและส่งสรุป (`forge_requirement_summary`)
-2. `forge-planner` วางแผน แล้ว Claude ส่งแผนเข้าหน้าอนุมัติ (Forge ตรวจรูปแบบแผนก่อน)
-3. **คุณอ่านแผนแล้วกดอนุมัติ**
-4. `forge-executor` เขียนโค้ด แล้ว main รัน test
-5. `forge-qa` + `forge-code-reviewer` ตรวจ ถ้าไม่ผ่าน กลับไปทำแผนแก้
-6. `forge-delivery` สรุปงาน และให้ commit message — คุณ review diff แล้ว commit เอง
+1. main agent สำรวจโค้ดเอง เขียนแผน แล้วส่งเข้าหน้าอนุมัติ (Forge ตรวจรูปแบบแผนก่อน)
+2. **คุณอ่านแผนแล้วกดอนุมัติ**
+3. main agent เขียนโค้ดตามแผน แล้วรัน test
+4. main รัน check และตรวจทุก TC ขณะที่ `forge-code-reviewer` รีวิว diff ขนานกัน finding ระดับ CRITICAL/HIGH ทุกข้อต้องอยู่ใน `forge_qa_submit`: คงระดับเดิม (QA FAIL) หรือขึ้นต้น evidence ด้วย `Disputed:` พร้อมหลักฐานแย้ง ไม่งั้น Forge ไม่รับผล
+   หลังส่งผล Forge แสดงตารางสรุป QA: หัว `Forge QA ✅ PASS / ❌ FAIL / ⚠️ BLOCKED` พร้อมจำนวนและ path รายงาน, TC ทีละแถว (✅ ❌ ⚠️ ⏸️), ตาราง quality gate, finding ของ code review (🔴 CRITICAL 🟠 HIGH 🟡 MEDIUM ⚪ LOW) และสิ่งที่ทำให้ gate ไม่ผ่าน (OMP แสดงใน TUI, Claude Code ให้ agent พิมพ์ตารางตามนั้น)
+   ถ้า FAIL/BLOCKED Forge ไม่แก้เอง แถบสถานะขึ้น `QA failed · your decision` / `QA blocked · your decision` OMP เปิดหน้าต่างให้เลือก วางแผนแก้ / วางแผนแก้พร้อมโน้ตของคุณ / รัน QA ใหม่ (เฉพาะ BLOCKED) / ไว้ก่อน (`/forge review` เปิดอีกครั้ง) ส่วน Claude Code ใช้ `/forge-rework`, `/forge-qa` หรือ `/forge-off` แผนแก้ยังต้องผ่านการอนุมัติแผนตามปกติก่อนแก้โค้ด
+5. main สรุปงาน และให้ commit message — คุณ review diff แล้ว commit เอง
 
 ## ตัวอย่างเครื่องคำนวณอายุ
 
@@ -120,6 +116,8 @@ mkdir -p ~/.claude/marketplaces && cp -R dist/claude-code/forge-marketplace ~/.c
 claude plugin marketplace add ~/.claude/marketplaces/forge-marketplace
 claude plugin install forge@forge-local
 ```
+
+ถ้าติดตั้งไว้แล้ว ให้สำรองโฟลเดอร์ marketplace เดิม แล้วย้ายออกก่อนคัดลอกชุดใหม่มาแทนที่ path เดิม อย่าคัดลอกทับ เพราะ agent และคำสั่งที่เลิกใช้อาจค้างอยู่ จากนั้นรัน `claude plugin update forge@forge-local --scope user` แล้วเริ่ม Claude Code ใหม่ ตรวจ `/agents` ต้องมี `forge:forge-code-reviewer` และ `forge:forge-plan-critic`
 
 **OMP**
 ```bash

@@ -23,10 +23,11 @@
 
 ## Workflow state
 
-Persisted phases are `REQUIREMENT`, `PLAN`, `EXECUTE`, and `QA`. Native plan
+Persisted phases are `PLAN`, `EXECUTE`, and `QA`. Plan
 review remains inside `PLAN` and requires explicit human approval before
 `EXECUTE`. QA failures return to `PLAN` with approval revoked. QA PASS and
-delivery remain in `QA`; completed delivery sets the workflow inactive.
+delivery remain in `QA`; completed delivery sets the workflow inactive. Legacy
+`REQUIREMENT` checkpoints restore as `PLAN` without approval.
 
 Each gate has a bundled skill. Skills guide the work; runtime guards still
 enforce approval, read-only review, and evidence-backed QA. Legacy checkpoints
@@ -36,8 +37,8 @@ are normalized on restore without deriving approval or QA PASS from a phase.
 
 | Concern | Shared in core | OMP | Claude Code |
 |---|---|---|---|
-| Gates, agents, requirement gate (one `forge-requirement` pass + summary), plan contract, QA evaluation, reports | ✔ | uses | uses |
-| Approval / QA / delivery / rework / summary transitions | ✔ `transitions.mjs` | uses | uses (via engine) |
+| Gates, the QA reviewer agent, plan-mode instructions, plan contract, QA evaluation, reports | ✔ | uses | uses |
+| Approval / QA / delivery / rework / steering transitions | ✔ `transitions.mjs` | uses | uses (via engine) |
 | Git-write detection, discovery/QA command allowlists | ✔ | uses | uses (via engine) |
 | Read-only git snapshot and QA scope | ✔ `workspace.mjs` | uses | uses |
 | Event → decision controller | ✔ `engine.mjs` | **not yet** (own controller in index.ts) | uses |

@@ -59,12 +59,14 @@ test('stale recovery candidates are rejected',()=>{
   assert.throws(()=>applyRecoveryProposal({...state,phase:'EXECUTE'},proposal),/expired/);
 });
 
-test('recovery never infers approval from stale REQUIREMENT with approved flag',()=>{
+test('stale REQUIREMENT with approved flag normalizes to unapproved PLAN; no recovery needed',()=>{
   const state={...approved,phase:'REQUIREMENT'};
-  const fixed=applyRecoveryProposal(state,recoveryProposal(state,'inactive'));
+  const fixed=normalizeForgeState(state);
   assert.equal(fixed.phase,'PLAN');
   assert.equal(fixed.approved,false);
   assert.equal(fixed.approvedPlanHash,null);
+  assert.equal(fixed.planValid,false);
+  assert.equal(recoveryProposal(state,'inactive'),null);
 });
 
 test('failed rework pins superseded approved plan as read-only base', () => {

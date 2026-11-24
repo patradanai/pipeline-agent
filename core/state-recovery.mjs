@@ -62,13 +62,6 @@ export function recoveryProposal(input) {
       'Forge has no successfully recorded canonical plan write.',
       { phase: 'PLAN', reviewRequested: false, planWritten: false, planValid: false, approved: false, approvedPlanHash: null }, 'plan');
   }
-  if (phase === 'REQUIREMENT' && state.approved === true) {
-    // An inconsistent record is not proof that the implementation gate can
-    // resume. Deliberately revoke executable privileges; require new review.
-    return issue('requirement-still-approved', 'PLAN',
-      'Requirement state and an approval flag conflict. A prior approval cannot be replayed without matching native review evidence.',
-      {phase:'PLAN', approved:false, approvedPlanHash:null, planValid:false, planWritten:false}, 'safety');
-  }
   return null;
 }
 

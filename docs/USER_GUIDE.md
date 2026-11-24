@@ -10,12 +10,14 @@ Write a concrete request with desired behavior, constraints, relevant paths, and
 /forge Add CSV export to the booking service. Require admin access, preserve existing filters, and add tests for empty and large exports.
 ```
 
-Forge starts with a requirement analysis. The main agent reviews the specialist's report and records a requirement summary before planning. The planner then produces a plan with stable IDs:
+Forge starts in plan mode. The main agent explores the code itself (read-only research subagents may help), asks only preference questions the code cannot answer, and writes a plan with stable IDs:
 
 - `BIZ-*`: business capabilities
 - `REQ-*`: requirements and acceptance criteria
 - `TC-*`: business test cases mapped to requirements
 - `QG-*`: code quality gates
+
+The plan must also contain `## Context`, `## Approach`, `## Verification` and `## Assumptions & contingencies`. `## Approach` must include an `Open decisions:` line (`none`, or one sub-bullet per decision with `default: …`; an item containing `BLOCKER` is rejected, so the agent asks you first) and a `Migration & rollback:` line (steps, or `not applicable — <reason>`). Forge rejects a proposal that misses any of these.
 
 Inspect the plan, scope, tests, risks, and rollback notes. Approve only when you agree with the plan. Approval is explicit and cannot be supplied by an agent.
 
@@ -23,15 +25,21 @@ Inspect the plan, scope, tests, risks, and rollback notes. Approve only when you
 
 | Phase | Forge behavior | Your role |
 |---|---|---|
-| Requirement | One specialist analyzes the request. The main agent reviews and summarizes the findings. | Resolve genuine business questions; correct scope before planning. |
-| Plan | A planner prepares an implementation and verification plan. | Review the complete plan and approve or refine it. |
-| Execute | The executor implements the approved plan. | Inspect changes; add a prompt in OMP to open the steering choice if scope changes. |
-| QA | Independent QA and code review examine the implementation. QA cannot edit code. | Provide missing evidence or choose rework when needed. |
+| Plan | The main agent explores the repository read-only and writes an implementation and verification plan. | Answer preference questions; review the complete plan and approve or refine it. |
+| Execute | The main agent implements the approved plan. | Inspect changes; add a prompt in OMP to open the steering choice if scope changes. |
+| QA | The main agent runs the planned checks and verifies every test case while `forge-code-reviewer` independently reviews the diff and reports `CR-001 [HIGH] file:line — evidence — fix` lines. Every CRITICAL/HIGH CR-id must appear in the QA submission, either still CRITICAL/HIGH (the gate FAILs) or with evidence starting `Disputed:` plus counter-evidence (it stays visible in the QA report); otherwise the submission is rejected. QA cannot edit code. | Read the QA summary; on FAIL/BLOCKED decide whether to plan a fix, rerun QA, or wait. |
 | Delivery | After QA PASS, Forge prepares delivery and a copy-ready commit message. | Review the diff and commit manually. |
 
-A QA `FAIL` returns to planning and revokes approval. A `BLOCKED` or `NOT_RUN` result is an evidence gap, not proof of a code defect; Forge retains the approved plan so you can collect evidence or explicitly choose rework. A new plan always requires a fresh approval.
+After every QA submission, Forge shows a QA summary: a header `Forge QA ✅ PASS / ❌ FAIL / ⚠️ BLOCKED` with counts and the full report path; one row per approved test case (status ✅ ❌ ⚠️ ⏸️, test case, business topic, scenario, actual, evidence); a quality-gate table; code-review findings with severity icons (🔴 CRITICAL 🟠 HIGH 🟡 MEDIUM ⚪ LOW); and gate blockers. OMP displays it in the TUI (it is not sent to the model); in Claude Code the agent is told to print it verbatim.
 
-After QA PASS, if the working tree changes before delivery, use `/forge qa` to start a fresh QA round. The approved plan is retained, but the old verdict, QA snapshot, delivery artifacts, and specialist completions no longer authorize delivery. Both QA specialists must report again.
+A QA `FAIL` or `BLOCKED` does not start a fix on its own. Forge waits for your decision, and the footer shows `QA failed · your decision` or `QA blocked · your decision`. While it waits, Forge blocks plan writes, plan proposals and QA resubmission. A `BLOCKED` or `NOT_RUN` result is an evidence gap, not proof of a code defect.
+
+- **OMP:** when the QA turn ends, a dialog opens. On FAIL: **Plan the fix** (draft a rework plan, then approve it), **Plan the fix with my notes** (your notes go into the rework instruction), or **Not now** (keeps the QA report and state). On BLOCKED, **Rerun QA** (you collected the missing evidence) comes first. `/forge review` shows the summary again and reopens the decision; `/forge rework` and `/forge qa` also decide.
+- **Claude Code:** run `/forge-rework` to plan a fix, `/forge-qa` to rerun QA after BLOCKED, or `/forge-off`.
+
+A QA FAIL revokes the execution approval at once; after BLOCKED, the approval is kept until you choose to plan a fix. Either way the rework plan needs a normal plan approval before any code changes, so there are two human checkpoints.
+
+After QA PASS, if the working tree changes before delivery, use `/forge qa` to start a fresh QA round. The approved plan is retained, but the old verdict, QA snapshot, delivery artifacts, and reviewer completion no longer authorize delivery. The code reviewer must report again.
 
 ## OMP prompt steering
 
@@ -42,11 +50,10 @@ While an OMP Forge workflow is active, a normal interactive prompt (not a slash 
 
 | Current phase | Steer result |
 |---|---|
-| `REQUIREMENT` | Re-run requirement analysis with the prior report available as delta context. |
 | `PLAN` | Withdraw an unapproved proposal and revise the existing draft. |
 | `EXECUTE` or `QA` | Revoke approval, stop obsolete work, and create a revised plan against the approved plan and current working tree. Approval is required again. |
 
-Forge reports the transition as `Forge steering #N · <from> → <to> · prompt "…" from user`. All steering directives remain in workflow state and in later Requirement, Planning, and Rework instructions; older requirements are not discarded after 20 prompts. Longer histories use more context. `/forge status` shows the steering count.
+Forge reports the transition as `Forge steering #N · <from> → <to> · prompt "…" from user`; every steer re-enters `PLAN`. All steering directives remain in workflow state and in later Planning and Rework instructions; older requirements are not discarded after 20 prompts. Longer histories use more context. `/forge status` shows the steering count.
 
 The dialog is OMP-specific. The Claude Code adapter does not currently provide this prompt-steering flow. If the OMP dialog is cancelled, the prompt returns to the editor. Pasted images are not retained on cancellation; attach them again if you resend the prompt.
 
@@ -60,15 +67,16 @@ Run these in the main OMP session:
 |---|---|
 | `/forge` | Prefill `forge: ` in the prompt editor. |
 | `/forge <requirement>` | Start a workflow directly. |
-| `/forge status` | Show phase, approval, QA result, steering count, and waiting agents. |
-| `/forge review` | Open the plan approval dialog when a valid plan awaits review. |
-| `/forge qa` | Run or retry post-execution QA against the approved plan. |
-| `/forge rework` | Start a new plan after QA `FAIL` or `BLOCKED`; requires new approval. |
+| `/forge status` | Show phase, approval, QA result, steering count, waiting agents, and `plan review: ON/OFF`. |
+| `/forge review` | Open the plan approval dialog when a valid plan awaits review, or show the QA summary again and reopen the QA FAIL/BLOCKED decision. |
+| `/forge qa` | Run or retry post-execution QA against the approved plan (for example, rerun after QA `BLOCKED`). |
+| `/forge rework` | Plan a fix after QA `FAIL` or `BLOCKED`; the rework plan requires new approval. |
 | `/forge report` | Show the latest QA report path. |
 | `/forge delivery` | Show or prepare the delivery artifact after QA PASS. |
 | `/forge resume` | Choose a saved Forge session to resume. |
 | `/forge recover` | Review a detected checkpoint inconsistency. |
 | `/forge agents` | Show the fixed Forge agent mapping. |
+| `/forge planreview on\|off` | Turn the optional plan critic on or off (default OFF, saved in Forge config, applies to new workflows). When ON, the main agent must run `forge-plan-critic` once on the written plan and cite every CRITICAL/HIGH PC-id in the plan before Forge accepts the proposal. |
 | `/forge skill` | Manage optional skills assigned to gates. |
 | `/forge off` | Cancel the current Forge workflow. |
 
@@ -76,11 +84,11 @@ Typing `/` commands does not trigger prompt steering. See the [custom OMP skills
 
 ## Claude Code commands
 
-Start with `/forge <requirement>`. Common commands include `/forge-status`, `/forge-plan`, `/forge-approve`, `/forge-qa`, `/forge-rework`, `/forge-delivery`, `/forge-report`, `/forge-resume`, `/forge-agents`, and `/forge-off`. Check the [Claude Code adapter guide](../adapters/claude-code/README.md) for adapter-specific behavior and known gaps.
+Start with `/forge <requirement>`. Common commands include `/forge-status`, `/forge-plan`, `/forge-approve`, `/forge-qa`, `/forge-rework`, `/forge-delivery`, `/forge-report`, `/forge-resume`, `/forge-agents`, `/forge-planreview on|off`, and `/forge-off`. Check the [Claude Code adapter guide](../adapters/claude-code/README.md) for adapter-specific behavior and known gaps.
 
 ## Model profiles and usage
 
-Forge's specialist agents use the model assignments selected when the package is built. Profiles are `rigor` (default), `balanced`, and `economy`; they change models, not required gates. A workflow can use multiple agent calls, and total cost varies with model provider, context size, retries, task complexity, and whether rework is needed.
+Forge's agents (`forge-code-reviewer`, and `forge-plan-critic` when plan review is ON) use the model assignments selected when the package is built; the main agent uses your session model. Profiles are `rigor` (default), `balanced`, and `economy`; they change models, not required gates. Total cost varies with model provider, context size, retries, task complexity, and whether rework is needed.
 
 To choose a profile before building:
 
@@ -104,7 +112,7 @@ Restart OMP after installing. Confirm `~/.omp/agent/extensions/forge/index.ts` e
 
 ### Forge reports missing agents
 
-Confirm all six `forge-*.md` definitions exist under the active agent directory and are visible to OMP `/agents`. The installer preserves customized definitions and installs missing ones; it does not overwrite custom versions by default.
+Confirm `forge-code-reviewer.md` and `forge-plan-critic.md` exist under the active agent directory and are visible to OMP `/agents`. The installer preserves customized definitions and installs missing ones; it does not overwrite custom versions by default. Retired Forge agents are moved to `forge-backups/`.
 
 ### Plan approval does not start execution
 
@@ -112,7 +120,7 @@ Check `/forge status`, confirm the correct session/branch is active, and run `/f
 
 ### QA is BLOCKED
 
-Read the report named by `/forge report`. `BLOCKED` and `NOT_RUN` mean evidence is incomplete. Run the safe checks available in your environment, then use `/forge qa` to collect a fresh independent report. Use `/forge rework` only when implementation changes are needed.
+Read the QA summary (or the report named by `/forge report`). `BLOCKED` and `NOT_RUN` mean evidence is incomplete. Run the safe checks available in your environment, then choose **Rerun QA** in the OMP dialog or use `/forge qa` to collect a fresh independent report. Use `/forge rework` (or **Plan the fix**) only when implementation changes are needed.
 
 ### Workflow state is inconsistent after switching sessions
 

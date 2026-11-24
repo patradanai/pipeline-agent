@@ -2,7 +2,7 @@ import type { ExtensionAPI } from '@oh-my-pi/pi-coding-agent';
 import { discoverForgeSessions, forgeSessionLabel, resolvePickerSessions, sameResumeCheckpoint } from './session-resume.mjs';
 import { recoveryProposal, applyRecoveryProposal } from './state-recovery.mjs';
 import { snapshotWorkingTree as coreSnapshotWorkingTree, inspectWorkspaceScope } from './workspace.mjs';
-import { applyRequirementSummary, hasGateAgents, markGateAgent, approvedExecutionState, qaReportTransition, assertQaSubmittable, assertDeliverySubmittable, deliveryTransition, reworkTransition, steeringRoute, steerTransition } from './transitions.mjs';
+import { hasGateAgents, markGateAgent, approvedExecutionState, qaReportTransition, assertQaSubmittable, assertDeliverySubmittable, assertPlanProposable, deliveryTransition, approveReworkTransition, steeringRoute, steerTransition } from './transitions.mjs';
 import { sessionIdentity, recoveryIdentity, persistForgeCheckpoint, loadForgeCheckpointCandidates, loadForgeCheckpointRecord, pruneForgeCheckpoints, candidateFromSessionEntries, prepareHumanRecovery, isValidRestoreCandidate } from './checkpoint-recovery.mjs';
 import { normalizeForgeState } from './forge-state.mjs';
 import { mkdirSync, readFileSync, writeFileSync, lstatSync, renameSync, readdirSync, unlinkSync, realpathSync, statSync, rmdirSync } from 'node:fs';
@@ -20,9 +20,6 @@ import {
   cloneAgentAssignments,
   listAssignedAgentNames,
   formatAgentAssignments,
-  agentNameFor,
-  normalizeRequirementSummary,
-  countReportedSeverities,
   requiredAgentsFor,
   missingGateAgentsFor,
   missingGateAgents,
@@ -42,13 +39,15 @@ import {
   isProhibitedGitCommand,
   parseCommand,
   phaseInstruction,
-  requirementSummaryInstruction,
+  planDecisionReminder,
   qaInstruction,
   steeringInstruction,
   renderDeliveryReport,
   renderQaReport,
   renderForgeWidget,
   getForgeArgumentCompletions,
+  renderQaSummary,
+  extractHighFindings,
   forgePlanPath,
 } from './core.mjs';
 
@@ -82,6 +81,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
   const checkpointRoot = process.env.FORGE_CHECKPOINT_DIR || join(agentRoot, 'forge-checkpoints');
   const attachmentRoot = join(agentRoot, 'forge-attachments');
   let autoStart = false;
+  let planReview = false;
   type GateContext = {
     sessionManager?: { getSessionId?: () => string | undefined; getSessionFile?: () => string | undefined };
   };
@@ -127,18 +127,9 @@ export default function forgeExtension(pi: ExtensionAPI) {
   const declinedRecovery = new Set<string>();
   let checkpointsPruned = false;
   const READ_ONLY_TOOLS = ['read', 'grep', 'glob', 'ls', 'ask'];
+  // Read-only research agents the main agent may spawn while planning or reviewing.
+  const RESEARCH_AGENTS = ['scout'];
   const orphanKey = (c: any) => c ? `missing-branch:${c.identity.fingerprint}:${c.state.slug}:${c.state.phase}` : '';
-
-  // Gate transitions occur as soon as a required tool has SUCCESSFULLY finished.
-  // Relying on session_stop alone can strand OMP when there are pending messages,
-  // task tool completions, or the built-in continuation cap has been reached.
-  // The forge-requirement report asks for the summary once; the summary tool opens Planning.
-  function requestRequirementSummary(ctx: unknown): string | null {
-    if (!workflow?.active || workflow.phase !== 'REQUIREMENT' || !hasAgents('REQUIREMENT') || workflow.requirementSummaryRequested) return null;
-    workflow = { ...workflow, requirementSummaryRequested: true };
-    saveState(); updateDashboard(ctx);
-    return requirementSummaryInstruction(workflow);
-  }
 
   const snapshotWorkingTree = (cwd: string | undefined) => coreSnapshotWorkingTree(cwd);
 
@@ -152,11 +143,11 @@ export default function forgeExtension(pi: ExtensionAPI) {
   function readConfig() {
     const cfg = readStoredConfig();
     autoStart = cfg.autoStart === true;
+    planReview = cfg.planReview === true;
     try { configuredSkills = cloneGateSkills(cfg.gateSkills); }
     catch { configuredSkills = cloneGateSkills(); }
     guardedAgentNames = new Set([
       ...listAssignedAgentNames(DEFAULT_AGENT_ASSIGNMENTS),
-      ...listAssignedAgentNames(cfg.agentAssignments), // safety for old workflows; routing is no longer configurable
       ...(Array.isArray(cfg.guardedAgentNames) ? cfg.guardedAgentNames.filter((name: unknown) => typeof name === 'string') : []),
     ]);
   }
@@ -630,12 +621,15 @@ export default function forgeExtension(pi: ExtensionAPI) {
     const jsonPath = join(dir, 'qa-report.json');
     writeFileSync(mdPath, markdown, 'utf8');
     writeFileSync(jsonPath, JSON.stringify({ ...meta, ...report }, null, 2) + '\n', 'utf8');
-    workflow = qaReportTransition(workflow, report, { reportPath: mdPath, workingTree });
+    // The human-first summary table: shown to the user (not fed back to the model) and kept for /forge review.
+    const qaSummary = renderQaSummary(report, { reportPath: mdPath });
+    workflow = { ...qaReportTransition(workflow, report, { reportPath: mdPath, workingTree }), qaSummary };
     saveState();
     updateDashboard(ctx);
-    if (failed) notify(ctx, `Forge QA FAIL: rework by BIZ/TC requires a new Approval. Report: ${mdPath}`, 'warning');
-    else if (evidencePending) notify(ctx, `Forge QA BLOCKED: evidence is incomplete, not an observed code failure. Approved plan retained. Run /forge qa after collecting evidence, or /forge rework if code changes are necessary. Report: ${mdPath}`, 'warning');
+    if (failed) notify(ctx, `Forge QA FAIL. Forge asks whether to plan a fix when this turn ends; nothing changes before you decide. Report: ${mdPath}`, 'warning');
+    else if (evidencePending) notify(ctx, `Forge QA BLOCKED: evidence is incomplete, not an observed code failure. Approved plan retained; Forge asks how to continue when this turn ends. Report: ${mdPath}`, 'warning');
     else notify(ctx, 'Forge QA passed. Preparing DELIVERY and a copy-ready commit message; no Git changes will be performed.');
+    pi.sendMessage({ customType: 'forge-qa-summary', content: qaSummary, display: true, excludeFromContext: true });
     return { report, markdown, mdPath, jsonPath };
   }
 
@@ -667,6 +661,10 @@ export default function forgeExtension(pi: ExtensionAPI) {
   const REVIEW_COMPACT = 'Approve and compact context';
   const REVIEW_REFINE = 'Refine plan';
   const REVIEW_LATER = 'Not now — keep plan for /forge review';
+  const QA_PLAN_FIX = 'Plan the fix — draft a rework plan, then approve it';
+  const QA_PLAN_FIX_NOTES = 'Plan the fix with my notes';
+  const QA_RERUN = 'Rerun QA — I collected the missing evidence';
+  const QA_LATER = 'Not now — keep the QA report (/forge review to decide later)';
   const PLAN_FILE_PATTERN = /^local:\/\/([A-Za-z0-9][A-Za-z0-9._-]{0,127}-plan\.md)$/;
   const MAX_PLAN_BYTES = 512 * 1024;
 
@@ -689,6 +687,15 @@ export default function forgeExtension(pi: ExtensionAPI) {
     } catch {
       return { ok: false, error: `${planPath} does not exist yet.` };
     }
+  }
+
+  /** Paths a write/edit call targets: explicit path fields, or hashline `[PATH#TAG]` headers in `input.input`. */
+  function editTargets(input: unknown): string[] {
+    const fields = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+    const direct = fields.path ?? fields.file_path ?? fields.filePath ?? fields.target ?? fields.url;
+    if (typeof direct === 'string' && direct) return [direct];
+    const text = typeof fields.input === 'string' ? fields.input : '';
+    return [...text.matchAll(/^\[([^\]\n#]+)#[0-9A-Fa-f]{4}\]\s*$/gm)].map(m => m[1].trim());
   }
 
   /** Forge runs its own plan mode; native OMP Plan Mode would block approved
@@ -736,6 +743,99 @@ export default function forgeExtension(pi: ExtensionAPI) {
       await openForgeReview(ctx);
     }, 250);
     tick();
+  }
+
+  // QA FAIL/BLOCKED waits for a human decision; the dialog opens once the QA turn is idle.
+  let qaDecisionScheduled = false;
+  let qaDecisionEpoch = 0;
+  let qaDecisionOpen = false;
+  function scheduleQaDecisionWhenIdle(ctx: any) {
+    if (!workflow?.active || !workflow.reworkDecisionPending || qaDecisionScheduled) return;
+    if (typeof ctx.setTimeout !== 'function' || typeof ctx.isIdle !== 'function') {
+      notify(ctx, 'Forge cannot detect an idle session. QA report kept; run /forge review to decide how to continue.', 'warning');
+      return;
+    }
+    qaDecisionScheduled = true;
+    const epoch = ++qaDecisionEpoch;
+    const slug = workflow.slug;
+    const reportPath = workflow.qaReportPath;
+    const release = () => { if (epoch === qaDecisionEpoch) qaDecisionScheduled = false; };
+    const isCurrent = () => epoch === qaDecisionEpoch && workflow?.active && workflow.reworkDecisionPending === true &&
+      workflow.slug === slug && workflow.qaReportPath === reportPath;
+    const tick = () => ctx.setTimeout(async () => {
+      if (!isCurrent()) { release(); return; }
+      if (!ctx.isIdle() || ctx.hasPendingMessages?.()) { tick(); return; }
+      qaDecisionScheduled = false;
+      await openQaDecision(ctx);
+    }, 250);
+    tick();
+  }
+
+  /** Start a fresh QA round on the approved execution (the /forge qa command and the BLOCKED dialog). */
+  function startQaRound(ctx: any): boolean {
+    if (!workflow || workflow.approved !== true || workflow.planValid !== true || typeof workflow.approvedPlanHash !== 'string' || workflow.approvedPlanHash.length === 0 || !['EXECUTE', 'QA'].includes(workflow.phase)) {
+      notify(ctx, 'No approved execution is available for QA.', 'warning');
+      return false;
+    }
+    invalidateGateWork();
+    qaDecisionEpoch++; qaDecisionScheduled = false;
+    workflow = { ...workflow, active: true, phase: 'QA', qaStatus: null, qaRetries: 0, qaEvidencePending: false, reworkDecisionPending: false, workingTreeAtQa: null,
+      deliveryPath: null, commitMessagePath: null, commitMessage: null, deliveryRetries: 0,
+      gateAgents: { ...(workflow.gateAgents ?? {}), QA: [] }, gateAgentsSpawned: { ...(workflow.gateAgentsSpawned ?? {}), QA: [] } };
+    saveState(); updateDashboard(ctx);
+    pi.sendUserMessage(qaInstruction(workflow), { attribution: 'agent' });
+    return true;
+  }
+
+  /** Forge's QA decision dialog: after FAIL/BLOCKED, only the human starts a fix plan (which needs plan approval again). */
+  async function openQaDecision(ctx: any): Promise<boolean> {
+    if (qaDecisionOpen) return false;
+    if (!(workflow?.active && workflow.reworkDecisionPending === true)) {
+      notify(ctx, 'No QA result awaits your decision.', 'warning');
+      return false;
+    }
+    if (ctx.mode !== 'tui' || typeof ctx.ui?.select !== 'function') {
+      notify(ctx, 'The Forge QA decision needs the interactive OMP TUI. Use /forge rework to plan a fix or /forge qa to rerun QA.', 'warning');
+      return false;
+    }
+    qaDecisionOpen = true;
+    try {
+      const failed = workflow.qaStatus === 'FAIL';
+      const snapshot = { slug: workflow.slug, reportPath: workflow.qaReportPath };
+      const stale = () => !workflow?.active || workflow.reworkDecisionPending !== true ||
+        workflow.slug !== snapshot.slug || workflow.qaReportPath !== snapshot.reportPath;
+      const staleNotice = () => notify(ctx, 'Forge state changed while the QA decision was open. Nothing changed; run /forge review again.', 'warning');
+      const choices = failed
+        ? [QA_PLAN_FIX, ...(typeof ctx.ui.editor === 'function' ? [QA_PLAN_FIX_NOTES] : []), QA_LATER]
+        : [QA_RERUN, QA_PLAN_FIX, ...(typeof ctx.ui.editor === 'function' ? [QA_PLAN_FIX_NOTES] : []), QA_LATER];
+      const title = failed
+        ? `Forge · QA FAILED — plan a fix? (report: ${workflow.qaReportPath ?? 'n/a'})`
+        : `Forge · QA BLOCKED — evidence incomplete. How to continue? (report: ${workflow.qaReportPath ?? 'n/a'})`;
+      for (;;) {
+        const choice = await ctx.ui.select(title, choices);
+        if (stale()) { staleNotice(); return false; }
+        if (choice === QA_RERUN) return startQaRound(ctx);
+        if (choice === QA_PLAN_FIX || choice === QA_PLAN_FIX_NOTES) {
+          let notes = '';
+          if (choice === QA_PLAN_FIX_NOTES) {
+            const feedback = await ctx.ui.editor('Forge · What should the fix plan address?', '');
+            if (stale()) { staleNotice(); return false; }
+            if (feedback == null || !String(feedback).trim()) continue;
+            notes = String(feedback);
+          }
+          invalidateGateWork();
+          workflow = approveReworkTransition(workflow, notes);
+          saveState(); updateDashboard(ctx);
+          notify(ctx, 'Forge: planning the fix. You approve the fix plan before any code changes.');
+          pi.sendUserMessage(`[FORGE QA REWORK — APPROVED BY THE OPERATOR]\nThe operator chose to plan a fix for the QA ${failed ? 'failures' : 'gaps'}.\n\n${phaseInstruction(workflow)}`, { attribution: 'agent' });
+          return true;
+        }
+        notify(ctx, `QA report kept; nothing changed. Run /forge review to decide, /forge rework to plan a fix${failed ? '' : ', /forge qa to rerun QA'}, or /forge off.`);
+        return false;
+      }
+    } finally {
+      qaDecisionOpen = false;
+    }
   }
 
   /** Send the execution turn for an approved plan, optionally after compaction.
@@ -957,7 +1057,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
       notify(ctx, `Forge cannot start: missing required OMP agent definitions: ${missing.join(', ')}. Check /agents or reinstall the Forge agent files.`, 'error');
       return null;
     }
-    let next = initialState(requirement, undefined, configuredAgents, configuredSkills, skillPins);
+    let next = initialState(requirement, undefined, configuredAgents, configuredSkills, skillPins, { planReview });
     if (images.length) {
       let paths: string[];
       try { paths = saveRequirementImages(next.slug, images); }
@@ -969,7 +1069,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
     pendingCheckpointRecovery = null; reviewEpoch++; reviewScheduled = false;
     saveState();
     updateDashboard(ctx);
-    notify(ctx, 'Forge: REQUIREMENT (one forge-requirement pass + your review) → Planning → Approval → Execute → QA → Delivery');
+    notify(ctx, 'Forge: PLAN (Forge plan mode: you explore, plan and propose) → Approval → Execute → QA → Delivery');
     const instruction = phaseInstruction(workflow);
     if (!useInputReplacement) pi.sendUserMessage(instruction, { attribution: 'agent' });
     return instruction;
@@ -1005,33 +1105,9 @@ export default function forgeExtension(pi: ExtensionAPI) {
   const qaStatus = z.enum(['PASS', 'FAIL', 'BLOCKED', 'NOT_RUN']);
   const severity = z.enum(['CRITICAL', 'HIGH', 'MEDIUM', 'LOW']);
   pi.registerTool({
-    name: 'forge_requirement_summary',
-    label: 'Submit Forge Requirement Summary',
-    description: 'Submit the requirement synthesis after the forge-requirement report: baseline, ALL findings with their original severity, open blockers, assumptions and relevant files. Forge cross-checks the report\'s own CRITICAL/HIGH labels, then opens Planning. Changes no project files.',
-    loadMode: 'essential',
-    approval: 'read',
-    parameters: z.object({
-      baseline: z.string(),
-      findings: z.array(z.object({ id: z.string().optional(), severity, title: z.string(), source: z.string().optional() })),
-      blockers: z.array(z.string()).optional(),
-      assumptions: z.array(z.string()).optional(),
-      relevantFiles: z.array(z.string()).optional(),
-    }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      const fail = (text: string) => ({ content: [{ type: 'text', text: `Forge requirement summary rejected: ${text}` }], isError: true });
-      let applied;
-      try { applied = applyRequirementSummary(workflow, params); } catch (err) { return fail(String((err as Error)?.message ?? err)); }
-      const head = `Forge: requirement summary recorded (${applied.summarizedHigh} CRITICAL/HIGH, ${applied.summary.blockers.length} open blocker(s)) → Planning.`;
-      workflow = applied.state;
-      saveState(); updateDashboard(ctx);
-      return { content: [{ type: 'text', text: `${head}\n\n${phaseInstruction(workflow)}` }], details: { next: 'PLAN' } };
-    },
-  });
-
-  pi.registerTool({
     name: 'forge_plan_propose',
     label: 'Propose Forge Plan for Approval',
-    description: 'Forge plan mode: submit the Forge plan file for human approval (replaces xd://propose). Write the complete plan to the local:// path named in the PLAN gate first. Forge validates the plan contract and opens its approval dialog after this turn ends. Changes no project files.',
+    description: 'Forge plan mode: submit the Forge plan file for human approval. Write the complete plan to the local:// path named in the PLAN gate first. Forge validates the plan contract and opens its approval dialog after this turn ends. Changes no project files.',
     loadMode: 'essential',
     approval: 'read',
     parameters: z.object({}),
@@ -1039,10 +1115,10 @@ export default function forgeExtension(pi: ExtensionAPI) {
       const fail = (text: string) => ({ content: [{ type: 'text', text: `Forge plan proposal rejected: ${text}` }], isError: true });
       if (ctx.agent?.kind !== 'main') return fail('only the main Forge session can propose the plan.');
       if (!workflow?.active || workflow.phase !== 'PLAN') return fail('only valid during the Forge PLAN gate.');
+      if (workflow.reworkDecisionPending === true) return fail('QA is waiting for the user\'s decision (Forge QA dialog or /forge rework). End your turn; do not draft a fix plan yet.');
       if (workflow.planWritten && workflow.planValid && !workflow.approved) {
         return fail('a plan is already awaiting human review. End your turn and wait for the decision.');
       }
-      if (!hasAgents('PLAN')) return fail(`run ${missingGateAgentsFor(workflow).join(', ')} through task and await its report first.`);
       const planPath = forgePlanPath(workflow);
       const file = readPlanFile(ctx, planPath);
       if (!file.ok) return fail(`${file.error} Write the complete plan to ${planPath} first.`);
@@ -1056,6 +1132,8 @@ export default function forgeExtension(pi: ExtensionAPI) {
         saveState();
         return fail(`fix the plan contract, rewrite ${planPath}, then call forge_plan_propose again:\n${contract.issues.join('\n')}`);
       }
+      try { assertPlanProposable(workflow, file.content); }
+      catch (err) { return fail(`${err instanceof Error ? err.message : String(err)} Then call forge_plan_propose again.`); }
       workflow = {
         ...workflow, planWritten: true, planValid: true, planPath, approvedPlanHash: contract.hash,
         businessTopics: contract.topics, requirements: contract.requirements, testCases: contract.testCases,
@@ -1118,7 +1196,12 @@ export default function forgeExtension(pi: ExtensionAPI) {
         const { report, mdPath } = persistQaReport(ctx, params);
         const summary = `Forge QA GATE: ${report.status}\nApproved test cases: ${report.counts.plannedTestCases}\nBusiness topics: ${report.counts.businessTopics}\nPASS: ${report.counts.pass}, FAIL: ${report.counts.fail}, BLOCKED: ${report.counts.blocked}, NOT_RUN: ${report.counts.notRun}\nReport: ${mdPath}\n`;
         const failures = report.topics.flatMap(t => t.tests.filter(x => x.status !== 'PASS').map(x => `- ${t.id} ${t.name} / ${x.testId}: ${x.status} — ${x.scenario}; expected ${x.expected}; actual ${x.actual}`));
-        return { content: [{ type: 'text', text: summary + (failures.length ? '\nNon-passing business cases:\n' + failures.join('\n') : '\nAll submitted business test cases passed.') + (report.problems.length ? '\n\nGate blockers:\n' + report.problems.join('\n') : '') }], details: { status: report.status, reportPath: mdPath } };
+        const details = summary + (failures.length ? '\nNon-passing business cases:\n' + failures.join('\n') : '\nAll submitted business test cases passed.') + (report.problems.length ? '\n\nGate blockers:\n' + report.problems.join('\n') : '');
+        // FAIL/BLOCKED: the human decides in Forge's QA dialog before any fix is planned.
+        const follow = workflow?.reworkDecisionPending === true
+          ? `\n\n[FORGE QA ${report.status} — WAITING FOR THE USER]\nForge showed the user the QA summary table and asks how to continue when this turn ends. End your turn now with a one-line pointer to that table: do not draft a fix plan, edit code or rerun checks.`
+          : '';
+        return { content: [{ type: 'text', text: details + follow }], details: { status: report.status, reportPath: mdPath } };
       } catch (error) {
         return { content: [{ type: 'text', text: `Forge QA submission rejected: ${String(error)}` }], isError: true };
       }
@@ -1182,7 +1265,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
       };
       if (!route) return keepWorking('Forge steering is unavailable here.');
       if (typeof ctx.ui?.select !== 'function') return keepWorking('Forge needs the interactive selector to confirm steering.');
-      const effect = route.revoked ? 'revokes approval, re-plan and approve again' : route.to === 'REQUIREMENT' ? 're-run requirement analysis' : 're-plan before approval';
+      const effect = route.revoked ? 'revokes approval, re-plan and approve again' : 're-plan before approval';
       const steerChoice = `Steer · ${route.from} → ${route.to} · ${effect}`;
       const cancelChoice = `Cancel · keep working on ${route.from}`;
       const choice = await ctx.ui.select(`Forge steering · prompt "${promptPreview(prompt)}" from user`, [steerChoice, cancelChoice]);
@@ -1243,11 +1326,19 @@ export default function forgeExtension(pi: ExtensionAPI) {
         return;
       }
       if (command.type === 'agents') return notifyAssignedAgents(ctx);
-      if (command.type === 'agentHelp') return notify(ctx, 'Agent assignment commands have been removed to reduce duplication. Use OMP /agents to configure the six fixed Forge agents. /forge agents shows the read-only Gate mapping.', 'warning');
+      if (command.type === 'agentHelp') return notify(ctx, 'Agent assignment commands have been removed to reduce duplication. Use OMP /agents to configure the Forge agents (forge-plan-critic, forge-code-reviewer). /forge agents shows the read-only Gate mapping.', 'warning');
       if (command.type === 'autoHelp') return notify(ctx, 'Usage: /forge auto on | /forge auto off. Bare /forge auto is not a requirement and will not start a workflow.', 'warning');
       if (command.type === 'auto') {
         try { saveConfig(command.enabled); notify(ctx, `Forge global auto-start ${command.enabled ? 'ON' : 'OFF'}.`); }
         catch (err) { notify(ctx, `Could not save config: ${String(err)}`, 'error'); }
+        return;
+      }
+      if (command.type === 'planReview') {
+        if (command.enabled === null) return notify(ctx, `Forge plan review is ${planReview ? 'ON' : 'OFF'} for new workflows${workflow?.active ? ` (this workflow: ${workflow.planReview === true ? 'ON' : 'OFF'})` : ''}. Usage: /forge planreview on|off. ON: forge-plan-critic reviews every plan before approval.`);
+        try {
+          persistConfig({ planReview: command.enabled }); planReview = command.enabled;
+          notify(ctx, `Forge plan review ${command.enabled ? 'ON' : 'OFF'} for new workflows${workflow?.active ? '; the running workflow keeps its setting' : ''}.`);
+        } catch (err) { notify(ctx, `Could not save config: ${String(err)}`, 'error'); }
         return;
       }
       if (command.type === 'recover') {
@@ -1267,7 +1358,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
         if (workflow?.phase === 'PLAN' && workflow.planWritten && workflow.planValid && !workflow.approved) {
           notify(ctx, 'Forge plan awaits your approval. Run /forge review to open the approval dialog.', 'info');
         }
-        notify(ctx, `Forge: ${workflow?.phase ?? 'inactive'} | requirement: ${workflow?.requirement ? String(workflow.requirement).replace(/[\r\n]/g, ' ').slice(0, 80) : '(none)'} | slug: ${workflow?.slug ?? '-'} | approved: ${workflow?.approved === true ? 'yes' : 'no'} | QA: ${workflow?.qaStatus ?? 'pending'} | rework: ${workflow?.reworkCycles ?? 0} | steering: ${workflow?.steeringRevision ?? 0} | waiting agents: ${missingAgents.join(',') || 'none'}${workflow?.phase === 'EXECUTE' && !workflow.active ? ' | action: /forge qa reviews existing work without rerunning implementation; /forge resume retries execution.' : ''} | global auto: ${autoStart ? 'ON' : 'OFF'}`);
+        notify(ctx, `Forge: ${workflow?.phase ?? 'inactive'} | requirement: ${workflow?.requirement ? String(workflow.requirement).replace(/[\r\n]/g, ' ').slice(0, 80) : '(none)'} | slug: ${workflow?.slug ?? '-'} | approved: ${workflow?.approved === true ? 'yes' : 'no'} | QA: ${workflow?.qaStatus ?? 'pending'} | rework: ${workflow?.reworkCycles ?? 0} | steering: ${workflow?.steeringRevision ?? 0} | waiting agents: ${missingAgents.join(',') || 'none'}${workflow?.phase === 'EXECUTE' && !workflow.active ? ' | action: /forge qa reviews existing work without rerunning implementation; /forge resume retries execution.' : ''} | plan review: ${workflow?.planReview === true ? 'ON' : 'OFF'} | global auto: ${autoStart ? 'ON' : 'OFF'}`);
         return;
       }
       if (command.type === 'report') {
@@ -1290,15 +1381,20 @@ export default function forgeExtension(pi: ExtensionAPI) {
         if (!workflow || !['FAIL', 'BLOCKED'].includes(workflow.qaStatus) || !['QA', 'PLAN'].includes(workflow.phase)) {
           return notify(ctx, 'Rework requires a previous QA FAIL/BLOCKED.', 'warning');
         }
-        if (workflow.phase === 'QA') {
-          invalidateGateWork();
-          workflow = reworkTransition(workflow); saveState(); updateDashboard(ctx);
-        }
+        // Typing /forge rework is the human's go-ahead to plan a fix; the fix plan still needs approval.
+        invalidateGateWork();
+        qaDecisionEpoch++; qaDecisionScheduled = false;
+        workflow = approveReworkTransition(workflow); saveState(); updateDashboard(ctx);
         pi.sendUserMessage(phaseInstruction(workflow), { attribution: 'agent' });
         return;
       }
       if (command.type === 'review') {
         await ctx.waitForIdle?.();
+        if (workflow?.active && workflow.reworkDecisionPending === true) {
+          if (workflow.qaSummary) pi.sendMessage({ customType: 'forge-qa-summary', content: workflow.qaSummary, display: true, excludeFromContext: true });
+          await openQaDecision(ctx);
+          return;
+        }
         await openForgeReview(ctx);
         return;
       }
@@ -1312,15 +1408,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
         return;
       }
       if (command.type === 'qa') {
-        if (!workflow || workflow.approved !== true || workflow.planValid !== true || typeof workflow.approvedPlanHash !== 'string' || workflow.approvedPlanHash.length === 0 || !['EXECUTE', 'QA'].includes(workflow.phase)) {
-          return notify(ctx, 'No approved execution is available for QA.', 'warning');
-        }
-        invalidateGateWork();
-        workflow = { ...workflow, active: true, phase: 'QA', qaStatus: null, qaRetries: 0, qaEvidencePending: false, workingTreeAtQa: null,
-          deliveryPath: null, commitMessagePath: null, commitMessage: null, deliveryRetries: 0,
-          gateAgents: { ...(workflow.gateAgents ?? {}), QA: [] }, gateAgentsSpawned: { ...(workflow.gateAgentsSpawned ?? {}), QA: [] } };
-        saveState(); updateDashboard(ctx);
-        pi.sendUserMessage(qaInstruction(workflow), { attribution: 'agent' });
+        startQaRound(ctx);
         return;
       }
       if (command.type === 'resume' || command.type === 'resumeCurrent') {
@@ -1333,12 +1421,6 @@ export default function forgeExtension(pi: ExtensionAPI) {
             return;
           }
           notify(ctx, 'Selected session contains no restorable Forge checkpoint. Use /resume to inspect the session.', 'warning');
-          return;
-        }
-        if (!workflow.active && workflow.phase === 'REQUIREMENT') {
-          invalidateGateWork();
-          workflow = { ...workflow, active: true, gateAgents: {}, agentRetries: {}, requirementSummaryRequested: false }; saveState();
-          pi.sendUserMessage(phaseInstruction(workflow), { attribution: 'agent' });
           return;
         }
         if (!workflow.active && workflow.phase === 'EXECUTE') {
@@ -1357,8 +1439,8 @@ export default function forgeExtension(pi: ExtensionAPI) {
           return;
         }
         if (workflow.phase === 'EXECUTE') return notify(ctx, 'Restored EXECUTE; approved plan retained. Inspect execution output before retrying writes. Use /forge qa when implementation is complete.', 'info');
-        if (workflow.phase === 'QA' && workflow.qaStatus === 'BLOCKED') {
-          notify(ctx, `Approved plan retained; QA is waiting for evidence, not a code fix. Review ${workflow.qaReportPath ?? 'the last report'} and use /forge qa to rerun independent checks, or /forge rework if the implementation must change.`, 'warning');
+        if (workflow.reworkDecisionPending === true) {
+          await openQaDecision(ctx);
           return;
         }
         if (workflow.phase === 'QA') {
@@ -1370,6 +1452,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
             await openForgeReview(ctx);
             return;
           }
+          workflow = { ...workflow, agentRetries: { ...(workflow.agentRetries ?? {}), PLAN: 0 } }; saveState();
           pi.sendUserMessage(phaseInstruction(workflow), { attribution: 'agent' });
           return;
         }
@@ -1425,17 +1508,12 @@ export default function forgeExtension(pi: ExtensionAPI) {
     if (ctx.hasPendingMessages?.()) return;
 
 
+    if (workflow.reworkDecisionPending === true) {
+      scheduleQaDecisionWhenIdle(ctx);
+      return;
+    }
     if (workflow.phase === 'EXECUTE') {
       if (!workflow.approved || !workflow.executionObserved) return;
-      if (!hasAgents('EXECUTE')) {
-        if ((workflow.agentRetries?.EXECUTE ?? 0) < 1) {
-          workflow = { ...workflow, agentRetries: { ...(workflow.agentRetries ?? {}), EXECUTE: 1 } }; saveState();
-          return { continue: true, additionalContext: executionInstruction(workflow) };
-        }
-        workflow = { ...workflow, active: false }; saveState(); updateDashboard(ctx);
-        notify(ctx, `Forge halted: no completed ${agentNameFor(workflow,'execution','executor')} report was recorded. Check /forge status. Use /forge qa to review existing implementation, or /forge resume to retry execution.`, 'error');
-        return;
-      }
       workflow = { ...workflow, phase: 'QA', qaStatus: null, qaRetries: 0, gateAgents: { ...(workflow.gateAgents ?? {}), QA: [] } };
       saveState(); updateDashboard(ctx);
       return { continue: true, additionalContext: qaInstruction(workflow) };
@@ -1470,49 +1548,21 @@ export default function forgeExtension(pi: ExtensionAPI) {
       return;
     }
 
-    if (!['REQUIREMENT', 'PLAN'].includes(workflow.phase)) return;
-    if (workflow.phase === 'PLAN' && workflow.planWritten && workflow.planValid && !workflow.approved) {
+    if (workflow.phase !== 'PLAN') return;
+    if (workflow.planWritten && workflow.planValid && !workflow.approved) {
       if (workflow.reviewRequested) scheduleReviewWhenIdle(ctx);
       return;
     }
-    if (workflow.phase === 'REQUIREMENT' && hasAgents('REQUIREMENT')) {
-      const key = 'REQUIREMENT:summary';
-      const retries = workflow.agentRetries?.[key] ?? 0;
-      if (retries < 2) {
-        workflow = { ...workflow, requirementSummaryRequested: true, agentRetries: { ...(workflow.agentRetries ?? {}), [key]: retries + 1 } };
-        saveState(); updateDashboard(ctx);
-        return { continue: true, additionalContext: requirementSummaryInstruction(workflow) };
-      }
-      return;
+    const retries = workflow.agentRetries?.PLAN ?? 0;
+    if (retries < 2) {
+      workflow = { ...workflow, agentRetries: { ...(workflow.agentRetries ?? {}), PLAN: retries + 1 } }; saveState();
+      return { continue: true, additionalContext: planDecisionReminder(workflow) };
     }
-    if (workflow.phase === 'PLAN' && workflow.reworkBaseHash && !hasAgents('PLAN')) {
-      const retries = workflow.agentRetries?.PLAN ?? 0;
-      if (retries < 1) {
-        workflow = { ...workflow, agentRetries: { ...(workflow.agentRetries ?? {}), PLAN: 1 } }; saveState();
-        return { continue: true, additionalContext: phaseInstruction(workflow) };
-      }
-      notify(ctx, 'Forge rework needs a successful forge-planner report before the new plan can be saved.', 'warning');
-      return;
-    }
-    if (!hasAgents(workflow.phase)) {
-      const missing = missingGateAgentsFor(workflow);
-      const key = workflow.phase;
-      const retries = workflow.agentRetries?.[key] ?? 0;
-      if (retries < 1) {
-        workflow = { ...workflow, agentRetries: { ...(workflow.agentRetries ?? {}), [key]: 1 } }; saveState(); updateDashboard(ctx);
-        return { continue: true, additionalContext: `Mandatory named subagents were not observed: ${missing.join(', ')}. Invoke through native task, await results, then continue. Do not simulate them.` };
-      }
-      workflow = { ...workflow, active: false }; saveState(); updateDashboard(ctx);
-      notify(ctx, `Forge agent gate BLOCKED: missing ${missing.join(', ')}. Check global agents and /forge resume.`, 'error');
-      return;
-    }
-    if (workflow.phase === 'PLAN' && !workflow.planWritten) {
-      return { continue: true, additionalContext: `${phaseInstruction(workflow)}\n\nForge is still waiting for forge_plan_propose. Write the complete plan to ${forgePlanPath(workflow)}, then call forge_plan_propose. Do not claim the plan exists until the write succeeds.` };
-    }
+    notify(ctx, 'Forge PLAN is waiting for a plan proposal. Answer in the prompt to steer, or run /forge resume to resend the PLAN instruction.', 'warning');
   });
 
-  // Before spawning a task, route only the named specialist for this gate.
-  // During execution the executor's tool list omits shell; reviewer agents are read-only.
+  // Before spawning a task: the QA reviewer runs only in QA; read-only research agents
+  // run while planning or reviewing; approved execution may delegate to any helper.
   pi.on('before_subagent_spawn', async (event, ctx) => {
     if (ctx.agent?.kind !== 'main' || !workflow?.active) return;
     const conflict = recoveryProposal(workflow);
@@ -1521,8 +1571,15 @@ export default function forgeExtension(pi: ExtensionAPI) {
       return { block:true, reason:`Forge state needs human review before spawning agents: ${conflict.explanation}. Run /forge recover.` };
     }
     const selected = typeof event.agent === 'string' ? event.agent : String(event.agent?.name ?? '');
-    const allowed = requiredAgentsFor(workflow);
-    if (!allowed.includes(selected)) return { block: true, reason: `Forge ${workflow.phase}: expected ${allowed.join(', ') || '(no subagents)'}; got ${selected || 'unknown'}.` };
+    const required = requiredAgentsFor(workflow);
+    if (!required.includes(selected)) {
+      if (guardedAgentNames.has(selected) || listAssignedAgentNames(workflow.agentAssignments).includes(selected)) {
+        return { block: true, reason: `Forge ${workflow.phase}: ${selected} is not part of this gate (forge-plan-critic runs in PLAN only with plan review on; forge-code-reviewer runs in QA review).` };
+      }
+      if (workflow.phase === 'EXECUTE' && workflow.approved === true) return;
+      if (RESEARCH_AGENTS.includes(selected)) return;
+      return { block: true, reason: `Forge ${workflow.phase}: only read-only research agents (${RESEARCH_AGENTS.join(', ')})${required.length ? ` and ${required.join(', ')}` : ''} may run in this gate; got ${selected || 'unknown'}.` };
+    }
     // Spawn is not success. Completion is acknowledged only after a task tool result.
     const spawned = new Set(workflow.gateAgentsSpawned?.[workflow.phase] ?? []);
     spawned.add(selected);
@@ -1548,25 +1605,26 @@ export default function forgeExtension(pi: ExtensionAPI) {
     const outputs = (event.content ?? []).filter((x: any)=>x?.type==='text' && typeof x.text==='string' && x.text.trim()).map((x: any)=>x.text);
     // Empty successful tool results are not meaningful completed agent reports.
     if (!outputs.length && !event.details) return;
+    const notes: string[] = [];
     for (const agent of pending.agents) {
       if (requiredAgentsFor(workflow).includes(agent) && (workflow.gateAgentsSpawned?.[workflow.phase] ?? []).includes(agent)) {
         markAgent(agent, ctx);
+        const highFindings = extractHighFindings(outputs.join('\n'));
         workflow = { ...workflow, agentCompletions: [...(workflow.agentCompletions ?? []),
           { gate: pending.scope.phase, agent, resultId: id, reportedAt: new Date().toISOString(),
-            resultPreview: outputs.join('\n').slice(0,800) || '[structured tool result]',
-            reportedSeverities: countReportedSeverities(outputs.join('\n')) }] };
+            resultPreview: outputs.join('\n').slice(0,800) || '[structured tool result]', highFindings }] };
         saveState();
+        if (highFindings.length) notes.push(workflow.phase === 'PLAN'
+          ? `Forge: ${agent} reported CRITICAL/HIGH ${highFindings.join(', ')}. Resolve each in the plan and cite its ID before forge_plan_propose.`
+          : `Forge: ${agent} reported CRITICAL/HIGH ${highFindings.join(', ')}. Carry each in codeReview.findings under its ID at CRITICAL/HIGH, or start its evidence with "Disputed:" and your counter-evidence.`);
       }
     }
-    // Ask for the requirement summary in the SAME model turn; no extra user chat
-    // message, /forge command, or review form answer is needed.
-    const instruction = requestRequirementSummary(ctx);
-    return instruction ? { additionalContext: instruction } : undefined;
+    return notes.length ? { additionalContext: notes.join('\n') } : undefined;
   });
 
   pi.on('tool_call', async (event, ctx) => {
     // Forge subagents run with independent sessions. Their Git tool calls must be
-    // guarded too; checking main only leaves executor and QA child agents exposed.
+    // guarded too; checking main only leaves helper and QA child agents exposed.
     const childName = String(ctx.agent?.name ?? '');
     const isForgeChild = ctx.agent?.kind === 'sub' && (guardedAgentNames.has(childName) || listAssignedAgentNames(workflow?.agentAssignments).includes(childName));
     const tool = String(event.toolName ?? '');
@@ -1593,13 +1651,15 @@ export default function forgeExtension(pi: ExtensionAPI) {
       // An OMP tool_call hook can replace task arguments before native task dispatch.
       const scope = gateSnapshot(ctx);
       if (id && scope) runningTasks.set(id, { scope, agents: taskAgents(event.input) });
-      let skillBrief = '';
-      try { skillBrief = skillBriefForGate(); }
-      catch (err) { if (id) runningTasks.delete(id); return { block: true, reason: `Forge gate skill verification failed: ${String(err)}` }; }
-      if (skillBrief) {
-        const rewritten = injectGateSkillsIntoTask(event.input, workflow.phase, skillBrief);
-        if (!rewritten) { if (id) runningTasks.delete(id); return { block: true, reason: 'Forge gate skills require task text on every subagent. Stepped tasks without task text cannot receive required skill instructions.' }; }
-        return { input: rewritten };
+      if (taskAgents(event.input).some(a => requiredAgentsFor(workflow).includes(a))) {
+        let skillBrief = '';
+        try { skillBrief = skillBriefForGate(); }
+        catch (err) { if (id) runningTasks.delete(id); return { block: true, reason: `Forge gate skill verification failed: ${String(err)}` }; }
+        if (skillBrief) {
+          const rewritten = injectGateSkillsIntoTask(event.input, workflow.phase, skillBrief);
+          if (!rewritten) { if (id) runningTasks.delete(id); return { block: true, reason: 'Forge gate skills require task text on every subagent. Stepped tasks without task text cannot receive required skill instructions.' }; }
+          return { input: rewritten };
+        }
       }
     }
     const input = event.input ?? {};
@@ -1623,18 +1683,15 @@ export default function forgeExtension(pi: ExtensionAPI) {
       if (/(?:^|\/)\.git(?:\/|$)/.test(target)) return { block: true, reason: 'Forge forbids direct writes to .git internals.' };
     }
     if (isForgeChild) {
-      if (childName !== configuredAgents.execution.executor && !READ_ONLY_TOOLS.includes(tool)) {
-        return { block: true, reason: 'Forge specialist is read-only. Only executor may edit approved code; no Git writes.' };
-      }
-      // Steering can revoke approval while the executor is still running.
-      if (workflow && !(workflow.active && workflow.phase === 'EXECUTE' && workflow.approved === true) && ['write','edit','apply_patch'].includes(tool)) {
-        return { block: true, reason: `Forge approval is not active (${workflow.phase}): a user steering prompt or QA result revoked it. Stop and report what you already changed; a revised plan needs new approval.` };
-      }
+      if (!READ_ONLY_TOOLS.includes(tool)) return { block: true, reason: 'Forge specialist is read-only: it reviews and reports; no edits, shell or Git writes.' };
       return;
     }
     if (!workflow || (!workflow.active && workflow.deliveryPath)) return;
     if (!workflow.active && !READ_ONLY_TOOLS.includes(tool)) {
       return { block: true, reason: 'Forge is paused. Resume the workflow or cancel it before making changes.' };
+    }
+    if (workflow.reworkDecisionPending === true && ['forge_qa_submit', 'forge_plan_propose', 'write', 'edit', 'apply_patch'].includes(tool)) {
+      return { block: true, reason: `Forge QA ${workflow.qaStatus} is waiting for the user's decision in the Forge QA dialog (or /forge rework, /forge qa). End your turn; do not plan a fix, edit files or resubmit QA.` };
     }
     if (workflow.phase === 'QA') {
       const delivery = workflow.qaStatus === 'PASS';
@@ -1654,30 +1711,25 @@ export default function forgeExtension(pi: ExtensionAPI) {
     // Phase-based permissions, NOT an all-tools Plan Mode precondition.
     // Read, grep, glob, task, and ask must work even when OMP's Plan Mode
     // temporarily becomes inactive or paused. This fixes the Discovery deadlock.
-    const preApproval = ['REQUIREMENT', 'PLAN', 'EXECUTE'].includes(workflow.phase);
+    const preApproval = ['PLAN', 'EXECUTE'].includes(workflow.phase);
     if (!preApproval) return;
 
-    if (['read', 'grep', 'glob', 'ls', 'task', 'ask'].includes(tool)) return;
-    // Control-plane only: records the requirement synthesis in Forge state.
-    if (tool === 'forge_requirement_summary' && workflow.phase === 'REQUIREMENT') return;
+    if (['read', 'grep', 'glob', 'ls', 'task', 'ask', 'todo', 'wait', 'web_search'].includes(tool)) return;
     // Control-plane only: proposes the Forge plan file for human review.
     if (tool === 'forge_plan_propose' && workflow.phase === 'PLAN') return;
 
     if (['write', 'edit', 'apply_patch'].includes(tool)) {
       // Forge's own plan mode: the single plan file of the current PLAN gate is
       // the only writable path before human approval. Native propose devices stay blocked.
-      const target = String(input.path ?? input.file_path ?? input.filePath ?? input.target ?? input.url ?? '');
-      if (tool === 'write' && workflow.phase === 'PLAN' && target === forgePlanPath(workflow)) {
-        if (workflow.planWritten && workflow.planValid) {
-          return { block: true, reason: 'The plan is awaiting human review in Forge. Wait for the decision (or /forge review); do not change it now.' };
-        }
-        if (!hasAgents('PLAN')) return { block: true, reason: 'Forge requires the planner report before the plan can be saved.' };
+      const planPath = forgePlanPath(workflow);
+      const targets = editTargets(input);
+      const destructive = tool === 'edit' && typeof input.input === 'string' && /^(?:REM|MV)\b/m.test(input.input);
+      if (workflow.phase === 'PLAN' && tool !== 'apply_patch' && !destructive && targets.length > 0 && targets.every(t => t === planPath)) {
+        if (workflow.planWritten && workflow.planValid) return { block: true, reason: 'The plan is awaiting human review in Forge. Wait for the decision (or /forge review); do not change it now.' };
         return;
       }
-      const pending = workflow.phase === 'REQUIREMENT' ? ` Finish the requirement analysis: ${missingGateAgentsFor(workflow).join(', ') || 'call forge_requirement_summary'}. The harness advances automatically; do NOT ask the user to send a next-gate message.` : '';
-      const planHint = workflow.phase === 'PLAN' && tool === 'write'
-        ? ` Only ${forgePlanPath(workflow)} is writable during Forge PLAN; received ${JSON.stringify(target)}.` : '';
-      return { block: true, reason: `Forge ${workflow.phase} is read-only: implementation writes require explicit human plan approval.${planHint}${pending}` };
+      const planHint = workflow.phase === 'PLAN' ? ` Only ${planPath} is writable during Forge PLAN (write, or edit without REM/MV); received ${JSON.stringify(targets.join(', '))}.` : '';
+      return { block: true, reason: `Forge ${workflow.phase} is read-only: implementation writes require explicit human plan approval.${planHint}` };
     }
 
     if (['bash', 'shell', 'terminal', 'exec', 'run'].includes(tool)) {
@@ -1689,7 +1741,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
 
     // Unknown tools may write to the filesystem or external services. Fail
     // closed until an explicit audited read-only capability is added.
-    return { block: true, reason: `Forge ${workflow.phase}: unknown tool ${tool} cannot run before human plan approval. Use read/grep/glob/task/ask.` };
+    return { block: true, reason: `Forge ${workflow.phase}: unknown tool ${tool} cannot run before human plan approval. Use read/grep/glob/task(scout)/ask.` };
 
   });
 }

@@ -1,10 +1,10 @@
 # Forge Suite 6.1 — shared core + adapters
 
-Forge is a gated multi-agent SDLC orchestrator:
+Forge is a gated SDLC orchestrator:
 
-`REQUIREMENT → PLANNING → native human plan approval → EXECUTING → independent QA → DELIVERY`
+`PLAN (main agent, read-only plan mode) → human plan approval → EXECUTE (main agent) → QA (main agent + forge-code-reviewer) → DELIVERY`
 
-Six named specialists (the Requirement gate is one `forge-requirement` pass), a parseable plan contract (BIZ/REQ/TC/QG), evidence-based
+One named specialist (`forge-code-reviewer`, QA only), a parseable plan contract (BIZ/REQ/TC/QG), evidence-based
 QA, and **no agent-run git writes** — on two hosts:
 
 | Adapter | Host | Package after build |
@@ -23,7 +23,7 @@ core/                     platform-neutral Forge (pure logic + read-only git ins
   workspace.mjs           read-only git snapshot + QA scope
   platform.mjs            instruction wording per host (OMP text → Claude Code text)
   engine.mjs              event-driven controller: normalized events → decisions
-agents/                   canonical prompts for the 6 specialists (+ roles.json models)
+agents/                   canonical prompt for forge-code-reviewer (+ roles.json models)
 adapters/omp/             OMP extension (index.ts), session discovery, installer, tests
 adapters/claude-code/     plugin template (hooks.json, forge-hook.mjs, forge-mcp.mjs, /forge)
 scripts/build.mjs         vendors core + renders agents into self-contained packages

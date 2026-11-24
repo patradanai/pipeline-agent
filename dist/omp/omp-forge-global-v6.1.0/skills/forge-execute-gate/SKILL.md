@@ -6,6 +6,6 @@ disable-model-invocation: true
 
 # Execute gate
 
-Begin only with recorded human approval of the current plan. Use `forge-executor` for implementation within approved task scope. Preserve task and requirement traceability; record actual changes, completed and blocked tasks, errors, dependencies, and deviations. The orchestrator runs appropriate safe checks and passes their real results to QA.
+Begin only with recorded human approval of the current plan. Implement the approved plan yourself, step by step, verifying each step before the next; track steps with todo. You may delegate independent slices to subagents, but you own integration and verification. Record changed files, checks actually run with their results, completed and blocked steps, and deviations.
 
-If material scope drift is necessary, stop and return to planning for a revised plan and fresh human approval. Do not claim acceptance or QA PASS from implementation or self-review. Never stage, commit, push, tag, release, or deploy as part of Forge execution.
+If material scope drift is necessary, stop and return to planning for a revised plan and fresh approval. Do not claim acceptance or QA PASS from implementation or self-review. Never stage, commit, push, tag, release, or deploy.

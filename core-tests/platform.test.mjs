@@ -1,21 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { adaptInstruction, OMP_ONLY_PATTERN } from '../core/platform.mjs';
-import { initialState, phaseInstruction, requirementSummaryInstruction, executionInstruction, qaInstruction, reworkInstruction, deliveryInstruction } from '../core/core.mjs';
-
-const SUMMARY = { baseline: 'Goal: CRM contacts. Scope: create/list. Acceptance: both work.', findings: [{ id: 'F-001', severity: 'HIGH', title: 'No tenant column', source: 'forge-requirement' }], blockers: [], assumptions: [], relevantFiles: [] };
+import { initialState, phaseInstruction, executionInstruction, qaInstruction, reworkInstruction, deliveryInstruction } from '../core/core.mjs';
 
 function allRenderings() {
   const s = initialState('Build a CRM', 'forge-abc');
+  const steering = [{ revision: 1, phase: 'EXECUTE', text: 'Also export contacts', at: '2026-01-01T00:00:00.000Z' }];
   return [
-    ['REQUIREMENT', phaseInstruction(s)],
-    ['REQUIREMENT:summary', requirementSummaryInstruction(s)],
-    ['PLAN', phaseInstruction({ ...s, phase: 'PLAN', requirementSummary: null })],
-    ['PLAN:synthesis', phaseInstruction({ ...s, phase: 'PLAN', requirementSummary: SUMMARY })],
-    ['AWAITING', phaseInstruction({ ...s, phase: 'PLAN', planWritten: true, planValid: true, approved: false })],
+    ['PLAN', phaseInstruction(s)],
+    ['PLAN:review-on', phaseInstruction({ ...s, planReview: true })],
+    ['PLAN:steered-delta', phaseInstruction({ ...s, requirementSteering: steering, planPath: 'local://forge-abc-plan.md' })],
+    ['PLAN:written', phaseInstruction({ ...s, planWritten: true, planValid: false, planPath: 'local://forge-abc-plan.md' })],
+    ['AWAITING', phaseInstruction({ ...s, planWritten: true, planValid: true, approved: false })],
     ['EXEC', executionInstruction({ ...s, phase: 'EXECUTE' })],
     ['QA', qaInstruction({ ...s, phase: 'QA' })],
-    ['REWORK', reworkInstruction({ ...s, phase: 'PLAN', qaStatus: 'FAIL', reworkCycles: 1 })],
+    ['REWORK', reworkInstruction({ ...s, phase: 'PLAN', qaStatus: 'FAIL', reworkCycles: 1, reworkBaseHash: 'h', reworkBasePlanPath: 'local://forge-abc-plan.md' })],
+    ['REWORK:steering', reworkInstruction({ ...s, phase: 'PLAN', reworkReason: 'STEERING', reworkCycles: 1, reworkBaseHash: 'h', reworkBasePlanPath: 'local://forge-abc-plan.md', requirementSteering: steering })],
     ['DELIVERY', deliveryInstruction({ ...s, phase: 'QA', qaStatus: 'PASS' })],
   ];
 }
@@ -30,8 +30,10 @@ test('Claude Code wording never leaks OMP-only concepts (every gate instruction)
 test('planning and rework tell Claude Code to use ExitPlanMode', () => {
   const r = Object.fromEntries(allRenderings());
   assert.match(adaptInstruction(r.PLAN, 'claude-code'), /ExitPlanMode/);
+  assert.match(adaptInstruction(r.PLAN, 'claude-code'), /parallel Explore subagents via the Agent tool/);
+  assert.match(adaptInstruction(r.PLAN, 'claude-code'), /AskUserQuestion/);
   assert.match(adaptInstruction(r.REWORK, 'claude-code'), /ExitPlanMode/);
-  assert.match(adaptInstruction(r.AWAITING, 'claude-code'), /ExitPlanMode/);
+  assert.match(adaptInstruction(r['PLAN:written'], 'claude-code'), /GATE 1\/3: NATIVE PLAN APPROVAL[\s\S]*ExitPlanMode/);
 });
 
 test('OMP wording is passed through unchanged', () => {

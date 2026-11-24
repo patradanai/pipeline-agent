@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 330" role="img" aria-labelledby="title desc">
   <title id="title">OMP Forge custom skill lifecycle</title>
-  <desc id="desc">Write a SKILL.md, create or discover it in OMP, attach it to a Forge gate, then Forge pins and injects its instructions into tasks for that gate. Runtime safety policies remain in force.</desc>
+  <desc id="desc">Write a SKILL.md, create or discover it in OMP, attach it to planning, execution, QA or delivery. Forge pins its instructions for the main agent and required specialist tasks. Runtime safety policies remain in force.</desc>
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 10 5 0 10z" fill="#64748b"/></marker>
     <style>text{font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;fill:#172033}.title{font-size:17px;font-weight:700}.sub{font-size:12px;fill:#475569}</style>
@@ -10,8 +10,8 @@
   <g text-anchor="middle">
     <g transform="translate(38 104)"><rect width="198" height="116" rx="14" fill="#fff" stroke="#3b73d1" stroke-width="2"/><text x="99" y="35" class="title">1 · Write</text><text x="99" y="63" class="sub">SKILL.md with name,</text><text x="99" y="82" class="sub">description and instructions</text></g>
     <g transform="translate(278 104)"><rect width="198" height="116" rx="14" fill="#fff" stroke="#3b73d1" stroke-width="2"/><text x="99" y="35" class="title">2 · Create or find</text><text x="99" y="63" class="sub">/forge skill create</text><text x="99" y="82" class="sub">or /forge skill list</text></g>
-    <g transform="translate(518 104)"><rect width="198" height="116" rx="14" fill="#fff" stroke="#d49a1d" stroke-width="2"/><text x="99" y="35" class="title">3 · Attach</text><text x="99" y="63" class="sub">Choose requirement, planning,</text><text x="99" y="82" class="sub">execution, QA or delivery</text></g>
-    <g transform="translate(758 104)"><rect width="198" height="116" rx="14" fill="#fff" stroke="#37935b" stroke-width="2"/><text x="99" y="35" class="title">4 · Apply</text><text x="99" y="63" class="sub">Pinned and injected into</text><text x="99" y="82" class="sub">that gate's specialist tasks</text></g>
+    <g transform="translate(518 104)"><rect width="198" height="116" rx="14" fill="#fff" stroke="#d49a1d" stroke-width="2"/><text x="99" y="35" class="title">3 · Attach</text><text x="99" y="63" class="sub">Choose planning, execution,</text><text x="99" y="82" class="sub">QA or delivery</text></g>
+    <g transform="translate(758 104)"><rect width="198" height="116" rx="14" fill="#fff" stroke="#37935b" stroke-width="2"/><text x="99" y="35" class="title">4 · Apply</text><text x="99" y="63" class="sub">Pinned for the main agent</text><text x="99" y="82" class="sub">and required specialists</text></g>
   </g>
   <g stroke="#64748b" stroke-width="2.5" marker-end="url(#arrow)"><path d="M239 162h31"/><path d="M479 162h31"/><path d="M719 162h31"/></g>
   <rect x="125" y="254" width="750" height="38" rx="19" fill="#fff7ed" stroke="#fed7aa"/>

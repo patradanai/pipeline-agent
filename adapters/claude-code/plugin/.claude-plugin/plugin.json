@@ -1,1 +1,1 @@
-{"name":"forge","description":"Forge: gated multi-agent SDLC (requirement → plan → native approval → execute → QA → delivery) with no agent git writes","version":"0.0.0"}
+{"name":"forge","description":"Forge: human-approved plan → execute → evidence-based QA with independent code review → delivery; no agent git writes","version":"0.0.0"}

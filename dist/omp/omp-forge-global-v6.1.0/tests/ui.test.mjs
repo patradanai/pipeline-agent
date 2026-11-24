@@ -3,23 +3,22 @@ import assert from 'node:assert/strict';
 import { renderForgeWidget } from '../forge/core.mjs';
 
 const cases = [
-  ['REQUIREMENT', 'Requirement', '1/4'],
-  ['PLAN', 'Planning', '2/4'],
-  ['EXECUTE', 'Execution', '3/4'],
-  ['QA', 'QA review', '4/4'],
+  ['PLAN', 'Planning', '1/3', '▰▱▱'],
+  ['EXECUTE', 'Execution', '2/3', '▰▰▱'],
+  ['QA', 'QA review', '3/3', '▰▰▰'],
 ];
-for (const [phase, title, fraction] of cases) {
+for (const [phase, title, fraction, meter] of cases) {
   test(`compact widget: ${phase} renders one line without future gates`, () => {
     const result = renderForgeWidget({phase, active:true});
     assert.equal(result.length, 1);
     assert.match(result[0], new RegExp(title));
     assert.match(result[0], new RegExp(fraction.replace('/', '\\/')));
     assert.doesNotMatch(result[0], /AWAITING|APPROVAL|○|DISCOVERY|COOKING|CHALLENGE/);
-    assert.match(result[0], /▰/);
+    assert.ok(result[0].includes(meter), result[0]);
   });
 }
 test('Forge review shows Plan review status only for a valid written unapproved plan', () => {
-  assert.deepEqual(renderForgeWidget({phase:'PLAN',active:true,planWritten:true,planValid:true,approved:false}), ['FORGE  ▰▰▱▱  Plan review  2/4']);
+  assert.deepEqual(renderForgeWidget({phase:'PLAN',active:true,planWritten:true,planValid:true,approved:false}), ['FORGE  ▰▱▱  Plan review  1/3']);
   for (const state of [
     {planWritten:false,planValid:true,approved:false},
     {planWritten:true,planValid:false,approved:false},
@@ -41,9 +40,10 @@ test('completion removes persistent widget', () => {
 });
 test('QA rework shows revision without approval noise', () => {
   assert.deepEqual(renderForgeWidget({phase:'PLAN',active:true,reworkCycles:2}),
-    ['FORGE  ▰▰▱▱  Planning  2/4  ·  Rework 2']);
+    ['FORGE  ▰▱▱  Planning  1/3  ·  Rework 2']);
 });
 test('inactive and unknown gates do not show a widget', () => {
   assert.equal(renderForgeWidget({phase:'EXECUTE',active:false}),null);
   assert.equal(renderForgeWidget({phase:'UNKNOWN',active:true}),null);
+  assert.equal(renderForgeWidget({phase:'REQUIREMENT',active:true}),null);
 });

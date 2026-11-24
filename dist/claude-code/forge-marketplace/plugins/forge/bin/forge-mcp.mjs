@@ -14,18 +14,6 @@ const strList = { type: 'array', items: str };
 
 export const TOOLS = [
   {
-    name: 'forge_requirement_summary',
-    description: 'Submit the requirement synthesis after the forge-requirement report: baseline, ALL findings with their ORIGINAL severity, open blockers, assumptions and relevant files. Forge cross-checks the report\'s own CRITICAL/HIGH labels, then opens Planning. Changes no project files.',
-    inputSchema: {
-      type: 'object', additionalProperties: false, required: ['baseline', 'findings'],
-      properties: {
-        baseline: str,
-        findings: { type: 'array', items: { type: 'object', required: ['severity', 'title'], properties: { id: str, severity, title: str, source: str } } },
-        blockers: strList, assumptions: strList, relevantFiles: strList,
-      },
-    },
-  },
-  {
     name: 'forge_qa_scope',
     description: 'Read-only Git HEAD/status/diff file inventory for approved QA. Does not edit, stage or commit files. A clean diff is not an automatic PASS.',
     inputSchema: { type: 'object', additionalProperties: false, properties: {} },

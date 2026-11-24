@@ -1,4 +1,4 @@
-# OMP Forge v6.1 — Requirement รอบเดียว agent เดียว
+# OMP Forge v6.2 — Plan mode แบบ OMP, main agent ทำงานเอง
 
 ## ติดตั้งทับเวอร์ชันเดิม
 
@@ -11,7 +11,7 @@ bash ./install.sh
 
 ปิด OMP แล้วเปิดใหม่ เลือก Session ที่มีงาน Forge ด้วย OMP `/resume` หรือ `/forge resume` จาก Main Session.
 
-Forge ใช้ 4 gate: `REQUIREMENT`, `PLAN`, `EXECUTE`, `QA` โดยต้องได้รับ Native OMP Approval จากผู้ใช้ก่อนเริ่ม Execute
+Forge ใช้ 3 gate: `PLAN`, `EXECUTE`, `QA` (delivery อยู่ใน QA หลัง PASS) โดยต้องได้รับการอนุมัติแผนจากผู้ใช้ในหน้าต่างอนุมัติของ Forge ก่อนเริ่ม Execute แถบสถานะแสดง `FORGE ▰▱▱ Planning 1/3` / `Plan review 1/3`, `▰▰▱ Execution 2/3`, `▰▰▰ QA review 3/3` / `Delivery 3/3`
 
 ตรวจสอบด้วย:
 
@@ -19,15 +19,26 @@ Forge ใช้ 4 gate: `REQUIREMENT`, `PLAN`, `EXECUTE`, `QA` โดยต้�
 /forge status
 ```
 
-Forge ยังคงใช้ Native OMP Approval, Gate Skills, 6 Agents และไม่ทำ git commit/push เอง.
+Forge ยังคงใช้หน้าต่างอนุมัติของ Forge, Gate Skills, agent `forge-code-reviewer` ตอน QA (และ `forge-plan-critic` เมื่อเปิด plan review) และไม่ทำ git commit/push เอง.
+
+Plan critic (ไม่บังคับ): `/forge planreview on|off` ค่าเริ่มต้น OFF บันทึกใน config ของ Forge และมีผลกับ workflow ใหม่ (แต่ละงานจำค่าไว้ตอนเริ่ม) ดูได้จาก `/forge status` (`plan review: ON/OFF`) เมื่อเปิด main ต้องรัน `forge-plan-critic` (อ่านอย่างเดียว รายงาน `PC-001 [HIGH] …`) 1 ครั้งกับแผนที่เขียนแล้วก่อนส่ง Forge ปฏิเสธ `forge_plan_propose` จนกว่า critic รายงานแล้ว และแผนอ้าง PC-id ระดับ CRITICAL/HIGH ครบทุกข้อ
 
 ### Gate Skills ที่ติดตั้งมาพร้อม Forge
 
-แพ็กเกจติดตั้ง `forge-requirement-gate`, `forge-plan-gate`, `forge-execute-gate` และ `forge-qa-gate` ลงใน `~/.omp/agent/skills/<ชื่อ>/SKILL.md` หรือ `$PI_CODING_AGENT_DIR/skills/<ชื่อ>/SKILL.md` เมื่อกำหนดตัวแปรนี้ Forge แนบ skill ของแต่ละ gate ให้ workflow และยังใช้ skill เพิ่มเติมที่ผู้ใช้ตั้งค่าได้ผ่าน `/forge skill` และ `/forge skill list`
+แพ็กเกจติดตั้ง `forge-plan-gate`, `forge-execute-gate` และ `forge-qa-gate` ลงใน `~/.omp/agent/skills/<ชื่อ>/SKILL.md` หรือ `$PI_CODING_AGENT_DIR/skills/<ชื่อ>/SKILL.md` เมื่อกำหนดตัวแปรนี้ Forge แนบ skill ของแต่ละ gate (planning, execution, qa, delivery) ให้ main agent และยังใช้ skill เพิ่มเติมที่ผู้ใช้ตั้งค่าได้ผ่าน `/forge skill` และ `/forge skill list`
 
-Installer ไม่เขียนทับโฟลเดอร์ skill ชื่อเดียวกันที่มีอยู่ จึงรักษาการปรับแต่งของผู้ใช้ไว้ หากต้องการใช้ไฟล์จากแพ็กเกจ ให้สำรองและย้ายโฟลเดอร์เดิมออกก่อนติดตั้งใหม่
+Installer ไม่เขียนทับโฟลเดอร์ skill ชื่อเดียวกันที่มีอยู่ จึงรักษาการปรับแต่งของผู้ใช้ไว้ ยกเว้น gate skill เวอร์ชันเก่าที่ยังอ้าง agent ที่ถูกเลิกใช้: installer สำรองไว้ใน `forge-backups/` แล้วติดตั้งไฟล์ใหม่แทน หากต้องการใช้ไฟล์จากแพ็กเกจกับ skill อื่น ให้สำรองและย้ายโฟลเดอร์เดิมออกก่อนติดตั้งใหม่
 
-QA ตรวจโดย `forge-qa` และ `forge-code-reviewer` อย่างอิสระ หลังบันทึก QA PASS แล้ว `forge-delivery` จัดทำรายงานและข้อความ commit สำหรับผู้ใช้ โดยไม่ stage, commit หรือ push เอง หาก QA ไม่ผ่าน ต้องวางแผนแก้ไขและขออนุมัติใหม่
+QA: main agent เรียก `forge_qa_scope` แล้วสั่ง `forge-code-reviewer` รีวิว diff ขนานกับการรัน check ของแผน ตรวจทุก TC เอง แล้วส่ง `forge_qa_submit` ครั้งเดียว reviewer รายงานบรรทัดละ finding `CR-001 [HIGH] file:line — evidence — fix` และ CR-id ระดับ CRITICAL/HIGH ทุกข้อต้องอยู่ใน codeReview.findings: คงระดับ CRITICAL/HIGH (gate FAIL) หรือ evidence ขึ้นต้นด้วย `Disputed:` พร้อมหลักฐานแย้ง (ลดระดับได้ แต่ยังแสดงในรายงาน QA) ไม่งั้น Forge ไม่รับผล หลังบันทึก QA PASS แล้ว main agent จัดทำรายงานและข้อความ commit ผ่าน `forge_delivery_submit` เอง โดยไม่ stage, commit หรือ push
+
+หลัง `forge_qa_submit` ทุกครั้ง Forge แสดงตารางสรุป QA ใน TUI (ไม่ส่งให้ model): หัว `Forge QA ✅ PASS / ❌ FAIL / ⚠️ BLOCKED` พร้อมจำนวนและ path รายงานเต็ม, TC ที่อนุมัติทีละแถว (สถานะ ✅ ❌ ⚠️ ⏸️, test case, business topic, scenario, actual, evidence), ตาราง quality gate, finding ของ code review (🔴 CRITICAL 🟠 HIGH 🟡 MEDIUM ⚪ LOW) และสิ่งที่ทำให้ gate ไม่ผ่าน
+
+QA FAIL/BLOCKED ไม่เริ่มแก้เอง Forge รอคุณตัดสินใจ แถบสถานะขึ้น `QA failed · your decision` / `QA blocked · your decision` และระหว่างรอ Forge บล็อกการเขียนแผน การเสนอแผน และการส่ง QA ซ้ำ เมื่อ turn ของ QA จบ จะเปิดหน้าต่างให้เลือก:
+
+- FAIL: **Plan the fix — draft a rework plan, then approve it**, **Plan the fix with my notes** (โน้ตที่พิมพ์จะถูกแนบไปกับคำสั่ง rework), **Not now — keep the QA report** (เก็บทุกอย่างไว้)
+- BLOCKED: มี **Rerun QA — I collected the missing evidence** เป็นตัวเลือกแรก แล้วตามด้วยตัวเลือกเดียวกับ FAIL
+- `/forge review` แสดงตารางอีกครั้งและเปิดหน้าต่างตัดสินใจใหม่ `/forge rework` และ `/forge qa` ก็ใช้ตัดสินใจได้เช่นกัน
+- หลังเลือกวางแผนแก้ แผน rework ยังต้องผ่านการอนุมัติแผนตามปกติก่อนแก้โค้ด (คนตัดสินใจ 2 จุด)
 
 ---
 
@@ -35,26 +46,27 @@ QA ตรวจโดย `forge-qa` และ `forge-code-reviewer` อย่า
 
 ถ้าผู้ใช้พิมพ์ prompt ขณะ workflow ยังทำงานอยู่ (prompt ที่ไม่ขึ้นต้นด้วย `/`) Forge จะเด้งหน้าต่าง `Forge steering · prompt "…" from user` ให้เลือก 2 ทาง
 
-- **`Steer · <gate เดิม> → <gate ใหม่> · <ผล>`**: บันทึก prompt เป็น requirement steering แล้วกลับไปที่ gate ตามตารางด้านล่าง ถ้า turn ที่กำลังรันยังไม่จบ Forge จะหยุด turn นั้นทันที เพราะงานที่เหลือไม่ใช้แล้ว (ประหยัด token และเวลา) จากนั้นแจ้ง `Forge steering #N · <from> → <to> · prompt "…" from user`
+- **`Steer · <gate เดิม> → PLAN · <ผล>`**: บันทึก prompt เป็น requirement steering แล้วกลับไปที่ PLAN เสมอ ตามตารางด้านล่าง ถ้า turn ที่กำลังรันยังไม่จบ Forge จะหยุด turn นั้นทันที เพราะงานที่เหลือไม่ใช้แล้ว (ประหยัด token และเวลา) จากนั้นแจ้ง `Forge steering #N · <from> → <to> · prompt "…" from user`
 - **`Cancel · keep working on <gate>`**: state ไม่เปลี่ยน งานเดิมทำต่อ และ prompt กลับไปอยู่ในช่องพิมพ์
 
 | พิมพ์ระหว่าง | ผลเมื่อเลือก Steer |
 |---|---|
-| REQUIREMENT | `forge-requirement` รันใหม่แบบ delta: ได้รายงานเดิมไปด้วย และตรวจเฉพาะส่วนที่ steering เปลี่ยน รายงานเดิมเก็บไว้เป็น audit |
-| PLAN | ถอนแผนที่เสนอไว้ แล้ว `forge-planner` แก้แผนเดิมแบบ delta (ID เดิมคงไว้) |
-| EXECUTE / QA (รวม QA PASS ก่อนส่งมอบ) | ยกเลิกการอนุมัติ แผนเดิมกลายเป็นฐาน rework แบบอ่านอย่างเดียว planner แก้เฉพาะส่วนที่ steering เปลี่ยน แล้วต้องอนุมัติใหม่ Forge ไม่สร้างรายงาน QA BLOCKED ปลอม และ executor ที่ยังรันอยู่แก้ไฟล์ต่อไม่ได้ |
+| PLAN | ถอนแผนที่เสนอไว้ แล้ว main agent แก้แผนเดิมแบบ delta (ID เดิมคงไว้) |
+| EXECUTE / QA (รวม QA PASS ก่อนส่งมอบ) | ยกเลิกการอนุมัติ แผนเดิมกลายเป็นฐาน rework แบบอ่านอย่างเดียว main agent แก้เฉพาะส่วนที่ steering เปลี่ยน แล้วต้องอนุมัติใหม่ Forge ไม่สร้างรายงาน QA BLOCKED ปลอม และ subagent ที่ยังรันอยู่แก้ไฟล์ต่อไม่ได้ |
 
-steering ทุกข้ออยู่ใน state และแนบไปกับคำสั่ง Requirement, Planning และ Rework ทุกครั้ง ไม่มีการตัดข้อเก่าทิ้งเมื่อเกิน 20 ข้อ จึงรักษา requirement เดิมเมื่อ resume หรือ compact ข้อความ prompt ส่งให้ model ครั้งเดียวต่อคำสั่ง ไม่ซ้ำ ดูจำนวน steering ได้จาก `/forge status` (`steering: N`) และแถบสถานะ (`Steering N`) ประวัติที่ยาวขึ้นจะเพิ่ม context ที่ต้องใช้
+steering ทุกข้ออยู่ใน state และแนบไปกับคำสั่ง Planning และ Rework ทุกครั้ง ไม่มีการตัดข้อเก่าทิ้งเมื่อเกิน 20 ข้อ จึงรักษา requirement เดิมเมื่อ resume หรือ compact ข้อความ prompt ส่งให้ model ครั้งเดียวต่อคำสั่ง ไม่ซ้ำ ดูจำนวน steering ได้จาก `/forge status` (`steering: N`) และแถบสถานะ (`Steering N`) ประวัติที่ยาวขึ้นจะเพิ่ม context ที่ต้องใช้
 
-## v6.1: Requirement รอบเดียว agent เดียว
+## v6.2: Plan mode แบบ OMP, main agent ทำงานเอง
 
-Gate 1 เหลือ `forge-requirement` รันครั้งเดียว (เดิม 4 agent 3 รอบ รวม 7 ครั้ง) แล้ว Main ตรวจรายงานซ้ำและส่ง `forge_requirement_summary` เพื่อเข้า Planning
+Gate Requirement และ agent `forge-requirement`, `forge-planner`, `forge-executor`, `forge-qa`, `forge-delivery` ถูกเอาออก เหลือ 3 gate
 
-- agent ตัวเดียวครอบคลุม 6 มุม: intake, ช่องว่าง, critique, สถาปัตยกรรม, กลยุทธ์ทดสอบ และท้าทายร่างของตัวเอง
-- Main อ่านรายงานซ้ำแบบผู้อ่านอิสระ เพิ่ม finding ที่ agent พลาด และ Forge ปฏิเสธสรุปที่ตัด CRITICAL/HIGH ของรายงานทิ้ง
-- `/forge mode`, `/forge quick …`, `/forge --fast …`, `/forge thorough …` ถูกเอาออก (พิมพ์ `/forge quick …` ตอนนี้คือ requirement ธรรมดา)
-- `install.sh` ย้าย `forge-critic`, `forge-architect`, `forge-qa-strategist` ที่ติดตั้งไว้ไปไว้ใน `forge-backups/` (OMP `/agents` จะไม่แสดงอีก)
-- install.sh ไม่เขียนทับ `forge-requirement.md` ที่มีอยู่ ถ้าขึ้น `NOTE: forge-requirement now runs the whole Requirement gate…` ให้เทียบกับไฟล์ใหม่ หรือรัน `FORGE_REINSTALL_AGENTS=1 bash install.sh` (มี backup)
+- PLAN: main agent สำรวจเอง (read/grep/glob และ `scout` หลายตัวขนานกัน) ถามด้วย ask เมื่อจำเป็น เขียน `local://<slug>-plan.md` ทีละส่วน (Context / Approach / Critical files & anchors / Verification / Assumptions & contingencies + Business Topics, Requirement Traceability, Business Test Cases, Code Quality Gates) แล้วส่งด้วย `forge_plan_propose` working tree อ่านอย่างเดียว เขียนได้แค่ไฟล์แผน (write หรือ edit ที่ไม่มี REM/MV) ถ้าจบ turn โดยไม่ ask หรือไม่ propose Forge เตือน 2 ครั้ง แล้วขึ้นคำเตือน
+- Forge ปฏิเสธแผนที่ขาด `## Context`, `## Approach`, `## Verification` หรือ `## Assumptions & contingencies` และใน Approach ต้องมีบรรทัด `Open decisions:` (`none` หรือข้อย่อยละเรื่องพร้อม `default: …` ข้อที่มีคำว่า BLOCKER ถูกปฏิเสธ ต้องถามผู้ใช้ก่อน) กับ `Migration & rollback:` (ขั้นตอน หรือ `not applicable — <เหตุผล>`)
+- EXECUTE: main agent ลงมือเองตามแผน (todo ทีละขั้น แบ่งงานให้ subagent ได้)
+- QA: main agent ตรวจเองคู่กับ `forge-code-reviewer` 1 ตัว แล้วทำ delivery เอง
+- `install.sh` ติดตั้ง `forge-code-reviewer` และ `forge-plan-critic` และย้าย agent ที่เลิกใช้ (`forge-critic`, `forge-architect`, `forge-qa-strategist`, `forge-requirement`, `forge-planner`, `forge-executor`, `forge-qa`, `forge-delivery`) กับ skill `forge-requirement-gate` ไปไว้ใน `forge-backups/`
+- checkpoint เก่าที่ค้างอยู่ใน REQUIREMENT จะกลับมาเป็น PLAN แบบยังไม่อนุมัติ
+- install.sh ไม่เขียนทับ `forge-code-reviewer.md`/`forge-plan-critic.md` ที่มีอยู่ ถ้าขึ้น `NOTE: your installed forge-code-reviewer differs…` ให้เทียบกับไฟล์ใหม่ หรือรัน `FORGE_REINSTALL_AGENTS=1 bash install.sh` (มี backup)
 
 ## v5.24: "Approve and execute" แล้ว Forge ไม่หาย
 

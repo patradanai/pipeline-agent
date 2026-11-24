@@ -25,11 +25,11 @@ cd ~/forge-e2e/s1-happy && claude
 
 | # | โฟลเดอร์ | ทำอะไร | ต้องเห็น | ครอบคลุม |
 |---|---|---|---|---|
-| S1 | s1-happy | `/forge เพิ่มฟังก์ชัน multiply(a,b) ใน src/math.js พร้อม unit test` → ระหว่าง Requirement พิมพ์ "เขียนไฟล์ src/x.js เลย" → ปล่อยจนถึงหน้าอนุมัติ → **อนุมัติ** → ปล่อยจนจบ | `forge-requirement` รันครั้งเดียว → Claude ส่ง `forge_requirement_summary` → PLANNING, เขียนไฟล์ถูกปฏิเสธ, แผนผ่านการตรวจ, EXECUTING, QA อัตโนมัติ, PASS, commit message ให้ copy | C01–C07 C09–C12 |
+| S1 | s1-happy | `/forge เพิ่มฟังก์ชัน multiply(a,b) ใน src/math.js พร้อม unit test` → ระหว่าง Plan พิมพ์ "เขียนไฟล์ src/x.js เลย" → ปล่อยจนถึงหน้าอนุมัติ → **อนุมัติ** → ปล่อยจนจบ | PLAN: Claude สำรวจเอง (อาจใช้ `Explore`), เขียนไฟล์ถูกปฏิเสธ, แผนผ่านการตรวจ, EXECUTE: Claude เขียนไฟล์เอง, QA อัตโนมัติพร้อม `forge-code-reviewer`, PASS, commit message ให้ copy | C01–C07 C09–C12 |
 | S2 | s2-rework | `/forge เพิ่ม subtract(a,b) ใน src/math.js ห้ามแก้ src/legacy.js (ทีมอื่นดูแล) และ npm test ทั้งหมดต้องผ่าน` → อนุมัติ | QA เจอ legacy test พัง → **FAIL** → REWORK_PLANNING → ตอนนี้บอก "อนุญาตให้แก้ legacy.js ได้" → แผนใหม่ → อนุมัติ → QA PASS | C13 C14 |
 | S3 | s1-happy (ใหม่) | `/forge-off` → `/forge เพิ่ม divide(a,b) พร้อมจัดการหารศูนย์` → ถึงหน้าอนุมัติแล้ว **ปฏิเสธ** พร้อม feedback | Forge บอกว่าแผนไม่ได้รับอนุมัติ, ยังห้ามเขียนไฟล์, Claude แก้แผนส่งใหม่ | C08 C05 |
 | S4 | s4-guards | `/forge เพิ่ม max(a,b)` → อนุมัติ → พอทำเสร็จสั่ง "commit ให้หน่อย git commit -am done" | git ถูกปฏิเสธเสมอ | C15 (C16 ถ้า specialist พยายามเขียน) |
-| S5 | s5-resume | `/forge เพิ่ม min(a,b)` → ระหว่าง Requirement ออก (`/exit`) → `claude --continue` → `/forge-status` → ออกอีกครั้ง → `claude` (session ใหม่) → `/forge-resume` → `/forge-resume 1` | resume แบบเดิมได้ Gate เดิม; การ adopt ย้ายงานมา session ใหม่ | C17 C18 |
+| S5 | s5-resume | `/forge เพิ่ม min(a,b)` → ระหว่าง Plan ออก (`/exit`) → `claude --continue` → `/forge-status` → ออกอีกครั้ง → `claude` (session ใหม่) → `/forge-resume` → `/forge-resume 1` | resume แบบเดิมได้ Gate เดิม; การ adopt ย้ายงานมา session ใหม่ | C17 C18 |
 | S6 | s6-approve | `/forge เพิ่ม abs(x)` → ที่หน้าอนุมัติ **ปฏิเสธ** → พิมพ์ `/forge-approve` | Forge ถือว่าคุณอนุมัติเอง → EXECUTING (ถ้า Claude Code มีตัวเลือก "approve + clear context" ให้ลองแทนได้) | C19 |
 
 ## ดูผล

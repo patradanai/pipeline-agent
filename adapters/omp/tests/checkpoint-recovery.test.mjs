@@ -66,10 +66,11 @@ test('human-approved off-branch checkpoint returns to fresh planning, not execut
   assert.equal(recovered.recoveryAudit.at(-1).priorApprovalRevoked,true);
 });
 
-test('requirement-only checkpoint resumes requirement without fabricating approval', () => {
-  const recovered=prepareHumanRecovery({...state,phase:'REQUIREMENT',approved:false});
-  assert.equal(recovered.phase,'REQUIREMENT');
+test('requirement-only checkpoint recovers as PLAN without fabricating approval', () => {
+  const recovered=prepareHumanRecovery({...state,phase:'REQUIREMENT',approved:true});
+  assert.equal(recovered.phase,'PLAN');
   assert.equal(recovered.approved,false);
+  assert.equal(recovered.approvedPlanHash,null);
 });
 
 test('invalid or untrusted recovery candidates cannot be executed', () => {

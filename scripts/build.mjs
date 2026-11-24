@@ -59,9 +59,8 @@ for (const f of agentFiles) {
   if (!m) throw new Error(`Agent ${f} has no frontmatter`);
   const fm = Object.fromEntries(m[1].split('\n').map(l => l.match(/^([A-Za-z_-]+):\s*(.*)$/)).filter(Boolean).map(x => [x[1], x[2]]));
   const tools = (fm.tools ?? '').split(',').map(t => t.trim()).filter(Boolean).map(t => TOOL_MAP[t] ?? t);
-  const description = String(fm.description ?? name).replace(/OMP Forge Global v5\s*·\s*/g, 'Forge · ');
+  const description = String(fm.description ?? name).replace(/OMP Forge Global(?: v\d+)?\s*·\s*/g, 'Forge · ');
   const body = m[2].replace(/OMP Forge Global/g, 'Forge')
-    .replace(/writes the plan to local:\/\/ and submits native review/g, 'submits the plan through Claude Code native plan approval (ExitPlanMode)')
     .replace(/local:\/\/[^\s`'".,)]*/g, 'the plan file').replace(/xd:\/\/propose/g, 'ExitPlanMode')
     .replace(/\bOMP\b/g, 'Claude Code');
   const model = roles[name] ?? 'inherit';
@@ -80,6 +79,7 @@ const SUBCOMMANDS = [
   ['agents', 'List the Forge specialist agents', ''],
   ['off', 'Cancel the Forge workflow (no files or Git state changed)', ''],
   ['trace', 'Log hook events for the live end-to-end coverage report', '[on|off]'],
+  ['planreview', 'Turn the optional plan critic (review before approval) on or off', '[on|off]'],
 ];
 const commandBody = invocation => `The user ran \`${invocation}\`.\n\nThe Forge plugin hook has already processed this command and attached its result as context that starts with "Forge" or "[FORGE".\n\n- If Forge attached a gate instruction, follow it exactly, starting now.\n- If Forge attached only a status or message, show it to the user verbatim and stop.\n- If no Forge context is present, tell the user the Forge hook did not run (check \`/hooks\`, and that \`node\` 22+ is on PATH) and do nothing else.\n`;
 for (const [name, description, hint] of SUBCOMMANDS) {

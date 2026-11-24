@@ -81,16 +81,35 @@ test('legacy delivery phase does not imply QA PASS', () => {
   assert.deepEqual(passed.workingTreeAtQa, { hash: 'h' });
 });
 
-test('legacy gate records merge into four phases without losing specialists', () => {
+test('legacy gate records merge into three phases; requirement-gate records are dropped', () => {
   const migrated = normalizeForgeState({
     active: true, phase: 'DELIVERY_PREP',
-    gateAgents: { PLANNING: ['planner'], QA_REVIEW: ['qa', 'reviewer'], DELIVERY_PREP: ['delivery'], QA: ['qa'] },
-    gateAgentsSpawned: { QA_REVIEW: ['qa'], DELIVERY_PREP: ['delivery'] },
-    agentRetries: { QA_REVIEW: 2, DELIVERY_PREP: 1 },
+    gateAgents: { REQUIREMENT: ['forge-requirement'], PLANNING: ['planner'], QA_REVIEW: ['qa', 'reviewer'], DELIVERY_PREP: ['delivery'], QA: ['qa'] },
+    gateAgentsSpawned: { 'REQUIREMENT:COOKING': ['forge-requirement'], QA_REVIEW: ['qa'], DELIVERY_PREP: ['delivery'] },
+    agentRetries: { REQUIREMENT: 1, QA_REVIEW: 2, DELIVERY_PREP: 1 },
   });
   assert.deepEqual(migrated.gateAgents, { PLAN: ['planner'], QA: ['qa', 'reviewer', 'delivery'] });
   assert.deepEqual(migrated.gateAgentsSpawned, { QA: ['qa', 'delivery'] });
   assert.deepEqual(migrated.agentRetries, { QA: 2 });
+});
+
+test('a legacy requirement-gate checkpoint resumes as PLAN without approval', () => {
+  for (const phase of ['REQUIREMENT', 'COOKING', 'REQUIREMENT:CHALLENGE']) {
+    const migrated = normalizeForgeState({ active: true, phase, approved: true, approvedPlanHash: 'h', planValid: true, planWritten: true,
+      gateAgents: { REQUIREMENT: ['forge-requirement'] }, agentRetries: { REQUIREMENT: 1, 'REQUIREMENT:summary': 2 } });
+    assert.equal(migrated.phase, 'PLAN', phase);
+    assert.equal(migrated.approved, false, phase);
+    assert.equal(migrated.approvedPlanHash, null, phase);
+    assert.equal(migrated.planValid, false, phase);
+    assert.equal(migrated.planWritten, false, phase);
+    assert.deepEqual(migrated.gateAgents, {}, phase);
+    assert.deepEqual(migrated.agentRetries, {}, phase);
+    assert.equal(recoveryProposal(migrated), null, phase);
+  }
+  const blocked = normalizeForgeState({ active: false, phase: 'AGENTS_BLOCKED', approved: true });
+  assert.equal(blocked.phase, 'PLAN');
+  assert.equal(blocked.approved, false);
+  assert.equal(blocked.active, true);
 });
 
 test('legacy rework clears approval and superseded planning agents', () => {

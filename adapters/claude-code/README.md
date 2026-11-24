@@ -12,49 +12,71 @@ In Claude Code:
 /plugin marketplace add /absolute/path/to/forge-suite/dist/claude-code/forge-marketplace
 /plugin install forge@forge-local
 ```
-Restart Claude Code, then check `/hooks` (Forge hooks listed), `/mcp` (server `forge`), `/agents` (6 `forge:` agents).
+Restart Claude Code, then check `/hooks` (Forge hooks listed), `/mcp` (server `forge`), and `/agents` (`forge:forge-code-reviewer` and `forge:forge-plan-critic`).
 Requires `node` 22+ on PATH.
+
+### Update an existing installation
+
+Rebuild with `npm run build`. Back up the marketplace folder you registered, then replace the entire folder with `dist/claude-code/forge-marketplace` at the same path. Do not overlay it: removed agents and commands must not survive.
+
+```bash
+claude plugin update forge@forge-local --scope user
+```
+
+Restart Claude Code to load the new hooks, MCP server and agent definitions.
 
 ## Use
 
 ```text
 /forge Build a booking approval flow        # start a workflow
-/forge status | plan | approve | qa | rework | delivery | report | agents | off
+/forge status | plan | approve | qa | rework | delivery | report | agents | planreview on|off | off
 ```
 
 Each subcommand also exists as its own command for autocomplete: type `/forge` and pick
 `/forge-status`, `/forge-resume`, `/forge-approve`, `/forge-plan`, `/forge-qa`, `/forge-rework`, `/forge-delivery`,
-`/forge-report`, `/forge-agents`, `/forge-off`.
+`/forge-report`, `/forge-agents`, `/forge-planreview`, `/forge-off`.
 
 Flow:
-1. Requirement: one `forge:forge-requirement` run covers intake, gaps, critique, architecture, QA strategy and a
-   self-challenge. Claude reviews that report as a second reader and calls `forge_requirement_summary`
-   (Forge rejects a summary that drops the report's CRITICAL/HIGH findings) → PLANNING.
-2. Planning: `forge:forge-planner`, then Claude enters plan mode and calls **ExitPlanMode** with the full plan.
-   Forge checks the plan contract first; an invalid plan is denied with the exact issues.
-3. You approve in Claude Code's native plan prompt. Forge moves to EXECUTING. (If context was cleared and Forge
+1. Plan: Claude enters plan mode, explores the code itself (read-only `Explore` subagents allowed), asks preferences
+   with AskUserQuestion, writes the plan file, then calls **ExitPlanMode** with the full plan.
+   Forge checks the plan contract first; an invalid plan is denied with the exact issues. The plan needs `## Context`,
+   `## Approach`, `## Verification`, `## Assumptions & contingencies` and the BIZ/REQ/TC/QG sections; `## Approach`
+   needs an `Open decisions:` line (`none`, or sub-bullets each with `default: …`; any `BLOCKER` item is denied — ask
+   first) and a `Migration & rollback:` line (steps, or `not applicable — <reason>`).
+   Optional plan critic: `/forge-planreview on|off` (default OFF, saved in Forge config, applies to new workflows,
+   shown in `/forge status` as `plan review: ON/OFF`). When ON, Claude must run `forge:forge-plan-critic` once on the
+   written plan, and ExitPlanMode is denied until it reported and every CRITICAL/HIGH PC-id is cited in the plan.
+2. You approve in Claude Code's native plan prompt. Forge moves to EXECUTE. (If context was cleared and Forge
    did not see the approval, type `/forge approve`.)
-4. `forge:forge-executor` implements. When Claude tries to stop, Forge starts independent QA
-   (`forge:forge-qa` + `forge:forge-code-reviewer`) and requires `forge_qa_submit`.
-5. QA PASS → `forge:forge-delivery` → `forge_delivery_submit` → copy-ready commit message. You commit manually.
+3. Claude implements the approved plan itself. When Claude tries to stop, Forge starts QA: Claude runs the plan's
+   checks and verifies every TC while `forge:forge-code-reviewer` reviews the diff (`CR-001 [HIGH] file:line — evidence — fix`),
+   then calls `forge_qa_submit`. Every CRITICAL/HIGH CR-id must be in `codeReview.findings`, still CRITICAL/HIGH (gate
+   FAILs) or with evidence starting `Disputed:` plus counter-evidence; otherwise the submission is rejected. After each
+   submission Claude is told to print Forge's QA summary verbatim: `Forge QA ✅ PASS / ❌ FAIL / ⚠️ BLOCKED` with counts
+   and the report path, one row per TC (✅ ❌ ⚠️ ⏸️), quality gates, review findings (🔴 🟠 🟡 ⚪) and gate blockers.
+   On QA FAIL/BLOCKED Forge does not start a fix on its own; it waits for your decision (`QA failed · your decision` /
+   `QA blocked · your decision`) and blocks plan writes, ExitPlanMode and QA resubmission meanwhile. Run
+   `/forge-rework` to plan a fix (the rework plan still needs normal plan approval), `/forge-qa` to rerun QA after
+   BLOCKED, or `/forge-off`.
+4. QA PASS → Claude calls `forge_delivery_submit` → copy-ready commit message. You commit manually.
 
 Guards (whenever a workflow exists): no agent git writes / repo publishing / `.git` writes; read-only before approval
-and during QA/delivery; specialists read-only; executor has no shell; wrong agent for a gate is denied.
+and during QA/delivery; `forge-code-reviewer` read-only and allowed only in QA; `forge-plan-critic` read-only.
 
 ## Where things are stored
 
 `${CLAUDE_PLUGIN_DATA}` (Claude Code's persistent plugin data dir):
 `sessions/<session_id>.json` (state), `reports/<session>/<slug>/` (plan, QA report, delivery, commit message),
-`config.json` (`trace`). Nothing is written into your project by Forge.
+`config.json` (`trace`, `planReview`). Nothing is written into your project by Forge.
 
 ## Models
 
-Set in `agents/roles.json` (default `rigor`: opus for requirement/planner, sonnet for QA/code review, haiku for executor/delivery), then rebuild. Pick another profile with `FORGE_MODELS=balanced|economy`.
+Set in `agents/roles.json` (`forge-code-reviewer`: `rigor` sonnet, `balanced` opus, `economy` sonnet; `forge-plan-critic`: `rigor` opus, `balanced` opus, `economy` sonnet), then rebuild. Pick another profile with `FORGE_MODELS=balanced|economy`.
 
 ## Validate on first run
 
 See "Claude Code adapter — known gaps" in `docs/ARCHITECTURE.md`. Quick check: `/forge Build a hello endpoint`,
-let it run the first specialist, then `/forge status` should show `waiting agents` shrinking.
+let it reach QA, then `/forge status` should show `waiting agents` shrinking after the reviewer reports.
 
 ## Resume
 

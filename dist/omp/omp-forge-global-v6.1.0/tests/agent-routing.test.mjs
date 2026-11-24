@@ -4,35 +4,43 @@ import {
   DEFAULT_AGENT_ASSIGNMENTS, cloneAgentAssignments, requiredAgentsFor,
   initialState, phaseInstruction, parseCommand, formatAgentAssignments,
   agentNameFor, routeAgentNames,
+  listAssignedAgentNames,
 } from '../forge/core.mjs';
 
-test('default Forge agents: one requirement analyst, separate QA specialists', () => {
+test('default Forge agents: plan critic only with plan review on, QA reviewer only before PASS', () => {
   const s=initialState('Build a scheduling service','forge-roles');
-  assert.deepEqual(requiredAgentsFor(s),['forge-requirement']);
-  // Legacy v6.0 states may still carry requirementStep; it no longer widens the gate.
-  assert.deepEqual(requiredAgentsFor({...s,requirementStep:'COOKING'}),['forge-requirement']);
-  assert.deepEqual(requiredAgentsFor({...s,requirementStep:'CHALLENGE'}),['forge-requirement']);
-  assert.deepEqual(requiredAgentsFor({...s,phase:'PLAN'}),['forge-planner']);
-  assert.deepEqual(requiredAgentsFor({...s,phase:'EXECUTE'}),['forge-executor']);
-  assert.deepEqual(requiredAgentsFor({...s,phase:'QA'}),['forge-qa','forge-code-reviewer']);
-  assert.deepEqual(requiredAgentsFor({...s,phase:'QA',qaStatus:'FAIL'}),['forge-qa','forge-code-reviewer']);
-  assert.deepEqual(requiredAgentsFor({...s,phase:'QA',qaStatus:'PASS'}),['forge-delivery']);
-  assert.match(phaseInstruction({...s,phase:'PLAN'}),/forge-planner/);
+  assert.deepEqual(listAssignedAgentNames(DEFAULT_AGENT_ASSIGNMENTS),['forge-plan-critic','forge-code-reviewer']);
+  assert.equal(s.planReview,false);
+  assert.deepEqual(requiredAgentsFor(s),[]);
+  const reviewed=initialState('Build a scheduling service','forge-roles',null,null,{},{planReview:true});
+  assert.deepEqual(requiredAgentsFor(reviewed),['forge-plan-critic']);
+  assert.match(phaseInstruction(reviewed),/PLAN REVIEW is ON[\s\S]*`forge-plan-critic` ONCE/);
+  assert.doesNotMatch(phaseInstruction(s),/PLAN REVIEW is ON/);
+  // Legacy v6.0 states may still carry requirementStep; it never widens the gate.
+  assert.deepEqual(requiredAgentsFor({...s,requirementStep:'COOKING'}),[]);
+  assert.deepEqual(requiredAgentsFor({...s,phase:'EXECUTE'}),[]);
+  assert.deepEqual(requiredAgentsFor({...reviewed,phase:'EXECUTE'}),[]);
+  assert.deepEqual(requiredAgentsFor({...s,phase:'QA'}),['forge-code-reviewer']);
+  assert.deepEqual(requiredAgentsFor({...s,phase:'QA',qaStatus:'FAIL'}),['forge-code-reviewer']);
+  assert.deepEqual(requiredAgentsFor({...s,phase:'QA',qaStatus:'PASS'}),[]);
+  assert.doesNotMatch(phaseInstruction(s),/forge-planner|forge-requirement/);
 });
 
-test('legacy workflow snapshots can still resume with their original agents',()=>{
-  const prior=cloneAgentAssignments();
-  prior.planning.planner='my-old-planner';
+test('legacy workflow snapshots keep a custom reviewer and drop retired gates',()=>{
+  const prior={...cloneAgentAssignments(),planning:{planner:'my-old-planner'}};
+  prior.qa.reviewer='my-reviewer';
   const s=initialState('Build feature','forge-legacy',prior);
-  assert.deepEqual(requiredAgentsFor({...s,phase:'PLAN'}),['my-old-planner']);
-  assert.equal(agentNameFor(s,'planning','planner'),'my-old-planner');
-  assert.match(routeAgentNames('Call forge-planner',s),/my-old-planner/);
+  assert.deepEqual(s.agentAssignments.planning,{critic:'forge-plan-critic'}); // retired planner slot dropped
+  assert.deepEqual(requiredAgentsFor({...s,phase:'QA'}),['my-reviewer']);
+  assert.equal(agentNameFor(s,'qa','reviewer'),'my-reviewer');
+  assert.match(routeAgentNames('Call forge-code-reviewer',s),/my-reviewer/);
 });
 
 test('new workflow defaults to fixed OMP agents',()=>{
   const s=initialState('Build feature','forge-fixed');
   assert.deepEqual(s.agentAssignments,cloneAgentAssignments());
-  assert.match(formatAgentAssignments(DEFAULT_AGENT_ASSIGNMENTS),/forge-planner/);
+  assert.match(formatAgentAssignments(DEFAULT_AGENT_ASSIGNMENTS),/forge-code-reviewer/);
+  assert.doesNotMatch(formatAgentAssignments(DEFAULT_AGENT_ASSIGNMENTS),/forge-planner|forge-executor|forge-delivery/);
 });
 
 test('deprecated assignment commands are NOT reinterpreted as requirements',()=>{

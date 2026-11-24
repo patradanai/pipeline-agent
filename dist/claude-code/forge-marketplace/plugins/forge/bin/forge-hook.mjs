@@ -32,7 +32,7 @@ const TOOL_MAP = {
 export function canonicalTool(name) {
   const n = String(name ?? '');
   if (TOOL_MAP[n]) return TOOL_MAP[n];
-  const forge = n.match(/^mcp__.*__forge_(requirement_summary|qa_scope|qa_submit|delivery_submit)$/);
+  const forge = n.match(/^mcp__.*__forge_(qa_scope|qa_submit|delivery_submit)$/);
   if (forge) return `forge.${forge[1]}`;
   return 'other';
 }
@@ -50,7 +50,7 @@ export function responseText(value, depth = 0) {
   return '';
 }
 
-const SUBCOMMAND_PREFIX = { resume: 'resume ', trace: 'trace ' };
+const SUBCOMMAND_PREFIX = { resume: 'resume ', trace: 'trace ', planreview: 'planreview ' };
 /** "/forge <args>", "/forge-status", "/forge:forge-resume 2" → engine command text. Null for other commands. */
 export function commandText(commandName, commandArgs) {
   const m = String(commandName ?? '').match(/^(?:forge:)?forge(?:-([a-z]+))?$/);
@@ -173,7 +173,6 @@ function traceEvent(hookEvent, input, event, before, after, out) {
       reportChars: typeof input.last_assistant_message === 'string' ? input.last_assistant_message.length : null,
       responseKeys: input.tool_response && typeof input.tool_response === 'object' ? Object.keys(input.tool_response).slice(0, 8) : null,
       phaseBefore: before?.phase ?? null, phaseAfter: after?.phase ?? null,
-      summaryRequested: after?.requirementSummaryRequested ? true : null,
       approvedAfter: after?.approved ?? null, planValidAfter: after?.planValid ?? null,
       activeAfter: after?.active ?? null, qaStatus: after?.qaStatus ?? null,
       reworkCycles: after?.reworkCycles ?? null,
@@ -240,7 +239,7 @@ export async function main(hookEvent, raw) {
       profile: {
         agentRef: n => `forge:${n}`,
         toolRef: n => `${MCP_PREFIX}${n}`,
-        footer: `[Claude Code mapping] Specialists: Agent tool with subagent_type "forge:<name>" (e.g. forge:forge-planner). Forge tools: ${MCP_PREFIX}forge_requirement_summary, ${MCP_PREFIX}forge_qa_scope, ${MCP_PREFIX}forge_qa_submit, ${MCP_PREFIX}forge_delivery_submit.`,
+        footer: `[Claude Code mapping] Reviewer (QA only): Agent tool with subagent_type "forge:forge-code-reviewer". Plan critic (only when plan review is on): subagent_type "forge:forge-plan-critic". Read-only research: subagent_type "Explore". Forge tools: ${MCP_PREFIX}forge_qa_scope, ${MCP_PREFIX}forge_qa_submit, ${MCP_PREFIX}forge_delivery_submit.`,
       },
       deps: {
         snapshotWorkingTree: workspace.snapshotWorkingTree,

@@ -1,5 +1,5 @@
 {
-  "_comment": "Model per agent for both adapters. Pick a profile at build time: FORGE_MODELS=balanced npm test (default: rigor). Claude Code gets the alias as-is. OMP gets the matching `omp` selector as the agent's default `model:` (exact id first, bare alias as fallback); users still change it in OMP /agents, and install.sh keeps already-installed agent files. forge-requirement carries the whole Requirement gate (incl. the adversarial pass), so it stays on opus in every profile but economy.",
+  "_comment": "Model per agent for both adapters. Pick a profile at build time: FORGE_MODELS=balanced npm test (default: rigor). Claude Code gets the alias as-is. OMP gets the matching `omp` selector as the agent's default `model:` (exact id first, bare alias as fallback); users still change it in OMP /agents, and install.sh keeps already-installed agent files. Forge agents: forge-code-reviewer (QA, every run) and forge-plan-critic (PLAN, only with /forge planreview on); the main agent plans, executes, verifies and writes delivery itself.",
   "omp": {
     "opus": "anthropic/claude-opus-5-5, opus",
     "sonnet": "anthropic/claude-sonnet-5-5, sonnet",
@@ -7,28 +7,16 @@
   },
   "profiles": {
     "rigor": {
-      "forge-requirement": "opus",
-      "forge-planner": "opus",
-      "forge-executor": "haiku",
-      "forge-qa": "sonnet",
-      "forge-code-reviewer": "sonnet",
-      "forge-delivery": "haiku"
+      "forge-plan-critic": "opus",
+      "forge-code-reviewer": "sonnet"
     },
     "balanced": {
-      "forge-requirement": "opus",
-      "forge-planner": "opus",
-      "forge-executor": "sonnet",
-      "forge-qa": "opus",
-      "forge-code-reviewer": "opus",
-      "forge-delivery": "haiku"
+      "forge-plan-critic": "opus",
+      "forge-code-reviewer": "opus"
     },
     "economy": {
-      "forge-requirement": "sonnet",
-      "forge-planner": "sonnet",
-      "forge-executor": "sonnet",
-      "forge-qa": "sonnet",
-      "forge-code-reviewer": "sonnet",
-      "forge-delivery": "haiku"
+      "forge-plan-critic": "sonnet",
+      "forge-code-reviewer": "sonnet"
     }
   }
 }
