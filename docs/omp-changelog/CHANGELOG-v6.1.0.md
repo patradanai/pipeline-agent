@@ -88,6 +88,15 @@ checks that made the old gate rigorous.
   per-agent model switch). Forge now reads `plan.status`.
 - Keep the four-segment progress meter in OMP's persistent footer status,
   e.g. `FORGE ▰▱▱▱ Requirement 1/4`, instead of stripping its glyphs.
+- OMP: per-gate main-session model. Forge switches the main session model when
+  a gate starts (planning `@plan`, execution/QA/delivery `@default` by
+  default) and keeps the thinking level. `/forge model`, `/forge model <gate>
+  <@role|provider/id|keep>`, `/forge model reset`; saved as `gateModels` in
+  the Forge config. A manual `/model` pick inside a gate is kept. See
+  [Gate models (OMP)](../USER_GUIDE.md#gate-models-omp).
+- Claude Code: fix hook output over ~8 KB arriving as invalid JSON on macOS.
+  The hook exited before stdout to a pipe was flushed; it now waits for the
+  write to finish.
 
 ## Removed
 

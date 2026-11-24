@@ -141,6 +141,7 @@ OMP commands use `/forge <subcommand>`; Claude Code also exposes dedicated `/for
 | Resume/recover | `/forge resume`, `/forge recover` | `/forge-resume` |
 | Cancel workflow | `/forge off` | `/forge-off` |
 | Optional plan critic (new workflows) | `/forge planreview on\|off` | `/forge-planreview on\|off` |
+| Main-session model per gate | `/forge model`, `/forge model <gate> <@role\|provider/id\|keep>` | Not available |
 | Custom skills | `/forge skill`, `/forge skills`, `/forge skill list` | Not available |
 
 OMP also supports `/forge agents` and custom gate skills; Claude Code does not currently expose this skill manager. Plan review is OFF by default; when ON, the main agent must run `forge-plan-critic` once on the written plan and cite every CRITICAL/HIGH PC-id in the plan before Forge accepts the proposal. `/forge status` shows `plan review: ON/OFF`. For all commands and phase behavior, see the [user guide](docs/USER_GUIDE.md).
@@ -156,6 +157,8 @@ FORGE_MODELS=economy npm run build
 ```
 
 OMP preserves installed agent definitions by default. Change models through OMP `/agents`, or explicitly replace bundled agent files with `FORGE_REINSTALL_AGENTS=1 bash ./install.sh` (the installer keeps backups).
+
+In OMP the main session also switches model per gate: planning uses the OMP role `@plan`, execution/QA/delivery use `@default`. Define both under `modelRoles` in `~/.omp/agent/config.yml`, then check with `/forge model`. Setup steps: [Gate models (OMP)](docs/USER_GUIDE.md#gate-models-omp).
 
 ## Build and test
 

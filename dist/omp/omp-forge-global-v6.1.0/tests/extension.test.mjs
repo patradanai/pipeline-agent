@@ -43,15 +43,22 @@ function setup({persistentSession=false} = {}) {
   let branchEntries = null;
   const notifications = [];
   let plan = 'inactive';
+  // Gate-model spies: inert unless a test sets ctx.models.
+  const log = [];
+  let currentModel = null;
+  let thinking = undefined;
   const pi = {
     zod:fakeZ,
     setLabel() {},
     on(event, handler) { events.set(event, handler); },
     registerCommand(name, cmd) { commands.set(name, cmd); },
     registerTool(tool) { tools.set(tool.name, tool); },
-    sendUserMessage(content, options) { sent.push({content, options}); },
+    sendUserMessage(content, options) { sent.push({content, options}); log.push(['send', content]); },
     sendMessage(message, options) { shown.push({message, options}); },
     appendEntry(customType, data) { entries.push({type:'custom', customType, data}); },
+    async setModel(m) { log.push(['setModel', `${m.provider}/${m.id}`]); currentModel = m; return true; },
+    getThinkingLevel() { return thinking; },
+    setThinkingLevel(l) { log.push(['thinking', l]); thinking = l; },
   };
   forgeExtension(pi);
   const ctx = {
@@ -66,7 +73,8 @@ function setup({persistentSession=false} = {}) {
     isIdle: () => true,
     setTimeout: () => {},
   };
-  return {events,commands,tools,sent,shown,entries,notifications,ctx,getPlan:()=>plan,setPlan:v=>{plan=v;},setBranch:v=>{branchEntries=v;},sessionPath};
+  return {events,commands,tools,sent,shown,entries,notifications,ctx,getPlan:()=>plan,setPlan:v=>{plan=v;},setBranch:v=>{branchEntries=v;},sessionPath,
+    log, getModel:()=>currentModel, setModel:v=>{currentModel=v;}, setThinking:v=>{thinking=v;}};
 }
 
 const PLAN = `# Plan\n## Context\nUsers create bookings and managers approve them.\n## Approach\n1. Add createBooking and approveBooking (REQ-001, REQ-002).\n- Open decisions: none\n- Migration & rollback: not applicable — no data or API change\n## Verification\n- node test: TC-001 and TC-002 pass\n## Assumptions & contingencies\n- none\n## Business Topics\n- BIZ-001: Booking\n- BIZ-002: Approval\n## Requirement Traceability\n- REQ-001 | BIZ-001 | Create booking | Created\n- REQ-002 | BIZ-002 | Approve booking | Approved\n## Business Test Cases\n- TC-001 | BIZ-001 | REQ-001 | Create booking | Created | node test\n- TC-002 | BIZ-002 | REQ-002 | Approve booking | Approved | node test\n## Code Quality Gates\n- QG-001: Unit tests\n- QG-002: Lint\n`;
@@ -203,6 +211,46 @@ test('approved execution stop enters QA; status waits only for the reviewer', as
   await x.commands.get('forge').handler('status',x.ctx);
   assert.match(x.notifications.at(-1).message,/waiting agents: forge-code-reviewer/);
   assert.equal(x.entries.length,savedEntries,'status formatting must not write workflow state');
+});
+
+test('each gate switches the main-session model before its turn and keeps thinking level', async () => {
+  const MODELS = {'@plan':{provider:'anthropic',id:'opus'}, '@default':{provider:'openai',id:'gpt'}, '@slow':{provider:'x',id:'slow'}};
+  const x=setup();
+  x.ctx.models = { resolve: s => MODELS[s], current: () => x.getModel() };
+  x.setModel(MODELS['@default']); x.setThinking('high');
+  try {
+    await x.commands.get('forge').handler('model qa @slow',x.ctx);
+    assert.match(readFileSync(process.env.FORGE_CONFIG_PATH,'utf8'),/"qa": "@slow"/);
+    await advanceToReview(x);
+    const first = x.log.findIndex(e=>e[0]==='setModel');
+    assert.deepEqual(x.log[first],['setModel','anthropic/opus']);
+    assert.deepEqual(x.log[first+1],['thinking','high']);
+    assert.ok(first < x.log.findIndex(e=>e[0]==='send'),'planning model is set before the planning turn');
+    // A manual /model pick inside the gate is respected.
+    x.setModel({provider:'manual',id:'m'});
+    const before = x.log.filter(e=>e[0]==='setModel').length;
+    await x.events.get('agent_end')({},x.ctx);
+    assert.equal(x.log.filter(e=>e[0]==='setModel').length,before);
+    const mark = x.log.length;
+    await approvePlan(x);
+    const exec = x.log.slice(mark);
+    const execSwitch = exec.findIndex(e=>e[0]==='setModel');
+    assert.deepEqual(exec[execSwitch],['setModel','openai/gpt']);
+    const execSend = exec.findIndex(e=>e[0]==='send');
+    assert.ok(execSwitch < execSend);
+    assert.match(exec[execSend][1],/FORGE PLAN APPROVED/);
+    await x.events.get('agent_start')({},x.ctx);
+    const qa=await x.events.get('session_stop')({},x.ctx);
+    assert.equal(qa.continue,true);
+    assert.deepEqual(x.log.filter(e=>e[0]==='setModel').at(-1),['setModel','x/slow']);
+    const cfgBefore = readFileSync(process.env.FORGE_CONFIG_PATH,'utf8');
+    await x.commands.get('forge').handler('model qa anthropic/nope',x.ctx);
+    assert.equal(x.notifications.at(-1).level,'error');
+    assert.equal(readFileSync(process.env.FORGE_CONFIG_PATH,'utf8'),cfgBefore);
+  } finally {
+    await x.commands.get('forge').handler('model reset',x.ctx);
+  }
+  assert.match(readFileSync(process.env.FORGE_CONFIG_PATH,'utf8'),/"qa": "@default"/);
 });
 
 test('provider failures after implementation and during QA never synthesize transitions or reports', async () => {

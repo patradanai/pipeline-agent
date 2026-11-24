@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { getForgeArgumentCompletions, parseCommand } from '../forge/core.mjs';
+import { getForgeArgumentCompletions, parseCommand, cloneGateModels } from '../forge/core.mjs';
 import forgeExtension from '../forge/index.ts';
 
 const cfg = {
@@ -68,6 +68,24 @@ test('free-form requirements are never hijacked by completion', () => {
   assert.equal(suggest('A'.repeat(257)),null);
   assert.equal(suggest('anything\nelse'),null);
   assert.equal(suggest('unknown-command '),null);
+});
+
+test('gate model commands parse, validate and complete', () => {
+  assert.deepEqual(parseCommand('model'), {type:'models'});
+  assert.deepEqual(parseCommand('model qa @slow'), {type:'modelSet',gate:'qa',selector:'@slow'});
+  assert.deepEqual(parseCommand('model Execution anthropic/claude-opus-5-5'), {type:'modelSet',gate:'execution',selector:'anthropic/claude-opus-5-5'});
+  assert.deepEqual(parseCommand('model qa keep'), {type:'modelSet',gate:'qa',selector:null});
+  assert.equal(parseCommand('model foo @x').type, 'modelInvalid');
+  assert.equal(parseCommand('model qa a,b').type, 'modelInvalid');
+  assert.equal(parseCommand('model qa').type, 'modelInvalid');
+  assert.deepEqual(parseCommand('model reset'), {type:'modelReset'});
+  assert.ok(values('model ').includes('model planning '));
+  assert.ok(values('model ').includes('model reset'));
+  assert.ok(values('model qa ').includes('model qa @plan'));
+  assert.deepEqual(parseCommand(values('model qa ke')[0]), {type:'modelSet',gate:'qa',selector:null});
+  assert.equal(cloneGateModels({qa:null}).qa, null);
+  assert.equal(cloneGateModels().planning, '@plan');
+  assert.throws(() => cloneGateModels({qa:'a b'}), /Invalid model for qa/);
 });
 
 test('registered /forge command exposes native OMP argument completion', () => {

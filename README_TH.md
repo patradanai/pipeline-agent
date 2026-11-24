@@ -70,7 +70,7 @@ Forge ใช้หลาย agent จึงกิน token มากกว่า
 | `balanced` | code-reviewer, plan-critic | — | — |
 | `economy` | — | code-reviewer, plan-critic | — |
 
-profile กำหนดเฉพาะโมเดลของ `forge-code-reviewer` และ `forge-plan-critic` ส่วน main agent ใช้โมเดลของ session
+profile กำหนดเฉพาะโมเดลของ `forge-code-reviewer` และ `forge-plan-critic` ส่วน main agent ใน Claude Code ใช้โมเดลของ session (OMP สลับโมเดลตาม Gate ดูหัวข้อถัดไป)
 
 OMP: build ใส่ `model:` ให้ไฟล์ `forge-*.md` ตาม profile (เช่น `anthropic/claude-opus-5-5, opus` คือลอง id เต็มก่อน แล้ว fallback เป็น alias) แก้ต่อได้ใน OMP `/agents` ส่วน `install.sh` จะไม่ทับไฟล์ agent ที่ติดตั้งไว้แล้ว ถ้าต้องการโมเดลใหม่ให้รัน `FORGE_REINSTALL_AGENTS=1 bash install.sh` (สำรองไฟล์เดิมไว้ใน `forge-backups/`)
 
@@ -79,6 +79,42 @@ FORGE_MODELS=balanced npm test
 ```
 
 Forge ไม่ยอมให้ specialist ตัวเดิมรันซ้ำใน Gate เดียวกัน (กำลังรันอยู่ หรือรายงานแล้ว) เพื่อตัดค่าใช้จ่ายที่ไม่ได้เพิ่มความครอบคลุม
+
+## โมเดลของแต่ละ Gate (OMP)
+
+ใน OMP, Forge สลับโมเดลของ **main session** ให้อัตโนมัติเมื่อเข้าแต่ละ Gate (subagent ยังตั้งที่ OMP `/agents` เหมือนเดิม)
+
+| Gate | ค่าเริ่มต้น | ความหมาย |
+|---|---|---|
+| planning | `@plan` | role `plan` ของ OMP |
+| execution / qa / delivery | `@default` | role `default` ของ OMP |
+
+**1. ตั้ง role `default` และ `plan`** ใน `~/.omp/agent/config.yml` แล้ว restart `omp`
+
+```yaml
+modelRoles:
+  default: openai-codex/gpt-6-luna:high   # execution, QA, delivery
+  plan: anthropic/claude-opus-5-5:high    # planning
+```
+
+ค่าเป็น `provider/model-id` (ต่อท้าย `:thinking` ได้) ต้องเป็นโมเดลที่ login ไว้ เปลี่ยน role ทีหลัง ทุก Gate ที่ใช้ role นั้นเปลี่ยนตามเอง
+
+**2. ตรวจ** ด้วย `/forge model` จะเห็น `PLANNING @plan`, `EXECUTION @default`, `QA @default`, `DELIVERY @default`
+
+**3. เปลี่ยนราย Gate (ถ้าต้องการ)**
+
+```text
+/forge model qa @plan                              # QA ใช้โมเดลของ role plan
+/forge model execution anthropic/claude-opus-5-5   # ระบุโมเดลตรง ๆ
+/forge model delivery keep                         # Gate นี้ไม่สลับโมเดล
+/forge model reset                                 # กลับค่าเริ่มต้น
+```
+
+- สลับครั้งเดียวตอนเริ่ม Gate ก่อน turn แรก ถ้าเลือกเองด้วย `/model` ระหว่าง Gate, Forge ไม่ทับจนกว่าจะเข้า Gate ถัดไป
+- คง thinking level ปัจจุบันไว้ (`:high` ใน role ใช้เฉพาะตอน OMP เรียก role เอง)
+- หาโมเดลไม่เจอหรือไม่มี credential: แจ้งเตือนแล้วใช้โมเดลเดิม และ `/forge model` จะไม่บันทึกโมเดลที่หาไม่เจอ
+- `/forge off` หรือจบงานแล้วไม่สลับกลับโมเดลเดิม
+- Claude Code ยังไม่รองรับ ใช้โมเดลของ session เสมอ
 
 ## ตัวอย่าง 1 รอบ
 

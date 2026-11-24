@@ -77,6 +77,7 @@ Run these in the main OMP session:
 | `/forge recover` | Review a detected checkpoint inconsistency. |
 | `/forge agents` | Show the fixed Forge agent mapping. |
 | `/forge planreview on\|off` | Turn the optional plan critic on or off (default OFF, saved in Forge config, applies to new workflows). When ON, the main agent must run `forge-plan-critic` once on the written plan and cite every CRITICAL/HIGH PC-id in the plan before Forge accepts the proposal. |
+| `/forge model` | Show or change the main-session model used by each gate (OMP only). See [Gate models (OMP)](#gate-models-omp). |
 | `/forge skill` | Manage optional skills assigned to gates. |
 | `/forge off` | Cancel the current Forge workflow. |
 
@@ -88,7 +89,7 @@ Start with `/forge <requirement>`. Common commands include `/forge-status`, `/fo
 
 ## Model profiles and usage
 
-Forge's agents (`forge-code-reviewer`, and `forge-plan-critic` when plan review is ON) use the model assignments selected when the package is built; the main agent uses your session model. Profiles are `rigor` (default), `balanced`, and `economy`; they change models, not required gates. Total cost varies with model provider, context size, retries, task complexity, and whether rework is needed.
+Forge's agents (`forge-code-reviewer`, and `forge-plan-critic` when plan review is ON) use the model assignments selected when the package is built. In OMP the main agent switches model per gate (see [Gate models](#gate-models-omp)); in Claude Code it uses your session model. Profiles are `rigor` (default), `balanced`, and `economy`; they change models, not required gates. Total cost varies with model provider, context size, retries, task complexity, and whether rework is needed.
 
 To choose a profile before building:
 
@@ -97,6 +98,65 @@ FORGE_MODELS=balanced npm run build
 ```
 
 OMP preserves customized installed agent files. Use OMP `/agents` to adjust models. Replacing bundled agent definitions is an explicit operation and backs up old definitions.
+
+## Gate models (OMP)
+
+In OMP, Forge switches the **main session** model when a workflow enters each gate. The subagents (`forge-code-reviewer`, `forge-plan-critic`) are not affected; set their models with OMP `/agents`.
+
+Default mapping:
+
+| Gate | Model selector | Meaning |
+|---|---|---|
+| planning | `@plan` | OMP role `plan` |
+| execution | `@default` | OMP role `default` |
+| qa | `@default` | OMP role `default` |
+| delivery | `@default` | OMP role `default` |
+
+### Step 1: set the OMP roles `default` and `plan`
+
+`@plan` and `@default` are OMP model roles, not Forge settings. Define them under `modelRoles` in `~/.omp/agent/config.yml` (or `$PI_CODING_AGENT_DIR/config.yml`):
+
+```yaml
+modelRoles:
+  default: openai-codex/gpt-6-luna:high   # execution, QA, delivery
+  plan: anthropic/claude-opus-5-5:high    # planning
+```
+
+Each value is `provider/model-id`, optionally with `:thinking-level`. Use models you are signed in to. Restart `omp` after editing the file. Changing a role later changes every gate that uses it; Forge needs no change.
+
+### Step 2: check the mapping
+
+```text
+/forge model
+```
+
+```text
+PLANNING     @plan
+EXECUTION    @default
+QA           @default
+DELIVERY     @default
+```
+
+### Step 3 (optional): change a gate
+
+```text
+/forge model qa @plan                              # QA on the plan role model
+/forge model execution anthropic/claude-opus-5-5   # a specific model, no role
+/forge model delivery keep                         # never switch at this gate
+/forge model reset                                 # restore the defaults above
+```
+
+- A selector is `@<role>` (any role in `modelRoles`, e.g. `@slow`, `@smol` when you define them) or `provider/model-id`.
+- Forge rejects a model OMP cannot find and leaves the config unchanged.
+- Settings are saved in the Forge `config.json` (`gateModels`) and apply to the running workflow: changing the current gate switches now; other gates switch when they start.
+
+### Behavior
+
+- Forge switches once when a gate starts, before its first turn. If you pick another model with `/model` inside a gate, Forge keeps your choice until the next gate.
+- The current **thinking level is kept** across switches. A role's `:high` suffix applies only when OMP itself uses that role; Forge keeps the session's thinking level instead.
+- If a model is missing or has no credentials, Forge shows a warning and keeps the current model.
+- `/forge off` and the end of delivery do not restore the earlier model.
+- Claude Code does not support gate models; it always uses the session model.
 
 ## Data and privacy
 

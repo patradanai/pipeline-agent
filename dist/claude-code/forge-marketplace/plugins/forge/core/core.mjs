@@ -104,6 +104,25 @@ export function currentSkillGate(phase, qaStatus = null) {
   if (String(phase) === 'QA' && qaStatus === 'PASS') return 'delivery';
   return ({ PLAN:'planning', EXECUTE:'execution', QA:'qa' })[String(phase)] ?? null;
 }
+/** Main-session model per gate: `@role` alias, `provider/model-id`, or null (keep the current model). */
+export const DEFAULT_GATE_MODELS = Object.freeze({ planning: '@plan', execution: '@default', qa: '@default', delivery: '@default' });
+export const GATE_MODEL_SELECTOR_PATTERN = /^[@A-Za-z0-9][A-Za-z0-9@._:\/+-]{0,127}$/;
+export function cloneGateModels(source) {
+  const result = { ...DEFAULT_GATE_MODELS };
+  if (!source || typeof source !== 'object' || Array.isArray(source)) return result;
+  for (const gate of SKILL_GATES) {
+    const value = source[gate];
+    if (value === undefined) continue;
+    if (value === null) result[gate] = null;
+    else if (typeof value === 'string' && GATE_MODEL_SELECTOR_PATTERN.test(value)) result[gate] = value;
+    else throw new Error(`Invalid model for ${gate}: ${String(value)}`);
+  }
+  return result;
+}
+export function formatGateModels(source) {
+  const m = cloneGateModels(source);
+  return SKILL_GATES.map(g => `${g.toUpperCase().padEnd(12)} ${m[g] ?? '(keep current model)'}`).join('\n');
+}
 /** Apply skill text to every named subagent task, not just the lead orchestrator prompt. */
 export function injectGateSkillsIntoTask(input, phase, skillBrief) {
   if (!skillBrief || !skillBrief.trim()) return input;
@@ -1019,6 +1038,19 @@ export function parseCommand(args) {
     return { type:'skillReset', gate:parts[2] };
   }
   if (/^skill(?:\s|$)/i.test(trimmed)) return { type:'skillInvalid', message:'Use /forge skills or /forge skill [create|list|add|remove|reset].' };
+  if (/^models?$/i.test(trimmed)) return { type:'models' };
+  if (/^model\s+reset$/i.test(trimmed)) return { type:'modelReset' };
+  if (/^model\s+/i.test(trimmed)) {
+    const parts = trimmed.split(/\s+/);
+    if (parts.length === 3) {
+      const gate = parts[1].toLowerCase();
+      if (!SKILL_GATES.includes(gate)) return { type:'modelInvalid', message:'Invalid model Gate. Use planning, execution, qa or delivery.' };
+      if (/^keep$/i.test(parts[2])) return { type:'modelSet', gate, selector:null };
+      if (!GATE_MODEL_SELECTOR_PATTERN.test(parts[2])) return { type:'modelInvalid', message:'Invalid model selector. Use @role (e.g. @plan) or provider/model-id, or keep.' };
+      return { type:'modelSet', gate, selector:parts[2] };
+    }
+  }
+  if (/^model(?:\s|$)/i.test(trimmed)) return { type:'modelInvalid', message:'Usage: /forge model | /forge model <planning|execution|qa|delivery> <@role|provider/model-id|keep> | /forge model reset' };
   if (/^agents$/i.test(trimmed)) return { type:'agents' };
   // Old v5.11 commands cannot change agent routing. Direct users to native OMP /agents.
   if (/^agent(?:\s|$)/i.test(trimmed)) return { type:'agentHelp' };
@@ -1077,6 +1109,7 @@ export function getForgeArgumentCompletions(argumentPrefix, options = {}) {
       {token:'agents', detail:'Show fixed Gate → OMP agents (manage models with /agents)'},
       {token:'skill', detail:'Manage skills per gate', more:true},
       {token:'skills', detail:'Show gate skill assignments'},
+      {token:'model', detail:'Main-session model per gate', more:true},
       {token:'status', detail:'Show workflow status'},
       {token:'recover', detail:'Review inconsistent state (human confirmation)'},
       {token:'resume', detail:'Choose Forge session to resume'},
@@ -1095,6 +1128,14 @@ export function getForgeArgumentCompletions(argumentPrefix, options = {}) {
     candidates = choices([{token:'on',detail:'Enable global auto-start'},{token:'off',detail:'Disable global auto-start'}]);
   } else if (fixed[0].toLowerCase() === 'planreview' && fixed.length === 1) {
     candidates = choices([{token:'on',detail:'Run forge-plan-critic before every plan proposal'},{token:'off',detail:'Propose plans without the plan critic'}]);
+  } else if (fixed[0].toLowerCase() === 'model') {
+    if (fixed.length === 1) candidates = [
+      ...gateNames.map(g => ({token:g, detail:`Model for ${g}`, more:true})),
+      {token:'reset', detail:'Restore default gate models'},
+    ];
+    else if (fixed.length === 2 && gateNames.includes(fixed[1].toLowerCase())) {
+      candidates = choices(['@plan','@default','@slow','@smol','keep']);
+    }
   } else if (fixed[0].toLowerCase() === 'skill') {
     if (fixed.length === 1) candidates = [
       {token:'create',detail:'Paste a SKILL.md in multiline editor',more:true},
