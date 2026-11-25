@@ -262,6 +262,36 @@ test('each gate switches the main-session model before its turn and keeps thinki
   assert.match(readFileSync(process.env.FORGE_CONFIG_PATH,'utf8'),/"qa": "@default"/);
 });
 
+test('planning model picker saves an available model and leaves config untouched on cancel', async () => {
+  const x=setup();
+  const planModel={provider:'anthropic',id:'sonnet'};
+  const original={provider:'openai',id:'gpt'};
+  x.ctx.models={
+    list:()=>[original,planModel],
+    resolve:selector=>({'@plan':original,'anthropic/sonnet':planModel})[selector],
+    current:()=>x.getModel(),
+  };
+  await reachPlanning(x);
+  const forge=x.commands.get('forge');
+  const configPath=process.env.FORGE_CONFIG_PATH;
+  const before=readFileSync(configPath,'utf8');
+  x.ctx.ui.select=async()=>undefined;
+  await forge.handler('model planning',x.ctx);
+  assert.equal(readFileSync(configPath,'utf8'),before);
+  assert.deepEqual(x.getModel(),original);
+  x.ctx.ui.select=async(_title,options)=>{
+    assert.deepEqual(options,['anthropic/sonnet','openai/gpt']);
+    return 'anthropic/sonnet';
+  };
+  try {
+    await forge.handler('model planning',x.ctx);
+    assert.equal(JSON.parse(readFileSync(configPath,'utf8')).gateModels.planning,'anthropic/sonnet');
+    assert.deepEqual(x.getModel(),planModel);
+  } finally {
+    await forge.handler('model reset',x.ctx);
+  }
+});
+
 test('an execution turn without forge_execution_done is reminded, then paused; Reply and resume current continue with approval kept', async () => {
   const x=setup(); await advanceToReview(x);
   await approvePlan(x);

@@ -1206,15 +1206,16 @@ export function parseCommand(args) {
   if (/^model\s+reset$/i.test(trimmed)) return { type:'modelReset' };
   if (/^model\s+/i.test(trimmed)) {
     const parts = trimmed.split(/\s+/);
-    if (parts.length === 3) {
+    if (parts.length === 2 || parts.length === 3) {
       const gate = parts[1].toLowerCase();
       if (!SKILL_GATES.includes(gate)) return { type:'modelInvalid', message:'Invalid model Gate. Use planning, execution, qa or delivery.' };
+      if (parts.length === 2) return { type:'modelPick', gate };
       if (/^keep$/i.test(parts[2])) return { type:'modelSet', gate, selector:null };
       if (!GATE_MODEL_SELECTOR_PATTERN.test(parts[2])) return { type:'modelInvalid', message:'Invalid model selector. Use @role (e.g. @plan) or provider/model-id, or keep.' };
       return { type:'modelSet', gate, selector:parts[2] };
     }
   }
-  if (/^model(?:\s|$)/i.test(trimmed)) return { type:'modelInvalid', message:'Usage: /forge model | /forge model <planning|execution|qa|delivery> <@role|provider/model-id|keep> | /forge model reset' };
+  if (/^model(?:\s|$)/i.test(trimmed)) return { type:'modelInvalid', message:'Usage: /forge model | /forge model <planning|execution|qa|delivery> [@role|provider/model-id|keep] | /forge model reset' };
   if (/^agents$/i.test(trimmed)) return { type:'agents' };
   // Old v5.11 commands cannot change agent routing. Direct users to native OMP /agents.
   if (/^agent(?:\s|$)/i.test(trimmed)) return { type:'agentHelp' };
@@ -1294,7 +1295,7 @@ export function getForgeArgumentCompletions(argumentPrefix, options = {}) {
     candidates = choices([{token:'on',detail:'Run forge-plan-critic before every plan proposal'},{token:'off',detail:'Propose plans without the plan critic'}]);
   } else if (fixed[0].toLowerCase() === 'model') {
     if (fixed.length === 1) candidates = [
-      ...gateNames.map(g => ({token:g, detail:`Model for ${g}`, more:true})),
+      ...gateNames.map(g => ({token:g, detail:`Pick a model for ${g}`, more:true})),
       {token:'reset', detail:'Restore default gate models'},
     ];
     else if (fixed.length === 2 && gateNames.includes(fixed[1].toLowerCase())) {

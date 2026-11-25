@@ -147,6 +147,8 @@ DELIVERY     @default
 
 ### Step 3 (optional): change a gate
 
+Run `/forge model planning` to pick the planning model from OMP's available models. This saves a Forge-only override; it does not change the OMP role `@plan`. Press Esc to leave the setting unchanged, or run `/forge model planning @plan` to restore the role.
+
 ```text
 /forge model qa @plan                              # QA on the plan role model
 /forge model execution anthropic/claude-opus-5-5   # a specific model, no role

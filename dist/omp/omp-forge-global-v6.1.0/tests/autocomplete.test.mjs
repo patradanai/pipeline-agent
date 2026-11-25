@@ -77,7 +77,7 @@ test('gate model commands parse, validate and complete', () => {
   assert.deepEqual(parseCommand('model qa keep'), {type:'modelSet',gate:'qa',selector:null});
   assert.equal(parseCommand('model foo @x').type, 'modelInvalid');
   assert.equal(parseCommand('model qa a,b').type, 'modelInvalid');
-  assert.equal(parseCommand('model qa').type, 'modelInvalid');
+  assert.deepEqual(parseCommand(values('model ').find(value=>value.trim()==='model planning')), {type:'modelPick',gate:'planning'});
   assert.deepEqual(parseCommand('model reset'), {type:'modelReset'});
   assert.ok(values('model ').includes('model planning '));
   assert.ok(values('model ').includes('model reset'));

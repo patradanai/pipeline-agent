@@ -1480,14 +1480,24 @@ export default function forgeExtension(pi: ExtensionAPI) {
         return;
       }
       if (command.type === 'modelInvalid') return notify(ctx, command.message, 'warning');
-      if (command.type === 'models') return notify(ctx, `Forge gate models (main session; applied when a gate starts; thinking level kept):\n${formatGateModels(configuredGateModels)}\nSubagent models: OMP /agents.`);
-      if (command.type === 'modelSet') {
-        if (command.selector !== null && !(typeof ctx.models?.resolve === 'function' && ctx.models.resolve(command.selector))) {
-          return notify(ctx, `Model "${command.selector}" not found among authenticated models; nothing changed.`, 'error');
+      if (command.type === 'models') return notify(ctx, `Forge gate models (main session; applied when a gate starts; thinking level kept):\n${formatGateModels(configuredGateModels)}\nPick from available models: /forge model <gate>. Subagent models: OMP /agents.`);
+      if (command.type === 'modelSet' || command.type === 'modelPick') {
+        let selector = command.type === 'modelSet' ? command.selector : null;
+        if (command.type === 'modelPick') {
+          if (typeof ctx.ui?.select !== 'function' || typeof ctx.models?.list !== 'function') {
+            return notify(ctx, 'Model selection needs the OMP picker and model list. Use /forge model <gate> <@role|provider/model-id|keep> instead.', 'warning');
+          }
+          const options = [...new Set<string>(ctx.models.list().map((model: { provider: string; id: string }) => `${model.provider}/${model.id}`))].sort();
+          if (!options.length) return notify(ctx, 'No models are available in OMP. Sign in to a provider with /login, then try again.', 'warning');
+          selector = await ctx.ui.select(`Forge · Model for ${command.gate} (current: ${configuredGateModels[command.gate] ?? 'keep'})`, options);
+          if (!options.includes(selector)) return;
         }
-        try { persistConfig({ gateModels: { ...configuredGateModels, [command.gate]: command.selector } }); }
+        if (selector !== null && !(typeof ctx.models?.resolve === 'function' && ctx.models.resolve(selector))) {
+          return notify(ctx, `Model "${selector}" not found among authenticated models; nothing changed.`, 'error');
+        }
+        try { persistConfig({ gateModels: { ...configuredGateModels, [command.gate]: selector } }); }
         catch (err) { return notify(ctx, `Could not save config: ${String(err)}`, 'error'); }
-        notify(ctx, `Forge ${command.gate} model → ${command.selector ?? 'keep current model'}.`);
+        notify(ctx, `Forge ${command.gate} model → ${selector ?? 'keep current model'}.`);
         // Gate models are live config: a change to the running gate applies now.
         if (workflow?.active && currentSkillGate(workflow.phase, workflow.qaStatus) === command.gate) {
           appliedGateKey = null;
