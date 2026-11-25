@@ -47,6 +47,18 @@ test('gate skills are inlined in place of the load directive, with their audienc
   assert.equal(inlineGateSkills(text, () => []), text, 'nothing to inline keeps the instruction');
 });
 
+test('a rework instruction asks for in-place edits only when Forge seeded the rework plan', () => {
+  const rework = { ...initialState('Build it', 'forge-x'), reworkBaseHash: 'abc', reworkBasePlanPath: 'local://forge-x-plan.md',
+    reworkCycles: 1, reworkReason: 'QA_FAIL', qaStatus: 'FAIL' };
+  const fresh = phaseInstruction(rework);
+  assert.match(fresh, /Save a revised plan to local:\/\/forge-x-rework-1-plan\.md/);
+  assert.doesNotMatch(fresh, /Forge already copied/);
+  const seeded = phaseInstruction({ ...rework, reworkPlanSeededPath: 'local://forge-x-rework-1-plan.md' });
+  assert.match(seeded, /Edit local:\/\/forge-x-rework-1-plan\.md; never modify the previous approved plan\./);
+  assert.match(seeded, /Forge already copied the previous approved plan to local:\/\/forge-x-rework-1-plan\.md/);
+  assert.doesNotMatch(seeded, /Save a revised plan/);
+});
+
 test('an execution stop enters QA only after forge_execution_done; otherwise it reminds, then pauses', () => {
   let state = approvedExecutionState({ ...initialState('Build it', 'forge-x'), active: true, phase: 'PLAN', planValid: true }, 'test');
   const reminded = executionStopTransition(state);

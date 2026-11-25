@@ -5,7 +5,7 @@ import { snapshotWorkingTree as coreSnapshotWorkingTree, inspectWorkspaceScope }
 import { hasGateAgents, markGateAgent, approvedExecutionState, qaReportTransition, assertQaSubmittable, assertDeliverySubmittable, assertPlanProposable, deliveryTransition, approveReworkTransition, steeringRoute, steerTransition, executionDoneTransition, enterQaState, executionStopTransition, qaResubmission } from './transitions.mjs';
 import { sessionIdentity, recoveryIdentity, persistForgeCheckpoint, loadForgeCheckpointCandidates, loadForgeCheckpointRecord, pruneForgeCheckpoints, candidateFromSessionEntries, prepareHumanRecovery, isValidRestoreCandidate } from './checkpoint-recovery.mjs';
 import { normalizeForgeState } from './forge-state.mjs';
-import { mkdirSync, readFileSync, writeFileSync, lstatSync, renameSync, readdirSync, unlinkSync, realpathSync, statSync, rmdirSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, lstatSync, renameSync, readdirSync, unlinkSync, realpathSync, statSync, rmdirSync, existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
@@ -712,15 +712,22 @@ export default function forgeExtension(pi: ExtensionAPI) {
   const MAX_PLAN_BYTES = 512 * 1024;
 
   /** Forge plan files live in OMP's session-local root (<session file minus .jsonl>/local/),
-   * never in the checked-out repository. Only a root-level *-plan.md regular file is read. */
-  function readPlanFile(ctx: any, planPath: string): { ok: true; content: string } | { ok: false; error: string } {
+   * never in the checked-out repository. Resolves a root-level *-plan.md local:// path. */
+  function localPlanFile(ctx: any, planPath: string): { ok: true; file: string } | { ok: false; error: string } {
     const name = typeof planPath === 'string' ? planPath.match(PLAN_FILE_PATTERN)?.[1] : undefined;
     if (!name) return { ok: false, error: `Invalid Forge plan path "${planPath}".` };
     const sessionFile = ctx.sessionManager?.getSessionFile?.();
     if (typeof sessionFile !== 'string' || !sessionFile.endsWith('.jsonl')) {
       return { ok: false, error: 'This OMP session has no session file, so local:// plan files are unavailable.' };
     }
-    const file = join(sessionFile.slice(0, -6), 'local', name);
+    return { ok: true, file: join(sessionFile.slice(0, -6), 'local', name) };
+  }
+
+  /** Only a regular *-plan.md file in the session-local root is read. */
+  function readPlanFile(ctx: any, planPath: string): { ok: true; content: string } | { ok: false; error: string } {
+    const resolved = localPlanFile(ctx, planPath);
+    if (!resolved.ok) return resolved;
+    const file = resolved.file;
     try {
       const stat = lstatSync(file);
       if (!stat.isFile() || stat.isSymbolicLink()) return { ok: false, error: `${planPath} is not a regular file.` };
@@ -730,6 +737,28 @@ export default function forgeExtension(pi: ExtensionAPI) {
     } catch {
       return { ok: false, error: `${planPath} does not exist yet.` };
     }
+  }
+
+  /** A rework PLAN gate starts from a copy of the previous approved plan, so the agent
+   * revises it with small edits instead of re-typing it. Copies once; never overwrites. */
+  function seedReworkPlan(ctx: any): void {
+    if (!workflow?.active || workflow.phase !== 'PLAN' || typeof workflow.reworkBaseHash !== 'string' || !workflow.reworkBaseHash
+      || typeof workflow.reworkBasePlanPath !== 'string') return;
+    const target = forgePlanPath(workflow);
+    if (target === workflow.reworkBasePlanPath) return;
+    const resolved = localPlanFile(ctx, target);
+    if (!resolved.ok) return;
+    if (existsSync(resolved.file)) {
+      workflow = { ...workflow, reworkPlanSeededPath: target }; saveState();
+      return;
+    }
+    const base = readPlanFile(ctx, workflow.reworkBasePlanPath);
+    if (!base.ok) return;
+    try {
+      mkdirSync(dirname(resolved.file), { recursive: true });
+      writeFileSync(resolved.file, base.content, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+    } catch { return; }
+    workflow = { ...workflow, reworkPlanSeededPath: target }; saveState();
   }
 
   /** Paths a write/edit call targets: explicit path fields, or hashline `[PATH#TAG]` headers in `input.input`. */
@@ -908,6 +937,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
           }
           invalidateGateWork();
           workflow = approveReworkTransition(workflow, notes);
+          seedReworkPlan(ctx);
           saveState(); updateDashboard(ctx);
           notify(ctx, workflow.autoApprovePlans === true
             ? 'Forge: planning the fix. Your opt-in approves it after validation.'
@@ -1193,6 +1223,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
       .filter(Boolean).join('\n\n');
     try { workflow = steerTransition(workflow, directive); }
     catch (err) { notify(ctx, `Forge steering not applied: ${err instanceof Error ? err.message : String(err)}`, 'warning'); return null; }
+    seedReworkPlan(ctx as any);
     invalidateGateWork();
     reviewEpoch++; reviewScheduled = false;
     saveState(); updateDashboard(ctx);
@@ -1555,7 +1586,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
         // Typing /forge rework is the human's go-ahead to plan a fix; the fix plan still needs approval.
         invalidateGateWork();
         qaDecisionEpoch++; qaDecisionScheduled = false;
-        workflow = approveReworkTransition(workflow); saveState(); updateDashboard(ctx);
+        workflow = approveReworkTransition(workflow); seedReworkPlan(ctx); saveState(); updateDashboard(ctx);
         if (!(await syncGateModel(ctx))) return;
         pi.sendUserMessage(phaseInstruction(workflow), { attribution: 'agent' });
         return;
@@ -1636,6 +1667,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
             return;
           }
           workflow = { ...workflow, agentRetries: { ...(workflow.agentRetries ?? {}), PLAN: 0 } }; saveState();
+          seedReworkPlan(ctx);
           if (!(await syncGateModel(ctx))) return;
           pi.sendUserMessage(phaseInstruction(workflow), { attribution: 'agent' });
           return;

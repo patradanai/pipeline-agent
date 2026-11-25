@@ -60,6 +60,13 @@ checks that made the old gate rigorous.
   **Approve and compact context**, **Refine plan**, or **Not now**. `/forge
   review` reopens it. Forge exits native OMP Plan Mode when Forge starts and
   again on approval, then sends the execution turn itself.
+- OMP: when a rework starts (QA fix decision, `/forge rework`, steering that
+  revokes an approved plan, or `/forge resume` of a rework PLAN), Forge copies
+  the previous approved plan to `local://<slug>-rework-<n>-plan.md` once,
+  never overwriting an existing file. The rework instruction then tells the
+  agent to revise that copy with small `edit` calls instead of re-typing the
+  whole plan with `write`. State tracks the copy in `reworkPlanSeededPath`;
+  without a copy, the instruction is unchanged.
 - Removed for OMP: `xd://propose` and `propose <slug>` handling,
   `plan_review_requested`/`plan_review_resolved`, approval handoff across
   branch/new-session switches, and the native Plan Mode recovery prompt.

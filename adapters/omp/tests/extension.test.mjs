@@ -1857,6 +1857,45 @@ test('an unchanged rework plan is rejected as identical', async () => {
   assert.match(result.content[0].text,/identical/);
 });
 
+test('QA rework seeds the rework plan with the previous approved plan; the agent edits it in place', async () => {
+  const x=setup(); await advanceToReview(x);
+  await approvePlan(x);
+  await executionTurn(x);
+  await x.events.get('session_stop')({},x.ctx);
+  await runQaAgents(x);
+  const fail=structuredClone(SUBMISSION); fail.topicResults[0].tests[0].status='FAIL';
+  await x.tools.get('forge_qa_submit').execute('call',fail,null,null,x.ctx);
+  await x.commands.get('forge').handler('rework',x.ctx);
+  const {slug}=x.entries.at(-1).data;
+  const path=`local://${slug}-rework-1-plan.md`;
+  assert.equal(readFileSync(planFile(x,path),'utf8'),PLAN);
+  assert.equal(x.entries.at(-1).data.reworkPlanSeededPath,path);
+  assert.match(x.sent.at(-1).content,/Forge already copied the previous approved plan to local:\/\/.*-rework-1-plan\.md/);
+  assert.match(x.sent.at(-1).content,/NEVER rewrite the whole file with write/);
+  assert.doesNotMatch(x.sent.at(-1).content,/Save a revised plan to/);
+  assert.equal(await x.events.get('tool_call')({toolName:'edit',input:{input:`[${path}#ABCD]\nPUT 1.=1:\n+# Plan v2\n`}},x.ctx),undefined);
+
+  // Re-running /forge rework keeps the agent's edits.
+  const edited=PLAN+'\n## QA Rework Changes\n- fix\n';
+  putPlanFile(x,path,edited);
+  await x.commands.get('forge').handler('rework',x.ctx);
+  assert.equal(readFileSync(planFile(x,path),'utf8'),edited);
+  assert.equal(x.entries.at(-1).data.reworkPlanSeededPath,path);
+});
+
+test('steering a running approved plan seeds the rework plan copy', async () => {
+  const x=setup(); await advanceToReview(x);
+  await approvePlan(x);
+  await executionTurn(x);
+  const {result}=await typePrompt(x,'Also export CSV');
+  const state=x.entries.at(-1).data;
+  const path=`local://${state.slug}-rework-1-plan.md`;
+  assert.equal(state.phase,'PLAN');
+  assert.equal(state.reworkPlanSeededPath,path);
+  assert.equal(readFileSync(planFile(x,path),'utf8'),PLAN);
+  assert.match(result.text,/Forge already copied the previous approved plan/);
+});
+
 async function reachQa(x) {
   await advanceToReview(x);
   await approvePlan(x);
