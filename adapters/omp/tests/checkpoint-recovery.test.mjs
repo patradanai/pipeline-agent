@@ -55,9 +55,10 @@ test('full session history candidate is only selected when unambiguous', () => {
 });
 
 test('human-approved off-branch checkpoint returns to fresh planning, not execution', () => {
-  const recovered = prepareHumanRecovery(state);
+  const recovered = prepareHumanRecovery({...state,autoApprovePlans:true});
   assert.equal(recovered.phase,'PLAN');
   assert.equal(recovered.approved,false);
+  assert.equal(recovered.autoApprovePlans,false);
   assert.equal(recovered.approvedPlanHash,null);
   assert.equal(recovered.planWritten,false);
   assert.equal(recovered.planValid,false);

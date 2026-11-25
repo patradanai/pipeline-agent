@@ -121,7 +121,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
   }
   // Forge's own plan review opens once the proposing turn is idle. The epoch
   // invalidates a scheduled review after a session/branch change or cancel.
-  // This is control-plane only; it never authorizes code writes.
+  // The idle timer cannot authorize writes without a recorded operator opt-in.
   let reviewScheduled = false;
   let reviewEpoch = 0;
   let reviewOpen = false;
@@ -701,6 +701,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
 
   const REVIEW_KEEP = 'Approve and keep context';
   const REVIEW_COMPACT = 'Approve and compact context';
+  const REVIEW_AUTO = 'Approve and auto-approve future plans in this run (recommended)';
   const REVIEW_REFINE = 'Refine plan';
   const REVIEW_LATER = 'Not now — keep plan for /forge review';
   const QA_PLAN_FIX = 'Plan the fix — draft a rework plan, then approve it';
@@ -805,22 +806,19 @@ export default function forgeExtension(pi: ExtensionAPI) {
     pi.sendUserMessage(`${reason}\n\n${phaseInstruction(workflow)}`, { attribution: 'agent' });
   }
 
-  /** Open the approval dialog once the proposing turn has settled. */
+  /** Process a proposal once the proposing turn has settled. */
   function scheduleReviewWhenIdle(ctx: any) {
     if (!workflow?.active || reviewScheduled) return;
     if (typeof ctx.setTimeout !== 'function' || typeof ctx.isIdle !== 'function') {
-      notify(ctx, 'Forge cannot detect an idle session. Plan kept; run /forge review to open the approval dialog.', 'warning');
+      notify(ctx, 'Forge cannot detect an idle session. Plan kept; run /forge review to continue.', 'warning');
       return;
     }
     reviewScheduled = true;
     const epoch = ++reviewEpoch;
-    const slug = workflow.slug;
-    const hash = workflow.approvedPlanHash;
-    const sessionId = ctx.sessionManager?.getSessionId?.();
+    const snapshot = gateSnapshot(ctx);
+    const planPath = workflow.planPath;
     const release = () => { if (epoch === reviewEpoch) reviewScheduled = false; };
-    const isCurrent = () => epoch === reviewEpoch && workflow?.active && workflow.phase === 'PLAN' &&
-      workflow.slug === slug && workflow.approvedPlanHash === hash &&
-      (!sessionId || ctx.sessionManager?.getSessionId?.() === sessionId);
+    const isCurrent = () => epoch === reviewEpoch && isCurrentGate(snapshot, ctx) && workflow.planPath === planPath;
     const tick = () => ctx.setTimeout(async () => {
       if (!isCurrent()) { release(); return; }
       if (!ctx.isIdle() || ctx.hasPendingMessages?.()) { tick(); return; }
@@ -889,9 +887,10 @@ export default function forgeExtension(pi: ExtensionAPI) {
       const stale = () => !workflow?.active || workflow.reworkDecisionPending !== true ||
         workflow.slug !== snapshot.slug || workflow.qaReportPath !== snapshot.reportPath;
       const staleNotice = () => notify(ctx, 'Forge state changed while the QA decision was open. Nothing changed; run /forge review again.', 'warning');
+      const planFix = workflow.autoApprovePlans === true ? 'Plan the fix — auto-approve the validated plan' : QA_PLAN_FIX;
       const choices = failed
-        ? [QA_PLAN_FIX, ...(typeof ctx.ui.editor === 'function' ? [QA_PLAN_FIX_NOTES] : []), QA_LATER]
-        : [QA_RERUN, QA_PLAN_FIX, ...(typeof ctx.ui.editor === 'function' ? [QA_PLAN_FIX_NOTES] : []), QA_LATER];
+        ? [planFix, ...(typeof ctx.ui.editor === 'function' ? [QA_PLAN_FIX_NOTES] : []), QA_LATER]
+        : [QA_RERUN, planFix, ...(typeof ctx.ui.editor === 'function' ? [QA_PLAN_FIX_NOTES] : []), QA_LATER];
       const title = failed
         ? `Forge · QA FAILED — plan a fix? (report: ${workflow.qaReportPath ?? 'n/a'})`
         : `Forge · QA BLOCKED — evidence incomplete. How to continue? (report: ${workflow.qaReportPath ?? 'n/a'})`;
@@ -899,7 +898,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
         const choice = await ctx.ui.select(title, choices);
         if (stale()) { staleNotice(); return false; }
         if (choice === QA_RERUN) return await startQaRound(ctx);
-        if (choice === QA_PLAN_FIX || choice === QA_PLAN_FIX_NOTES) {
+        if (choice === planFix || choice === QA_PLAN_FIX_NOTES) {
           let notes = '';
           if (choice === QA_PLAN_FIX_NOTES) {
             const feedback = await ctx.ui.editor('Forge · What should the fix plan address?', '');
@@ -910,7 +909,9 @@ export default function forgeExtension(pi: ExtensionAPI) {
           invalidateGateWork();
           workflow = approveReworkTransition(workflow, notes);
           saveState(); updateDashboard(ctx);
-          notify(ctx, 'Forge: planning the fix. You approve the fix plan before any code changes.');
+          notify(ctx, workflow.autoApprovePlans === true
+            ? 'Forge: planning the fix. Your opt-in approves it after validation.'
+            : 'Forge: planning the fix. You approve the fix plan before any code changes.');
           if (!(await syncGateModel(ctx))) return false;
           pi.sendUserMessage(`[FORGE QA REWORK — APPROVED BY THE OPERATOR]\nThe operator chose to plan a fix for the QA ${failed ? 'failures' : 'gaps'}.\n\n${phaseInstruction(workflow)}`, { attribution: 'agent' });
           return true;
@@ -943,7 +944,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
     const send = () => {
       if (sent || !canDispatch()) return;
       sent = true;
-      pi.sendUserMessage(`[FORGE PLAN APPROVED — ${planPath}]\nThe operator approved this plan in the Forge plan review. Execute it now.\n\n${planContent}`, { attribution: 'agent' });
+      pi.sendUserMessage(`[FORGE PLAN APPROVED — ${planPath}]\nThis plan has operator approval. Execute it now.\n\n${planContent}`, { attribution: 'agent' });
     };
     if (mode === 'compact' && typeof ctx.compact === 'function') {
       const fallback = (err: unknown) => {
@@ -958,11 +959,11 @@ export default function forgeExtension(pi: ExtensionAPI) {
     send();
   }
 
-  /** Forge's own plan approval dialog. Only an explicit human choice approves. */
+  /** Approve the exact proposed plan, by dialog choice or prior operator opt-in. */
   async function openForgeReview(ctx: any): Promise<boolean> {
     if (reviewOpen) return false;
     if (!(workflow?.active && workflow.phase === 'PLAN' && workflow.planWritten && workflow.planValid &&
-        workflow.approvedPlanHash && !workflow.approved)) {
+        workflow.approvedPlanHash && !workflow.approved && !workflow.reworkDecisionPending)) {
       notify(ctx, 'No proposed Forge plan awaits review.', 'warning');
       return false;
     }
@@ -970,36 +971,48 @@ export default function forgeExtension(pi: ExtensionAPI) {
       notify(ctx, 'Forge plan review needs the interactive OMP TUI.', 'warning');
       return false;
     }
-    const file = readPlanFile(ctx, workflow.planPath);
-    if (!file.ok) {
-      resetProposal(ctx, `Forge cannot read ${workflow.planPath}: ${file.error} Write the plan again and call forge_plan_propose.`);
-      return false;
-    }
-    const content = file.content;
-    if (validatePlanContract(content).hash !== workflow.approvedPlanHash) {
-      resetProposal(ctx, `Plan ${workflow.planPath} changed after it was proposed. Call forge_plan_propose again.`);
-      return false;
-    }
+    const planPath = workflow.planPath;
+    const snapshot = gateSnapshot(ctx);
+    const readProposal = () => {
+      const file = readPlanFile(ctx, planPath);
+      if (!file.ok) {
+        resetProposal(ctx, `Forge cannot read ${planPath}: ${file.error} Write the plan again and call forge_plan_propose.`);
+        return null;
+      }
+      if (validatePlanContract(file.content).hash !== snapshot?.planHash) {
+        resetProposal(ctx, `Plan ${planPath} changed after it was proposed. Call forge_plan_propose again.`);
+        return null;
+      }
+      return file.content;
+    };
+    const content = readProposal();
+    if (content === null) return false;
     reviewOpen = true;
     try {
       workflow = { ...workflow, reviewRequested: false };
       saveState(); updateDashboard(ctx);
-      pi.sendMessage({ customType: 'forge-plan-review', content: `Forge plan review · ${workflow.planPath}\n\n${content}`, display: true, excludeFromContext: true });
-      const choices = [REVIEW_KEEP, REVIEW_COMPACT, ...(typeof ctx.ui.editor === 'function' ? [REVIEW_REFINE] : []), REVIEW_LATER];
-      const snapshot = { slug: workflow.slug, hash: workflow.approvedPlanHash };
-      const stale = () => !workflow?.active || workflow.phase !== 'PLAN' || workflow.approved ||
-        workflow.slug !== snapshot.slug || workflow.approvedPlanHash !== snapshot.hash;
+      pi.sendMessage({ customType: 'forge-plan-review', content: `Forge plan review · ${planPath}\n\n${content}`, display: true, excludeFromContext: true });
+      const approve = async (choice: 'keep' | 'compact' | 'opt-in-auto' | 'auto') => {
+        const autoApprovePlans = choice === 'auto' || choice === 'opt-in-auto';
+        workflow = { ...approvedExecutionState(workflow, `forge-plan-review:${choice}`, 'forge-plan-review'), reviewRequested: false, autoApprovePlans };
+        saveState(); updateDashboard(ctx);
+        notify(ctx, choice === 'auto' ? 'Forge auto-approved this validated plan using your opt-in for this run. Execution starts now.'
+          : autoApprovePlans ? 'Forge approved. Future valid plans in this run will be approved automatically.'
+          : 'Forge approved. Execution starts now; QA runs automatically afterward.');
+        await dispatchApprovedExecution(ctx, choice === 'compact' ? 'compact' : 'keep', content);
+        return true;
+      };
+      if (workflow.autoApprovePlans === true) return await approve('auto');
+
+      const choices = [REVIEW_KEEP, REVIEW_COMPACT, REVIEW_AUTO, ...(typeof ctx.ui.editor === 'function' ? [REVIEW_REFINE] : []), REVIEW_LATER];
+      const stale = () => !isCurrentGate(snapshot, ctx) || workflow.planPath !== planPath || workflow.reworkDecisionPending === true;
       const staleNotice = () => notify(ctx, 'Forge state changed while the review was open. Nothing was approved; run /forge review again.', 'warning');
       for (;;) {
         const choice = await ctx.ui.select(`Forge · Approve plan ${workflow.planPath}?`, choices);
         if (stale()) { staleNotice(); return false; }
-        if (choice === REVIEW_KEEP || choice === REVIEW_COMPACT) {
-          const mode = choice === REVIEW_COMPACT ? 'compact' : 'keep';
-          workflow = { ...approvedExecutionState(workflow, `forge-plan-review:${mode}`, 'forge-plan-review'), reviewRequested: false };
-          saveState(); updateDashboard(ctx);
-          notify(ctx, 'Forge approved. Execution starts now; QA runs automatically afterward.');
-          await dispatchApprovedExecution(ctx, mode, content);
-          return true;
+        if (choice === REVIEW_KEEP || choice === REVIEW_COMPACT || choice === REVIEW_AUTO) {
+          if (readProposal() === null) return false;
+          return await approve(choice === REVIEW_AUTO ? 'opt-in-auto' : choice === REVIEW_COMPACT ? 'compact' : 'keep');
         }
         if (choice === REVIEW_REFINE) {
           const feedback = await ctx.ui.editor('Forge · What should change in the plan?', '');
@@ -1061,7 +1074,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
       return false;
     }
     try {
-      workflow = applyRecoveryProposal(workflow, suggestion);
+      workflow = { ...applyRecoveryProposal(workflow, suggestion), autoApprovePlans: false };
       saveState(); updateDashboard(ctx);
       notify(ctx, `Forge state switched to ${workflow.phase} after your confirmation. ${suggestion.explanation} No approval or QA PASS was granted.`);
       return true;
@@ -1205,7 +1218,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
       if (!workflow?.active || workflow.phase !== 'PLAN') return fail('only valid during the Forge PLAN gate.');
       if (workflow.reworkDecisionPending === true) return fail('QA is waiting for the user\'s decision (Forge QA dialog or /forge rework). End your turn; do not draft a fix plan yet.');
       if (workflow.planWritten && workflow.planValid && !workflow.approved) {
-        return fail('a plan is already awaiting human review. End your turn and wait for the decision.');
+        return fail('a validated plan is already awaiting Forge approval. End your turn.');
       }
       const planPath = forgePlanPath(workflow);
       const file = readPlanFile(ctx, planPath);
@@ -1228,9 +1241,12 @@ export default function forgeExtension(pi: ExtensionAPI) {
         qualityGates: contract.qualityGates, approvedCommands: contract.commands, planIssues: [], reviewRequested: true, proposalRetries: 0,
       };
       saveState(); updateDashboard(ctx);
-      notify(ctx, `Forge VALID PLAN: ${contract.topics.length} business topics, ${contract.requirements.length} requirements, ${contract.testCases.length} test cases; the approval dialog opens when this turn ends.`);
+      const nextApproval = workflow.autoApprovePlans === true
+        ? 'Forge will approve this plan when this turn ends using the operator’s opt-in for this run.'
+        : 'Forge opens the human approval dialog when this turn ends.';
+      notify(ctx, `Forge VALID PLAN: ${contract.topics.length} business topics, ${contract.requirements.length} requirements, ${contract.testCases.length} test cases. ${nextApproval}`);
       return {
-        content: [{ type: 'text', text: `[FORGE PLAN PROPOSED] ${planPath} passed the plan contract. Forge opens the human approval dialog when this turn ends. End your turn now: do not implement, do not call forge_plan_propose again, and do not ask the user to approve in chat.` }],
+        content: [{ type: 'text', text: `[FORGE PLAN PROPOSED] ${planPath} passed the plan contract. ${nextApproval} End your turn now: do not implement, do not call forge_plan_propose again, and do not ask the user to approve in chat.` }],
         details: { planPath, hash: contract.hash },
       };
     },
@@ -1499,9 +1515,10 @@ export default function forgeExtension(pi: ExtensionAPI) {
         if (mismatch) notify(ctx, `Forge state warning: ${mismatch.explanation} Run /forge recover to confirm a safe correction.`, 'warning');
         const missingAgents = missingGateAgentsFor(workflow);
         if (workflow?.phase === 'PLAN' && workflow.planWritten && workflow.planValid && !workflow.approved) {
-          notify(ctx, 'Forge plan awaits your approval. Run /forge review to open the approval dialog.', 'info');
+          notify(ctx, workflow.autoApprovePlans === true ? 'Forge plan awaits processing under your auto-approval opt-in. Run /forge review to continue.' : 'Forge plan awaits your approval. Run /forge review to open the approval dialog.', 'info');
         }
         notify(ctx, `Forge: ${workflow?.phase ?? 'inactive'} | requirement: ${workflow?.requirement ? String(workflow.requirement).replace(/[\r\n]/g, ' ').slice(0, 80) : '(none)'} | slug: ${workflow?.slug ?? '-'} | approved: ${workflow?.approved === true ? 'yes' : 'no'} | QA: ${workflow?.qaStatus ?? 'pending'} | rework: ${workflow?.reworkCycles ?? 0} | steering: ${workflow?.steeringRevision ?? 0} | waiting agents: ${missingAgents.join(',') || 'none'}${workflow?.phase === 'EXECUTE' && !workflow.active ? ' | action: /forge qa reviews existing work without rerunning implementation; /forge resume retries execution.' : ''} | plan review: ${workflow?.planReview === true ? 'ON' : 'OFF'} | global auto: ${autoStart ? 'ON' : 'OFF'}`);
+        if (workflow?.active && workflow.autoApprovePlans === true) notify(ctx, 'Plan auto-approval: ON for this run. /forge off cancels the workflow.');
         return;
       }
       if (command.type === 'report') {

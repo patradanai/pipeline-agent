@@ -4,12 +4,12 @@ Forge adds workflow guardrails. It is **not a sandbox**, a substitute for host p
 
 ## What Forge enforces
 
-- A valid plan requires explicit human approval before Forge's executor gate.
+- A valid plan requires human approval before Forge's executor gate. In OMP, a user can explicitly opt in to automatic approval of later valid plans for that run only.
 - Pre-approval and QA tool policies restrict known write and shell tools.
 - QA and code-review specialists are configured as read-only; the executor does not receive shell access.
 - Agent-issued Git publishing and common Git write commands are blocked by adapter hooks.
 - QA reports require structured test evidence; unrun tests must not be marked PASS.
-- QA FAIL and approved requirement steering revoke the old approval and require a new plan approval.
+- QA FAIL and approved requirement steering revoke the old plan approval. OMP auto-approval does not bypass plan validation, an enabled critic, or the human decision to plan a QA fix.
 
 ## What Forge does not guarantee
 

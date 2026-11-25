@@ -1698,7 +1698,7 @@ test('the approval dialog opens after the proposing turn; keep approval dispatch
   assert.equal(await x.events.get('session_stop')({},x.ctx),undefined);
   assert.equal(timers.length,1);
   await timers.shift()();
-  assert.deepEqual(offered,['Approve and keep context','Approve and compact context','Refine plan','Not now — keep plan for /forge review']);
+  assert.deepEqual(offered,['Approve and keep context','Approve and compact context','Approve and auto-approve future plans in this run (recommended)','Refine plan','Not now — keep plan for /forge review']);
   const shown=x.shown.find(item=>item.message.customType==='forge-plan-review');
   assert.equal(shown.message.excludeFromContext,true);
   assert.ok(shown.message.content.includes(PLAN));
@@ -1708,6 +1708,58 @@ test('the approval dialog opens after the proposing turn; keep approval dispatch
   assert.equal(w.recoveryAudit.at(-1).reviewedBy,'forge-plan-review');
   assert.match(x.sent.at(-1).content,/FORGE PLAN APPROVED/);
   assert.ok(x.sent.at(-1).content.includes('## Business Topics'));
+});
+
+test('recommended approval skips later plan dialogs only in this run, without skipping QA decisions or plan validation', async () => {
+  const x=setup(); await advanceToReview(x);
+  await approvePlan(x,'Approve and auto-approve future plans in this run (recommended)');
+  assert.equal(x.entries.at(-1).data.phase,'EXECUTE');
+  await executionTurn(x);
+  await x.events.get('session_stop')({},x.ctx);
+  await runQaAgents(x);
+  const fail=structuredClone(SUBMISSION); fail.topicResults[0].tests[0].status='FAIL';
+  await x.tools.get('forge_qa_submit').execute('call',fail,null,null,x.ctx);
+  assert.match((await proposePlan(x)).content[0].text,/waiting for the user's decision/);
+  await x.commands.get('forge').handler('rework',x.ctx);
+
+  const {slug,reworkCycles}=x.entries.at(-1).data;
+  const path=`local://${slug}-rework-${reworkCycles}-plan.md`;
+  await writeCanonicalPlan(x,path,PLAN);
+  assert.match((await proposePlan(x)).content[0].text,/identical to the previously approved plan/);
+
+  const revised=PLAN+'\n## QA Rework Changes\n- Fix duplicate booking.\n';
+  const timers=[];
+  x.ctx.setTimeout=callback=>timers.push(callback);
+  x.ctx.ui.select=async()=>{ assert.fail('valid opt-in must not open another plan dialog'); };
+  await writeCanonicalPlan(x,path,revised);
+  assert.match((await proposePlan(x)).content[0].text,/operator’s opt-in/);
+  assert.equal(x.entries.at(-1).data.approved,false,'proposal cannot approve during the agent turn');
+  putPlanFile(x,path,revised+'\n- Changed after proposal.\n');
+  await x.events.get('session_stop')({},x.ctx);
+  await timers.shift()();
+  assert.equal(x.entries.at(-1).data.approved,false);
+  assert.match(x.notifications.at(-1).message,/changed after it was proposed/);
+
+  await writeCanonicalPlan(x,path,revised);
+  await proposePlan(x);
+  const before=x.sent.length;
+  await x.events.get('session_stop')({},x.ctx);
+  await timers.shift()();
+  assert.equal(x.entries.at(-1).data.phase,'EXECUTE');
+  assert.equal(x.entries.at(-1).data.approvedPlanHash,createHash('sha256').update(revised).digest('hex'));
+  assert.equal(x.sent.length,before+1);
+  assert.ok(x.sent.at(-1).content.endsWith(revised));
+
+  await x.commands.get('forge').handler('off',x.ctx);
+  await x.commands.get('forge').handler('Create a new workflow',x.ctx);
+  await writeCanonicalPlan(x);
+  await proposePlan(x);
+  let prompts=0;
+  x.ctx.ui.select=async()=>{ prompts++; return undefined; };
+  await x.events.get('session_stop')({},x.ctx);
+  await timers.shift()();
+  assert.equal(prompts,1);
+  assert.equal(x.entries.at(-1).data.approved,false);
 });
 
 test('compact approval dispatches execution exactly once after compaction', async () => {

@@ -21,6 +21,8 @@ The plan must also contain `## Context`, `## Approach`, `## Verification` and `#
 
 Inspect the plan, scope, tests, risks, and rollback notes. Approve only when you agree with the plan. Approval is explicit and cannot be supplied by an agent.
 
+In OMP, select **Approve and auto-approve future plans in this run (recommended)** to approve the current plan and opt in for this run only. Later proposals still need to pass the plan contract and any enabled critic review. Forge approves the unchanged proposal after the agent turn ends and keeps context. New workflows and checkpoint recovery do not inherit the opt-in. `/forge status` shows when it is on; `/forge off` cancels the workflow. Claude Code still uses its native approval prompt.
+
 ## Workflow and decisions
 
 | Phase | Forge behavior | Your role |
@@ -38,10 +40,10 @@ After every QA submission, Forge shows a QA summary: a header `Forge QA ✅ PASS
 
 A QA `FAIL` or `BLOCKED` does not start a fix on its own. Forge waits for your decision, and the footer shows `QA failed · your decision` or `QA blocked · your decision`. While it waits, Forge blocks plan writes, plan proposals and QA resubmission. A `BLOCKED` or `NOT_RUN` result is an evidence gap, not proof of a code defect.
 
-- **OMP:** when the QA turn ends, a dialog opens. On FAIL: **Plan the fix** (draft a rework plan, then approve it), **Plan the fix with my notes** (your notes go into the rework instruction), or **Not now** (keeps the QA report and state). On BLOCKED, **Rerun QA** (you collected the missing evidence) comes first. `/forge review` shows the summary again and reopens the decision; `/forge rework` and `/forge qa` also decide.
+- **OMP:** when the QA turn ends, a dialog opens. Choose **Plan the fix**, **Plan the fix with my notes**, or **Not now** (keeps the QA report and state). On BLOCKED, **Rerun QA** (you collected the missing evidence) comes first. `/forge review` shows the summary again and reopens the decision; `/forge rework` and `/forge qa` also decide.
 - **Claude Code:** run `/forge-rework` to plan a fix, `/forge-qa` to rerun QA after BLOCKED, or `/forge-off`.
 
-A QA FAIL revokes the execution approval at once; after BLOCKED, the approval is kept until you choose to plan a fix. Either way the rework plan needs a normal plan approval before any code changes, so there are two human checkpoints.
+A QA FAIL revokes the execution approval at once; after BLOCKED, the approval is kept until you choose to plan a fix. The new plan needs approval before code changes. Normally, you approve it separately. With the OMP run's auto-approval opt-in, Forge approves a valid revision after you choose to plan the fix.
 
 After QA PASS, if the working tree changes before delivery, use `/forge qa` to start a fresh QA round. The approved plan is retained, but the old verdict, QA snapshot, delivery artifacts, and reviewer completion no longer authorize delivery. The code reviewer must report again.
 
@@ -56,7 +58,7 @@ While an OMP Forge workflow is active, a normal interactive prompt (not a slash 
 | Current phase | Steer result |
 |---|---|
 | `PLAN` | Withdraw an unapproved proposal and revise the existing draft. |
-| `EXECUTE` or `QA` | Revoke approval, stop obsolete work, and create a revised plan against the approved plan and current working tree. Approval is required again. |
+| `EXECUTE` or `QA` | Revoke approval, stop obsolete work, and create a revised plan against the approved plan and current working tree. Forge requires approval again unless you opted in to OMP auto-approval for this run. |
 
 Forge reports the transition as `Forge steering #N · <from> → <to> · prompt "…" from user`; every steer re-enters `PLAN`. All steering directives remain in workflow state and in later Planning and Rework instructions; older requirements are not discarded after 20 prompts. Longer histories use more context. `/forge status` shows the steering count.
 
@@ -75,7 +77,7 @@ Run these in the main OMP session:
 | `/forge status` | Show phase, approval, QA result, steering count, waiting agents, and `plan review: ON/OFF`. |
 | `/forge review` | Open the plan approval dialog when a valid plan awaits review, or show the QA summary again and reopen the QA FAIL/BLOCKED decision. |
 | `/forge qa` | Run or retry post-execution QA against the approved plan (for example, rerun after QA `BLOCKED`). |
-| `/forge rework` | Plan a fix after QA `FAIL` or `BLOCKED`; the rework plan requires new approval. |
+| `/forge rework` | Plan a fix after QA `FAIL` or `BLOCKED`. A valid fix plan needs a fresh approval unless OMP auto-approval is on for this run. |
 | `/forge report` | Show the latest QA report path. |
 | `/forge delivery` | Show or prepare the delivery artifact after QA PASS. |
 | `/forge resume` | Choose a saved Forge session to resume. |

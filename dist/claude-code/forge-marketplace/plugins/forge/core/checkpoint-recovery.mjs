@@ -218,7 +218,7 @@ export function prepareHumanRecovery(candidate) {
     active: true,
     phase: stage,
     ...(stage === 'PLAN' ? {planWritten: false, planValid: false, planPath: null, reviewRequested: false} : {}),
-    approved: false, approvedPlanHash: null, qaStatus: 'pending', qaEvidencePending: false,
+    approved: false, autoApprovePlans: false, approvedPlanHash: null, qaStatus: 'pending', qaEvidencePending: false,
     executionObserved: false, blockedFrom: null,
     gateAgents: { ...(candidate.gateAgents ?? {}), [stage]: [] },
     agentRetries: { ...(candidate.agentRetries ?? {}), [stage]: 0 },
