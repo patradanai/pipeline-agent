@@ -33,3 +33,9 @@ export const SUBMISSION = {
 };
 export const FAIL_SUBMISSION = JSON.parse(JSON.stringify(SUBMISSION));
 FAIL_SUBMISSION.topicResults[0].tests[0] = { ...FAIL_SUBMISSION.topicResults[0].tests[0], status: 'FAIL', actual: 'Error 500', evidence: 'npm test: booking.spec failed' };
+/** The approved plan owns scenario/expected/requirementIds: a submission may report only results. */
+export const MINIMAL_SUBMISSION = JSON.parse(JSON.stringify(SUBMISSION));
+for (const group of MINIMAL_SUBMISSION.topicResults) {
+  group.tests = group.tests.map(({ testId, actual, status, evidence, severity }) => ({ testId, actual, status, evidence, severity }));
+}
+export const EXECUTION_DONE = { summary: 'Implemented booking and approval', changedFiles: ['src/a.ts'], checksRun: ['node --test: 2 pass'] };

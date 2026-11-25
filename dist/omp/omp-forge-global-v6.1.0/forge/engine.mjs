@@ -13,7 +13,7 @@
  *   { type:'tool.fail', tool, rawTool, input, actor }
  *   { type:'turn.end' }                                main agent wants to stop
  *   { type:'agent.stop', agent, agentId, report }     a subagent finished (foreground OR background)
- *   { type:'prompt' }                                  a new main turn starts (user or host-initiated)
+ *   { type:'prompt', text? }                           a new main turn starts (user or host-initiated); text = the user's prompt
  *   { type:'session.start', source }
  * actor = { kind:'main'|'sub', agent: string|null }
  * Specialist completion is counted ONLY on agent.stop: hosts may run subagents in
@@ -22,10 +22,10 @@
  * and delivered on the next main-agent event.
  * Canonical tools: read grep glob ls web ask todo coord agent bash write edit
  *   plan.enter plan.write (host plan-mode plan file, never a project file) plan.submit forge.qa_scope
- *   forge.qa_submit forge.delivery_submit other
+ *   forge.execution_done forge.qa_submit forge.delivery_submit other
  *
  * out = { decision?:'deny', reason?, context?, continueReason?, message?, configUpdate? }
- *   decision/reason → block the tool call (reason goes to the model)
+ *   decision/reason → block the tool call or (prompt) the user's prompt; reason goes to the model / the user
  *   context         → extra context for the model after the event
  *   continueReason  → (turn.end) keep the agent working with this instruction
  *   message         → text for the human
@@ -34,18 +34,25 @@ import {
   parseCommand, initialState, phaseInstruction, executionInstruction, qaInstruction,
   reworkInstruction, deliveryInstruction, requiredAgentsFor, missingGateAgentsFor, validatePlanContract,
   evaluateQaReport, renderQaReport, renderQaSummary, buildCommitMessage, renderDeliveryReport, isProhibitedGitCommand,
-  isAllowedDiscoveryCommand, isAllowedQaCommand, extractHighFindings, GATE_AGENTS,
+  isAllowedDiscoveryCommand, isAllowedQaCommand, extractHighFindings, GATE_AGENTS, executionReminder,
+  inlineGateSkills, steeringInstruction,
 } from './core.mjs';
 import { recoveryProposal } from './state-recovery.mjs';
 import {
   markGateAgent, approvedExecutionState, qaReportTransition, assertQaSubmittable,
   assertDeliverySubmittable, deliveryTransition, approveReworkTransition, assertPlanProposable,
+  executionDoneTransition, enterQaState, executionStopTransition, qaResubmission, steerTransition,
 } from './transitions.mjs';
 import { adaptInstruction } from './platform.mjs';
 import { isValidRestoreCandidate, prepareHumanRecovery } from './checkpoint-recovery.mjs';
 import { normalizeForgeState } from './forge-state.mjs';
 
-const READ_ONLY = new Set(['read', 'grep', 'glob', 'ls', 'web', 'ask', 'todo', 'coord']);
+export const READ_ONLY_TOOLS = Object.freeze(['read', 'grep', 'glob', 'ls', 'web', 'ask', 'todo', 'coord']);
+const READ_ONLY = new Set(READ_ONLY_TOOLS);
+const STEER_PROMPT = /^steer\s*:([\s\S]*)$/i;
+const NOTE_PROMPT = /^(?:note|reply)\s*:([\s\S]*)$/i;
+// Turns the host starts itself (e.g. <task-notification> when a background agent finishes) are not user prompts.
+const HOST_PROMPT = /^<[a-z][\w-]*>/i;
 const MAX_HANDBACK = 20000;
 const PRE_APPROVAL = new Set(['PLAN']);
 const QA_PHASES = new Set(['QA']);
@@ -64,8 +71,10 @@ export function normalizeAgentName(value) {
 export function createEngine({ platform = 'claude-code', config = {}, deps = {}, profile = {} } = {}) {
   const agentRef = profile.agentRef ?? (name => name);
   const toolRef = profile.toolRef ?? (name => name);
+  // Gate skills cannot be loaded by name on every host: an adapter with `deps.loadSkills` gets their text inlined.
   const say = text => {
-    const body = adaptInstruction(text, platform)
+    const adapted = adaptInstruction(text, platform);
+    const body = (deps.loadSkills ? inlineGateSkills(adapted, deps.loadSkills) : adapted)
       .replace(/`(forge-[a-z-]+)`/g, (m, name) => (FORGE_AGENTS.has(name) ? `\`${agentRef(name)}\`` : m));
     return profile.footer ? `${body}\n\n${profile.footer}` : body;
   };
@@ -103,7 +112,7 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
         if (!state?.approved || !state.planValid || !['EXECUTE', 'QA'].includes(state.phase)) {
           return keep(state, { message: 'No approved execution is available for QA.' });
         }
-        const next = { ...state, active: true, phase: 'QA', qaStatus: null, qaRetries: 0, qaEvidencePending: false, reworkDecisionPending: false, gateAgents: { ...(state.gateAgents ?? {}), QA: [] } };
+        const next = enterQaState(state);
         return keep(next, { context: say(qaInstruction(next)), message: 'Forge QA review started.' });
       }
       case 'rework': {
@@ -227,13 +236,22 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
     }
     if (tool === 'agent') return routeAgent(s, input);
     if (tool === 'plan.submit') return preSubmitPlan(s, ev);
+    if (tool === 'forge.execution_done') {
+      if (actor.kind !== 'main') return deny(s, 'Forge: only the lead agent reports the approved execution as done.');
+      try { executionDoneTransition(s, input); }
+      catch (err) { return deny(s, `Forge: ${err.message}`); }
+      return keep(s);
+    }
     if (tool === 'forge.qa_scope') {
       if (!s.approved || !QA_PHASES.has(s.phase)) return deny(s, 'QA scope is only available for an approved execution under review.');
       return keep(s);
     }
     if (tool === 'forge.qa_submit') {
-      try { assertQaSubmittable(s, input); evaluateQaReport(input, s.businessTopics, s.requirements, s.qualityGates, s.testCases); }
+      let report;
+      try { assertQaSubmittable(s, input); report = evaluateQaReport(input, s.businessTopics, s.requirements, s.qualityGates, s.testCases); }
       catch (err) { return deny(s, `Forge QA report rejected: ${err.message}`); }
+      const retry = qaResubmission(s, report);
+      if (retry) return deny(retry.state, retry.message);
       return keep(s);
     }
     if (tool === 'forge.delivery_submit') {
@@ -245,7 +263,7 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
     if (PRE_APPROVAL.has(s.phase)) return preApprovalPolicy(s, tool, input);
     if (QA_PHASES.has(s.phase)) {
       if (READ_ONLY.has(tool)) return keep(s);
-      if (tool === 'bash' && isAllowedQaCommand(String(input.command ?? ''))) return keep(s);
+      if (tool === 'bash' && isAllowedQaCommand(String(input.command ?? ''), s.approvedCommands)) return keep(s);
       return deny(s, `Forge ${s.phase} is read-only: QA never edits code. Safe test/lint/typecheck commands and git status/diff are allowed.`);
     }
     return keep(s); // Git/publish guards above still apply.
@@ -313,7 +331,7 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
     const next = {
       ...s, phase: 'PLAN', planWritten: true, planValid: true, approvedPlanHash: contract.hash,
       businessTopics: contract.topics, requirements: contract.requirements, testCases: contract.testCases,
-      qualityGates: contract.qualityGates, planPath, planIssues: [], approved: false,
+      qualityGates: contract.qualityGates, approvedCommands: contract.commands, planPath, planIssues: [], approved: false,
     };
     return keep(next); // no decision: the host's native approval prompt decides
   }
@@ -332,6 +350,12 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
     if (tool === 'forge.qa_scope') {
       const scope = deps.inspectWorkspaceScope ? deps.inspectWorkspaceScope(ev.cwd) : { available: false, files: [] };
       return keep(state, { context: `Forge QA scope (read-only git inventory):\n${JSON.stringify(scope, null, 2)}` });
+    }
+    if (tool === 'forge.execution_done') {
+      let next;
+      try { next = executionDoneTransition(state, input); }
+      catch (err) { return keep(state, { context: `Forge: ${err.message}` }); }
+      return keep(next, { context: 'Forge: execution recorded as done. End your turn now; Forge starts the QA review when the turn ends.' });
     }
     if (tool === 'forge.qa_submit') return qaSubmitted(state, ev);
     if (tool === 'forge.delivery_submit') return deliverySubmitted(state, ev);
@@ -400,7 +424,7 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
           { context: `Forge: the approved plan text no longer satisfies the plan contract, so execution is NOT authorized:\n${contract.issues.join('\n')}\nFix the plan and submit it again with ExitPlanMode.` });
       }
       const planPath = deps.savePlan ? deps.savePlan(state, content) : state.planPath;
-      state = { ...state, approvedPlanHash: contract.hash, businessTopics: contract.topics, requirements: contract.requirements, testCases: contract.testCases, qualityGates: contract.qualityGates, planPath };
+      state = { ...state, approvedPlanHash: contract.hash, businessTopics: contract.topics, requirements: contract.requirements, testCases: contract.testCases, qualityGates: contract.qualityGates, approvedCommands: contract.commands, planPath };
     }
     const next = approvedExecutionState(state, 'native-plan-approval');
     return keep(next, { context: say(executionInstruction(next)), message: 'Forge: plan approved (native). EXECUTE 2/3.' });
@@ -410,6 +434,8 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
     let report;
     try { assertQaSubmittable(state, ev.input); report = evaluateQaReport(ev.input, state.businessTopics, state.requirements, state.qualityGates, state.testCases); }
     catch (err) { return keep(state, { context: `Forge QA report rejected: ${err.message}` }); }
+    const retry = qaResubmission(state, report);
+    if (retry) return keep(retry.state, { context: retry.message });
     const workingTree = report.status === 'PASS' ? deps.snapshotWorkingTree?.(ev.cwd) ?? null : null;
     const meta = { slug: state.slug, planPath: state.planPath, approvedPlanHash: state.approvedPlanHash, generatedAt: new Date().toISOString() };
     const reportPath = deps.saveQaReport ? deps.saveQaReport(state, renderQaReport(report, meta), { ...meta, ...report }) : null;
@@ -449,16 +475,39 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
       if (retries >= MAX_STOP_NUDGES) return keep(state);
       return keep({ ...state, agentRetries: { ...(state.agentRetries ?? {}), [key]: retries + 1 } }, { continueReason: reason });
     };
-    if (state.phase === 'EXECUTE' && state.approved && state.executionObserved) {
-      const next = { ...state, phase: 'QA', qaStatus: null, qaRetries: 0, gateAgents: { ...(state.gateAgents ?? {}), QA: [] } };
-      return keep(next, { continueReason: say(qaInstruction(next)), message: 'Forge: execution settled → QA 3/3.' });
+    if (state.phase === 'EXECUTE' && state.approved) {
+      const settled = executionStopTransition(state);
+      if (settled.action === 'qa') return keep(settled.state, { continueReason: say(qaInstruction(settled.state)), message: 'Forge: execution done → QA 3/3.' });
+      if (settled.action === 'remind') return keep(settled.state, { continueReason: say(executionReminder()) });
+      return keep(state, { message: `execution paused: the approved plan is not marked done (${toolRef('forge_execution_done')} was not called). Reply with \`note: <text>\` to let it continue, or run /forge-qa to start QA now.` });
     }
     if (state.phase === 'QA' && state.qaStatus !== 'PASS') return nudge('QA:stop', `Forge QA is incomplete: call ${toolRef('forge_qa_submit')} with evidence-backed results. If checks cannot run, submit BLOCKED/NOT_RUN; never fabricate PASS.`);
     if (state.phase === 'QA' && state.qaStatus === 'PASS') return nudge('QA:delivery', `Forge delivery is incomplete: call ${toolRef('forge_delivery_submit')} once, then print the commit message for the user.`);
     return keep(state);
   }
 
-  function onPrompt(state) {
+  /** A new main turn. While an approved plan runs (EXECUTE/QA), a typed prompt must say what it is:
+   * `steer: …` re-plans (approval revoked), `note: …`/`reply: …` clarifies (approval kept); anything
+   * else is blocked so a stray prompt never silently changes approved scope. */
+  function onPrompt(state, ev = {}) {
+    const text = String(ev.text ?? '').trim();
+    const guarded = state?.active && !state.deliveryPath && state.approved === true && ['EXECUTE', 'QA'].includes(state.phase);
+    if (guarded && text && !text.startsWith('/') && !HOST_PROMPT.test(text)) {
+      const steer = text.match(STEER_PROMPT);
+      if (steer) {
+        if (!steer[1].trim()) return deny(state, 'Forge: `steer:` needs the new direction, e.g. `steer: also export contacts as CSV`.');
+        const from = state.phase;
+        const next = { ...steerTransition(state, steer[1].trim()), pendingContext: null };
+        return keep(next, { context: say(steeringInstruction(next, { from, revoked: true })),
+          message: `steering #${next.steeringRevision}: ${from} → PLAN. Approval revoked; the revised plan needs your approval.` });
+      }
+      if (NOTE_PROMPT.test(text)) {
+        const note = `Forge: the user's message is a clarification during ${state.phase}; the approval and the approved scope are unchanged. Apply it within the approved plan and continue the gate. If it would change the approved scope, stop and tell the user to send \`steer: <text>\` to re-plan.`;
+        const base = state.phase === 'EXECUTE' ? { ...state, executionReminders: 0 } : state;
+        return keep({ ...base, pendingContext: null }, { context: state.pendingContext ? `${state.pendingContext}\n\n${note}` : note });
+      }
+      return deny(state, `Forge is running an approved plan (${state.phase}), so this prompt was not sent. Prefix it: \`steer: <text>\` changes the requirement (re-plans and revokes the approval), \`note: <text>\` sends a clarification (keeps the approval). /forge off cancels the workflow.`);
+    }
     if (!state?.active || !state.pendingContext) return keep(state);
     return keep({ ...state, pendingContext: null }, { context: state.pendingContext });
   }
@@ -478,7 +527,7 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
         case 'tool.fail': return onToolFail(state, event);
         case 'turn.end': return onTurnEnd(state);
         case 'agent.stop': return onAgentStop(state, event);
-        case 'prompt': return onPrompt(state);
+        case 'prompt': return onPrompt(state, event);
         case 'session.start': return onSessionStart(state);
         default: return keep(state);
       }

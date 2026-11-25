@@ -18,10 +18,56 @@ export function markGateAgent(state, agentName) {
 /** Human approved the plan through the platform's approval dialog. */
 export function approvedExecutionState(state, auditReason, reviewedBy = 'native-plan-review') {
   return { ...state, phase: 'EXECUTE', approved: true, reworkBaseHash: null, reworkBasePlanPath: null, executionObserved: false,
+    executionDone: false, executionReminders: 0, executionReport: null,
     gateAgents: { ...(state.gateAgents ?? {}), EXECUTE: [] }, agentRetries: { ...(state.agentRetries ?? {}), EXECUTE: 0 },
     ...(auditReason ? { recoveryAudit: [ ...(state.recoveryAudit ?? []), {
       from: state.phase, to: 'EXECUTE', reason: auditReason, reviewedBy, at: new Date().toISOString(),
     } ].slice(-20) } : {}) };
+}
+
+const clipList = (items, max = 40) => (Array.isArray(items) ? items : [])
+  .map(x => String(x ?? '').replace(/\s+/g, ' ').trim()).filter(Boolean).slice(0, max).map(x => x.length > 300 ? `${x.slice(0, 299)}…` : x);
+
+/** The executor declared the approved plan done (forge_execution_done). Throws outside approved EXECUTE. */
+export function executionDoneTransition(state, report = {}) {
+  if (!state?.active || state.phase !== 'EXECUTE' || state.approved !== true) {
+    throw new Error('forge_execution_done is valid only while an approved plan is executing.');
+  }
+  const summary = String(report.summary ?? '').replace(/\s+/g, ' ').trim().slice(0, 1000);
+  return { ...state, executionDone: true, executionReport: {
+    summary, changedFiles: clipList(report.changedFiles, 200), checksRun: clipList(report.checksRun),
+    unfinished: clipList(report.unfinished), deviations: clipList(report.deviations),
+  } };
+}
+
+/** Fresh QA round on the approved execution: clears earlier QA, delivery and reviewer progress. */
+export function enterQaState(state) {
+  return { ...state, active: true, phase: 'QA', qaStatus: null, qaRetries: 0, qaResubmits: 0, qaEvidencePending: false,
+    reworkDecisionPending: false, workingTreeAtQa: null, deliveryPath: null, commitMessagePath: null, commitMessage: null, deliveryRetries: 0,
+    gateAgents: { ...(state.gateAgents ?? {}), QA: [] }, gateAgentsSpawned: { ...(state.gateAgentsSpawned ?? {}), QA: [] } };
+}
+
+export const MAX_EXECUTION_REMINDERS = 2;
+/** What a settled execution turn means: `qa` once forge_execution_done was called, otherwise
+ * `remind` the agent to finish (bounded), then `pause` for the human. */
+export function executionStopTransition(state) {
+  if (state.executionDone === true) return { action: 'qa', state: enterQaState(state) };
+  const reminders = state.executionReminders ?? 0;
+  if (reminders < MAX_EXECUTION_REMINDERS) return { action: 'remind', state: { ...state, executionReminders: reminders + 1 } };
+  return { action: 'pause', state };
+}
+
+export const MAX_QA_RESUBMITS = 2;
+/** A malformed QA submission (format errors only) is returned for correction instead of being
+ * recorded, at most MAX_QA_RESUBMITS times per QA round. Returns null when it must be recorded. */
+export function qaResubmission(state, report) {
+  const used = state?.qaResubmits ?? 0;
+  if (!report?.formatErrors?.length || used >= MAX_QA_RESUBMITS) return null;
+  const left = MAX_QA_RESUBMITS - used;
+  return {
+    state: { ...state, qaResubmits: used + 1 },
+    message: `Forge QA submission NOT recorded: fix these format errors and call forge_qa_submit again (${left} correction${left === 1 ? '' : 's'} left; after that Forge records the submission as it is):\n${report.formatErrors.slice(0, 30).map(e => `- ${e}`).join('\n')}`,
+  };
 }
 
 /** Apply an evaluated QA report. FAIL → PLAN (approval revoked), BLOCKED → evidence pending, PASS → delivery.
@@ -141,7 +187,8 @@ export function steerTransition(state, text, { at = new Date().toISOString() } =
     gateAgents: { ...(state.gateAgents ?? {}), PLAN: [] }, agentRetries: { ...(state.agentRetries ?? {}), PLAN: 0 } };
   if (state.approved !== true) return { ...next, ...draft };
   // The approved plan becomes the read-only rework base; a revised plan needs new approval.
-  return { ...next, ...draft, approved: false, executionObserved: false, qaStatus: null, qaEvidencePending: false, qaRetries: 0, deliveryRetries: 0,
+  return { ...next, ...draft, approved: false, executionObserved: false, executionDone: false, executionReminders: 0, executionReport: null,
+    qaStatus: null, qaEvidencePending: false, qaRetries: 0, deliveryRetries: 0,
     reworkReason: 'STEERING', reworkBaseHash: state.approvedPlanHash ?? null, reworkBasePlanPath: state.planPath ?? null, planPath: null,
     reworkCycles: (state.reworkCycles ?? 0) + 1,
     gateAgents: { ...draft.gateAgents, EXECUTE: [], QA: [] }, agentRetries: { ...draft.agentRetries, EXECUTE: 0, QA: 0 } };

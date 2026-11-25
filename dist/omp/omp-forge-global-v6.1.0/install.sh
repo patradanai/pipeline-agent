@@ -35,8 +35,9 @@ skills_preserved=0
 skills_retired=0
 for skill in "${GATE_SKILLS[@]}"; do
   if [[ -e "$SKILLS/$skill" || -L "$SKILLS/$skill" ]]; then
-    # A pre-v6.2 bundled copy still routes work to retired agents: park it and install the new text.
-    if [[ -f "$SKILLS/$skill/SKILL.md" ]] && grep -Eq 'forge-(requirement|planner|executor|delivery)|`forge-qa`' "$SKILLS/$skill/SKILL.md"; then
+    # Replace a bundled copy that predates `forge-audience` (pre-v6.2 copies also route work to
+    # retired agents); the old text is parked in the backup directory.
+    if [[ -f "$SKILLS/$skill/SKILL.md" ]] && { grep -Eq 'forge-(requirement|planner|executor|delivery)|`forge-qa`' "$SKILLS/$skill/SKILL.md" || ! grep -q '^forge-audience:' "$SKILLS/$skill/SKILL.md"; }; then
       mkdir -p "$BACKUP_DIR/skills" && mv "$SKILLS/$skill" "$BACKUP_DIR/skills/$skill"
       cp -R "$SOURCE_ROOT/skills/$skill" "$SKILLS/$skill"
       skills_replaced=$((skills_replaced+1))

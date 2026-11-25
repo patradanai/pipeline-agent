@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createEngine } from '../core/engine.mjs';
 import { validatePlanContract, extractHighFindings } from '../core/core.mjs';
-import { PLAN, SUBMISSION } from './fixtures.mjs';
+import { PLAN, SUBMISSION, EXECUTION_DONE } from './fixtures.mjs';
 
 const issuesOf = plan => validatePlanContract(plan).issues;
 const withDecisions = lines => PLAN.replace('- Open decisions: none', lines);
@@ -63,6 +63,7 @@ function qaHarness() {
   pre('plan.submit', { plan: PLAN });
   h({ type: 'tool.post', tool: 'plan.submit', input: { plan: PLAN }, actor: main });
   pre('write', { file_path: 'src/a.ts' });
+  h({ type: 'tool.post', tool: 'forge.execution_done', input: EXECUTION_DONE, actor: main });
   h({ type: 'turn.end' });
   assert.equal(state.phase, 'QA');
   pre('agent', { subagent_type: 'forge:forge-code-reviewer' });

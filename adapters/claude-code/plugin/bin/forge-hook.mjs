@@ -5,14 +5,15 @@
  * a normalized Forge event, run the shared engine, persist state, print the
  * Claude Code hook JSON. Usage: forge-hook.mjs <HookEventName>
  */
-import { createHash } from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, statSync, writeFileSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const CORE = join(HERE, '..', 'core');
+const PLUGIN_ROOT = join(HERE, '..');
+const CORE = join(PLUGIN_ROOT, 'core');
 const DATA = process.env.FORGE_DATA_DIR || process.env.CLAUDE_PLUGIN_DATA || join(homedir(), '.claude', 'forge-data');
 const MAX_CONTEXT = 9000; // Claude Code caps additionalContext at 10,000 chars
 const MCP_PREFIX = 'mcp__plugin_forge_forge__';
@@ -32,7 +33,8 @@ const TOOL_MAP = {
 export function canonicalTool(name) {
   const n = String(name ?? '');
   if (TOOL_MAP[n]) return TOOL_MAP[n];
-  const forge = n.match(/^mcp__.*__forge_(qa_scope|qa_submit|delivery_submit)$/);
+  // Only this plugin's own MCP server ("forge" in .mcp.json) provides the Forge tools.
+  const forge = n.startsWith(MCP_PREFIX) && n.slice(MCP_PREFIX.length).match(/^forge_(execution_done|qa_scope|qa_submit|delivery_submit)$/);
   if (forge) return `forge.${forge[1]}`;
   return 'other';
 }
@@ -94,20 +96,76 @@ function writeJson(path, value) {
   renameSync(tmp, path);
 }
 
-/** Parallel tool calls spawn parallel hooks; serialize state read-modify-write per session. */
+const LOCK_STALE_MS = 10_000;
+const LOCK_REFRESH_MS = 2_000;
+const lockOwner = lock => { try { return JSON.parse(readFileSync(join(lock, 'owner.json'), 'utf8')); } catch { return null; } };
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; } catch (err) { return err?.code !== 'ESRCH'; }
+}
+/** A lock may be broken only when it was not refreshed for LOCK_STALE_MS AND its owner is gone
+ * (dead pid or unreadable owner file). A slow but live holder keeps it. */
+function breakStaleLock(lock) {
+  let st;
+  try { st = statSync(lock); } catch { return true; } // released meanwhile: retry at once
+  if (Date.now() - st.mtimeMs <= LOCK_STALE_MS) return false;
+  const owner = lockOwner(lock);
+  if (owner && pidAlive(owner.pid)) return false;
+  // Rename first (atomic), so two waiters never both delete; then make sure we moved the lock we judged.
+  const moved = `${lock}.stale-${randomUUID()}`;
+  try { renameSync(lock, moved); } catch { return false; }
+  const judged = lockOwner(moved);
+  if ((judged?.token ?? null) !== (owner?.token ?? null)) { try { renameSync(moved, lock); } catch {} return false; }
+  rmSync(moved, { recursive: true, force: true });
+  return true;
+}
+
+/** Parallel tool calls spawn parallel hooks; serialize state read-modify-write per session.
+ * The lock dir holds owner.json {pid, token}; the holder refreshes its mtime while it works. */
 async function withLock(sid, fn) {
   const lock = join(DATA, 'locks', `${safeId(sid)}.lock`);
+  const token = randomUUID();
   mkdirSync(dirname(lock), { recursive: true, mode: 0o700 });
   const deadline = Date.now() + 8000;
   for (;;) {
-    try { mkdirSync(lock); break; }
-    catch {
-      try { if (Date.now() - statSync(lock).mtimeMs > 10000) { rmdirSync(lock); continue; } } catch {}
+    try { mkdirSync(lock); writeFileSync(join(lock, 'owner.json'), JSON.stringify({ pid: process.pid, token }), { mode: 0o600 }); break; }
+    catch (err) {
+      if (err?.code !== 'EEXIST') throw err;
+      if (breakStaleLock(lock)) continue;
       if (Date.now() > deadline) throw new Error('Forge state lock timeout');
       await new Promise(r => setTimeout(r, 25 + Math.random() * 50));
     }
   }
-  try { return await fn(); } finally { try { rmdirSync(lock); } catch {} }
+  const refresh = setInterval(() => { try { if (lockOwner(lock)?.token === token) { const now = new Date(); utimesSync(lock, now, now); } } catch {} }, LOCK_REFRESH_MS);
+  refresh.unref();
+  try { return await fn(); } finally {
+    clearInterval(refresh);
+    try { if (lockOwner(lock)?.token === token) rmSync(lock, { recursive: true, force: true }); } catch {}
+  }
+}
+
+/** Gate skills ship with disable-model-invocation, so Claude cannot load them by name: Forge inlines
+ * the lead-facing ones from <plugin>/skills/<name>/SKILL.md. Missing or invalid skills are skipped. */
+function loadSkills(names, core) {
+  const out = [];
+  for (const name of names) {
+    if (!core.SKILL_NAME_PATTERN.test(String(name))) continue;
+    let content;
+    try { content = readFileSync(join(PLUGIN_ROOT, 'skills', name, 'SKILL.md'), 'utf8'); } catch { continue; }
+    if (core.skillAudience(content) === 'specialist') continue;
+    out.push({ name, content });
+  }
+  return out;
+}
+
+/** The session state file exists but is not valid JSON: fail closed for anything that can change things. */
+function corruptStateOutput(hookEvent, event, file, readOnlyTools, sid) {
+  const fix = `Forge state file ${file} is corrupt (not valid JSON), so Forge cannot enforce its gates. Run /forge off to reset this session's Forge state, or fix or delete that file.`;
+  if (hookEvent === 'PreToolUse') {
+    if (readOnlyTools.includes(event.tool)) return {};
+    return render(hookEvent, { decision: 'deny', reason: `${fix} Ask the user to do this; do not edit the file yourself.` }, sid);
+  }
+  return render(hookEvent, { message: fix }, sid);
 }
 
 function boundedContext(text, sid) {
@@ -132,7 +190,7 @@ function translate(hookEvent, input) {
     case 'PostToolUseFailure': return { type: 'tool.fail', ...base };
     case 'Stop': return { type: 'turn.end', stopHookActive: input.stop_hook_active === true };
     case 'SubagentStop': return { type: 'agent.stop', agent: input.agent_type ?? null, agentId: input.agent_id ?? null, report: typeof input.last_assistant_message === 'string' ? input.last_assistant_message : '', actor };
-    case 'UserPromptSubmit': return { type: 'prompt' };
+    case 'UserPromptSubmit': return { type: 'prompt', text: typeof input.prompt === 'string' ? input.prompt : '' };
     case 'SessionStart': return { type: 'session.start', source: input.source };
     case 'UserPromptExpansion': {
       const text = commandText(input.command_name, input.command_args);
@@ -150,6 +208,8 @@ function render(hookEvent, out, sid) {
     else if (context) json.hookSpecificOutput = { hookEventName: 'PreToolUse', additionalContext: context };
   } else if (hookEvent === 'Stop' || hookEvent === 'SubagentStop') {
     if (out.continueReason) { json.decision = 'block'; json.reason = boundedContext(out.continueReason, sid); }
+  } else if (hookEvent === 'UserPromptSubmit' && out.decision === 'deny') {
+    json.decision = 'block'; json.reason = out.reason;
   } else if (hookEvent === 'UserPromptExpansion') {
     const text = [out.message ? `Forge: ${out.message}` : '', context ?? ''].filter(Boolean).join('\n\n');
     if (text) json.hookSpecificOutput = { hookEventName: 'UserPromptExpansion', additionalContext: boundedContext(text, sid) };
@@ -215,14 +275,23 @@ export async function main(hookEvent, raw) {
   const forgeChild = event.actor?.kind === 'sub' && /(?:^|:)forge-[a-z-]+$/.test(String(event.actor.agent ?? ''));
   if (!existsSync(sessionFile(sid)) && event.type !== 'command' && !forgeChild && !(event.type === 'session.start' && ['clear', 'resume', 'fork', 'startup'].includes(input.source))) return {};
 
-  const [{ createEngine }, workspace, { normalizeForgeState }] = await Promise.all([
+  const [{ createEngine, READ_ONLY_TOOLS }, workspace, { normalizeForgeState }, core] = await Promise.all([
     import(pathToFileURL(join(CORE, 'engine.mjs')).href),
     import(pathToFileURL(join(CORE, 'workspace.mjs')).href),
     import(pathToFileURL(join(CORE, 'forge-state.mjs')).href),
+    import(pathToFileURL(join(CORE, 'core.mjs')).href),
   ]);
   return withLock(sid, async () => {
     const config = readJson(join(DATA, 'config.json')) ?? {};
-    const record = readJson(sessionFile(sid));
+    const file = sessionFile(sid);
+    let record = null;
+    if (existsSync(file)) {
+      try { record = JSON.parse(readFileSync(file, 'utf8')); }
+      catch {
+        // /forge off overwrites the corrupt file with a tombstone; everything else fails closed.
+        if (!(event.type === 'command' && core.parseCommand(event.text).type === 'cancel')) return corruptStateOutput(hookEvent, event, file, READ_ONLY_TOOLS, sid);
+      }
+    }
     let state = normalizeForgeState(record?.state ?? null);
     if (event.type === 'session.start' && !state) state = carryAcrossClear(input, normalizeForgeState);
     if (event.type === 'session.start' && !state) {
@@ -239,7 +308,7 @@ export async function main(hookEvent, raw) {
       profile: {
         agentRef: n => `forge:${n}`,
         toolRef: n => `${MCP_PREFIX}${n}`,
-        footer: `[Claude Code mapping] Reviewer (QA only): Agent tool with subagent_type "forge:forge-code-reviewer". Plan critic (only when plan review is on): subagent_type "forge:forge-plan-critic". Read-only research: subagent_type "Explore". Forge tools: ${MCP_PREFIX}forge_qa_scope, ${MCP_PREFIX}forge_qa_submit, ${MCP_PREFIX}forge_delivery_submit.`,
+        footer: `[Claude Code mapping] Reviewer (QA only): Agent tool with subagent_type "forge:forge-code-reviewer". Plan critic (only when plan review is on): subagent_type "forge:forge-plan-critic". Read-only research: subagent_type "Explore". Forge tools: ${MCP_PREFIX}forge_execution_done, ${MCP_PREFIX}forge_qa_scope, ${MCP_PREFIX}forge_qa_submit, ${MCP_PREFIX}forge_delivery_submit.`,
       },
       deps: {
         snapshotWorkingTree: workspace.snapshotWorkingTree,
@@ -250,6 +319,7 @@ export async function main(hookEvent, raw) {
         listWorkflows: () => listProjectWorkflows(input.cwd, sid),
         readPlanFile: path => { try { const st = statSync(path); return st.isFile() && st.size <= 1024 * 1024 ? readFileSync(path, 'utf8') : ''; } catch { return ''; } },
         traceInfo: () => `Data dir: ${DATA}\nTrace log: ${join(DATA, 'trace', 'events.jsonl')}\nCoverage report (in a terminal): node "${join(HERE, 'forge-coverage.mjs')}" --data "${DATA}"`,
+        loadSkills: names => loadSkills(names, core),
       },
     });
     const { state: next, out } = engine.handle(state, event);

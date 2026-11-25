@@ -2,12 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createEngine, normalizeAgentName } from '../core/engine.mjs';
 import { PHASES, requiredAgentsFor, phaseInstruction } from '../core/core.mjs';
-import { PLAN, SUBMISSION, FAIL_SUBMISSION } from './fixtures.mjs';
-import { approvedExecutionState, assertDeliverySubmittable, qaReportTransition, reworkTransition, steerTransition } from '../core/transitions.mjs';
+import { PLAN, SUBMISSION, FAIL_SUBMISSION, MINIMAL_SUBMISSION, EXECUTION_DONE } from './fixtures.mjs';
+import { approvedExecutionState, assertDeliverySubmittable, qaReportTransition, reworkTransition, steerTransition, MAX_EXECUTION_REMINDERS, MAX_QA_RESUBMITS } from '../core/transitions.mjs';
 
 const REVIEWER = 'forge-code-reviewer';
 
-function harness(config = {}, initial = null) {
+function harness(config = {}, initial = null, extraDeps = {}) {
   const saved = {};
   const engine = createEngine({ platform: 'claude-code', config, profile: { agentRef: n => `forge:${n}` }, deps: {
     snapshotWorkingTree: () => ({ available: true, hash: 'h', root: '/r' }),
@@ -15,6 +15,7 @@ function harness(config = {}, initial = null) {
     savePlan: (_s, c) => { saved.plan = c; return '/data/plan.md'; },
     saveQaReport: (_s, md) => { saved.qa = md; return '/data/qa.md'; },
     saveDelivery: (_s, md, msg) => { saved.delivery = msg; return { deliveryPath: '/data/d.md', commitMessagePath: '/data/c.txt' }; },
+    ...extraDeps,
   } });
   let state = initial;
   const h = ev => { const r = engine.handle(state, ev); state = r.state; return r.out; };
@@ -34,26 +35,28 @@ function harness(config = {}, initial = null) {
       return this.post('agent', input, ''); // background-style result: no report text here
     },
     agentStop: ev => h({ type: 'agent.stop', ...ev }),
-    prompt: () => h({ type: 'prompt' }),
+    prompt: text => h({ type: 'prompt', text }),
     runGate() { let o; for (const a of requiredAgentsFor(state)) o = this.agent(a); return o; },
   };
 }
 
-async function toApproval(x) {
+async function toApproval(x, plan = PLAN) {
   x.cmd('Build a booking system');
   assert.equal(x.state.phase, 'PLAN');
-  assert.equal(x.pre('plan.submit', { plan: PLAN }).decision, undefined);
+  assert.equal(x.pre('plan.submit', { plan }).decision, undefined);
   assert.equal(x.state.phase, 'PLAN');
   assert.equal(x.state.planWritten, true);
   assert.equal(x.state.planValid, true);
   assert.equal(x.state.approved, false);
 }
 
-/** Approve, let the main agent implement, settle the turn: QA review starts. */
-async function toQa(x) {
-  await toApproval(x);
-  x.post('plan.submit', { plan: PLAN });
+/** Approve, let the main agent implement and report done, settle the turn: QA review starts. */
+async function toQa(x, plan = PLAN) {
+  await toApproval(x, plan);
+  x.post('plan.submit', { plan });
   assert.equal(x.pre('write', { file_path: 'src/a.ts' }).decision, undefined);
+  assert.equal(x.pre('forge.execution_done', EXECUTION_DONE).decision, undefined);
+  x.post('forge.execution_done', EXECUTION_DONE);
   x.stop();
   assert.equal(x.state.phase, 'QA');
 }
@@ -104,6 +107,12 @@ test('happy path: plan → native approval → main agent executes → QA with r
   // the main agent implements itself
   assert.equal(x.pre('write', { file_path: 'src/a.ts' }).decision, undefined);
   assert.equal(x.state.executionObserved, true);
+  // the turn ends without forge_execution_done → reminder, still EXECUTE
+  assert.match(x.stop().continueReason, /turn ended without forge_execution_done/);
+  assert.equal(x.state.phase, 'EXECUTE');
+  assert.equal(x.pre('forge.execution_done', EXECUTION_DONE).decision, undefined);
+  assert.match(x.post('forge.execution_done', EXECUTION_DONE).context, /execution recorded as done/);
+  assert.equal(x.state.executionDone, true);
   // stop → QA
   const toQaOut = x.stop();
   assert.equal(x.state.phase, 'QA'); assert.match(toQaOut.continueReason, /POST-EXECUTION QA REVIEW[\s\S]*forge:forge-code-reviewer/);
@@ -452,4 +461,91 @@ test('a nudged subagent (empty report) stays marked as running', async () => {
   x.pre('agent', { subagent_type: `forge:${REVIEWER}` });
   x.agentStop({ agent: `forge:${REVIEWER}`, agentId: 'n1', report: '' });
   assert.match(x.pre('agent', { subagent_type: `forge:${REVIEWER}` }).reason, /still running/);
+});
+
+test('execution: Stop without forge_execution_done reminds (bounded), then pauses for the human; note: and /forge qa recover', async () => {
+  const x = harness(); await toApproval(x); x.post('plan.submit', { plan: PLAN });
+  x.pre('write', { file_path: 'src/a.ts' });
+  for (let i = 0; i < MAX_EXECUTION_REMINDERS; i++) assert.match(x.stop().continueReason, /turn ended without forge_execution_done/);
+  const paused = x.stop();
+  assert.equal(paused.continueReason, undefined);
+  assert.match(paused.message, /execution paused[\s\S]*note: <text>[\s\S]*\/forge-qa/);
+  assert.equal(x.state.phase, 'EXECUTE');
+  assert.match(x.prompt('note: the date format is ISO').context, /clarification during EXECUTE/);
+  assert.equal(x.state.executionReminders, 0);
+  assert.equal(x.state.approved, true);
+  const qa = x.cmd('qa');
+  assert.equal(x.state.phase, 'QA'); assert.equal(x.state.qaResubmits, 0);
+  assert.match(qa.context, /POST-EXECUTION QA REVIEW/);
+});
+
+test('forge_execution_done is valid only for the lead during approved EXECUTE; its report reaches QA', async () => {
+  const x = harness(); x.cmd('Build a booking system');
+  assert.match(x.pre('forge.execution_done', EXECUTION_DONE).reason, /only while an approved plan is executing/);
+  const y = harness(); await toApproval(y); y.post('plan.submit', { plan: PLAN });
+  assert.match(y.pre('forge.execution_done', EXECUTION_DONE, { actor: { kind: 'sub', agent: 'Explore' } }).reason, /only the lead/);
+  y.post('forge.execution_done', EXECUTION_DONE);
+  assert.deepEqual(y.state.executionReport.changedFiles, ['src/a.ts']);
+  const qa = y.stop();
+  assert.equal(y.state.phase, 'QA');
+  assert.match(qa.continueReason, /Executor report \(unverified[\s\S]*src\/a\.ts/);
+  assert.match(y.pre('forge.execution_done', EXECUTION_DONE).reason, /only while an approved plan is executing/);
+});
+
+test('QA submission may omit scenario/expected/requirementIds: the approved plan fills them in', async () => {
+  const x = harness(); await toQa(x); x.runGate();
+  assert.equal(x.pre('forge.qa_submit', MINIMAL_SUBMISSION).decision, undefined);
+  x.post('forge.qa_submit', MINIMAL_SUBMISSION);
+  assert.equal(x.state.qaStatus, 'PASS');
+  assert.match(x.saved.qa, /\| TC-001 \| REQ-001 \| Create booking \| Created \|/);
+});
+
+test('QA submission with format errors is returned for correction (bounded), then recorded', async () => {
+  const x = harness(); await toQa(x); x.runGate();
+  const partial = JSON.parse(JSON.stringify(MINIMAL_SUBMISSION)); partial.topicResults.pop(); // TC-002 missing
+  for (let i = 0; i < MAX_QA_RESUBMITS; i++) {
+    const out = x.pre('forge.qa_submit', partial);
+    assert.equal(out.decision, 'deny'); assert.match(out.reason, /NOT recorded[\s\S]*TC-002: missing/);
+    assert.equal(x.state.qaResubmits, i + 1); assert.equal(x.state.qaStatus, null);
+  }
+  assert.equal(x.pre('forge.qa_submit', partial).decision, undefined);
+  x.post('forge.qa_submit', partial);
+  assert.equal(x.state.qaStatus, 'BLOCKED');
+});
+
+test('QA may run a check command written in the approved plan verbatim', async () => {
+  const plan = PLAN.replace('- node test: TC-001 and TC-002 pass', '- `make verify-booking` passes TC-001 and TC-002');
+  const x = harness(); await toQa(x, plan);
+  assert.ok(x.state.approvedCommands.includes('make verify-booking'));
+  assert.equal(x.pre('bash', { command: 'make verify-booking' }).decision, undefined);
+  assert.equal(x.pre('bash', { command: 'make deploy' }).decision, 'deny');
+  const y = harness(); await toQa(y);
+  assert.equal(y.pre('bash', { command: 'make verify-booking' }).decision, 'deny');
+});
+
+test('prompts during an approved run: steer: re-plans, note:/reply: keep approval, anything else is blocked', async () => {
+  const x = harness(); await toApproval(x); x.post('plan.submit', { plan: PLAN });
+  const blocked = x.prompt('also add CSV export');
+  assert.equal(blocked.decision, 'deny'); assert.match(blocked.reason, /steer: <text>[\s\S]*note: <text>[\s\S]*\/forge off/);
+  assert.equal(x.state.phase, 'EXECUTE'); assert.equal(x.state.approved, true);
+  assert.equal(x.prompt('/forge status').decision, undefined);
+  assert.equal(x.prompt('<task-notification>agent done</task-notification>').decision, undefined);
+  assert.equal(x.prompt().decision, undefined);
+  const note = x.prompt('reply: use UTC');
+  assert.match(note.context, /clarification during EXECUTE[\s\S]*steer: <text>/); assert.equal(x.state.approved, true);
+  assert.equal(x.prompt('steer:  ').decision, 'deny');
+  const steer = x.prompt('steer: also export CSV');
+  assert.equal(x.state.phase, 'PLAN'); assert.equal(x.state.approved, false);
+  assert.equal(x.state.requirementSteering.at(-1).text, 'also export CSV');
+  assert.match(steer.context, /FORGE STEERING[\s\S]*Approval of the running plan is revoked[\s\S]*ExitPlanMode/);
+  assert.match(steer.message, /EXECUTE → PLAN/);
+  assert.equal(x.prompt('also add PDF').decision, undefined); // PLAN: prompts pass through as before
+});
+
+test('gate skills are inlined when the adapter can load them', () => {
+  const x = harness({}, null, { loadSkills: names => names.map(name => ({ name, content: `---\nname: ${name}\n---\nSKILL BODY ${name}` })) });
+  const out = x.cmd('Build a booking system');
+  assert.match(out.context, /FORGE GATE SKILLS[\s\S]*### Skill: forge-plan-gate\nSKILL BODY forge-plan-gate/);
+  assert.doesNotMatch(out.context, /Load and follow/);
+  assert.match(harness().cmd('Build a booking system').context, /Load and follow the forge-plan-gate skill/);
 });

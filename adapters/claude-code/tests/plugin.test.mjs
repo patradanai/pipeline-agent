@@ -3,11 +3,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { PLAN, SUBMISSION } from '../../../core-tests/fixtures.mjs';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { PLAN, SUBMISSION, MINIMAL_SUBMISSION, EXECUTION_DONE } from '../../../core-tests/fixtures.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const PLUGIN = join(ROOT, 'dist', 'claude-code', 'forge-marketplace', 'plugins', 'forge');
@@ -41,9 +41,12 @@ function env() {
     run('SubagentStop', { agent_id: `ag-${++n}`, agent_type: `forge:${name}`, last_assistant_message: report, stop_hook_active: false });
     return post('Agent', input, { content: [{ type: 'text', text: report }] });
   };
-  return { data, cwd, sid, run, pre, post, forge, state, agent };
+  const done = () => { pre(`${P}forge_execution_done`, EXECUTION_DONE); return post(`${P}forge_execution_done`, EXECUTION_DONE, {}); };
+  return { data, cwd, sid, run, pre, post, forge, state, agent, done };
 }
 const ctx = out => out.hookSpecificOutput?.additionalContext ?? '';
+/** Context plus the file Forge wrote when the instruction exceeded the inline limit. */
+const fullCtx = out => { const c = ctx(out); const f = c.match(/READ THIS FILE COMPLETELY before acting: (\S+\.md)/); return f ? `${c}\n${readFileSync(f[1], 'utf8')}` : c; };
 const denied = out => out.hookSpecificOutput?.permissionDecision === 'deny';
 
 test('sessions without Forge are untouched (no state file, no decisions)', () => {
@@ -57,8 +60,10 @@ test('full workflow through real hook processes: /forge → plan → ExitPlanMod
   const x = env();
   const start = x.forge('Build a booking system');
   assert.match(ctx(start), /Forge started\. Gates: plan/);
-  assert.match(ctx(start), /GATE 1\/3: PLAN — Forge plan mode/);
-  assert.match(ctx(start), /subagent_type "Explore"/); // footer mapping
+  assert.match(fullCtx(start), /GATE 1\/3: PLAN — Forge plan mode/);
+  assert.match(fullCtx(start), /subagent_type "Explore"/); // footer mapping
+  assert.match(fullCtx(start), /### Skill: forge-plan-gate\n/); // bundled gate skill inlined
+  assert.doesNotMatch(fullCtx(start), /Load and follow the/);
   assert.doesNotMatch(ctx(start), /forge-requirement|forge-planner|forge_requirement_summary/);
   assert.equal(x.state().phase, 'PLAN');
   // pre-approval guards
@@ -81,6 +86,9 @@ test('full workflow through real hook processes: /forge → plan → ExitPlanMod
   assert.equal(x.state().phase, 'EXECUTE');
   // the main agent implements itself
   assert.deepEqual(x.pre('Write', { file_path: join(x.cwd, 'booking.ts'), content: 'x' }), {});
+  assert.match(x.run('Stop', { stop_hook_active: false }).reason, /turn ended without forge_execution_done/); // not done yet
+  assert.equal(x.state().phase, 'EXECUTE');
+  assert.match(ctx(x.done()), /execution recorded as done/);
   const stop = x.run('Stop', { stop_hook_active: false, last_assistant_message: 'done' });
   assert.equal(stop.decision, 'block'); assert.match(stop.reason, /QA REVIEW|POST-EXECUTION|READ THIS FILE/);
   assert.equal(x.state().phase, 'QA');
@@ -89,8 +97,8 @@ test('full workflow through real hook processes: /forge → plan → ExitPlanMod
   assert.ok(denied(x.pre(`${P}forge_qa_submit`, SUBMISSION))); // PASS review needs the reviewer
   x.agent('forge-code-reviewer');
   assert.ok(denied(x.pre('Agent', { subagent_type: 'forge:forge-code-reviewer', prompt: 'again' }))); // one counted pass
-  assert.deepEqual(x.pre(`${P}forge_qa_submit`, SUBMISSION), {});
-  assert.match(ctx(x.post(`${P}forge_qa_submit`, SUBMISSION, {})), /QA GATE: PASS/);
+  assert.deepEqual(x.pre(`${P}forge_qa_submit`, MINIMAL_SUBMISSION), {});
+  assert.match(ctx(x.post(`${P}forge_qa_submit`, MINIMAL_SUBMISSION, {})), /QA GATE: PASS/);
   assert.equal(x.state().phase, 'QA');
   // delivery: written by the main agent, no further agent
   assert.deepEqual(x.pre(`${P}forge_delivery_submit`, { subject: 'feat(booking): add approvals', body: '- approvals' }), {});
@@ -105,6 +113,7 @@ test('parallel Agent hooks do not lose updates (state lock)', async () => {
   const x = env();
   toApproved(x, x.sid);
   x.pre('Write', { file_path: join(x.cwd, 'booking.ts'), content: 'x' });
+  x.done();
   x.run('Stop', { stop_hook_active: false, last_assistant_message: 'done' });
   assert.equal(x.state().phase, 'QA');
   const runAsync = (event, payload) => new Promise((resolve, reject) => {
@@ -172,7 +181,7 @@ test('/forge-planreview on: ExitPlanMode needs forge-plan-critic and every CRITI
   assert.equal(JSON.parse(readFileSync(join(x.data, 'config.json'), 'utf8')).planReview, true);
   const start = x.forge('Build a booking system');
   assert.equal(x.state().planReview, true);
-  assert.match(ctx(start), /PLAN REVIEW is ON[\s\S]*forge:forge-plan-critic/);
+  assert.match(fullCtx(start), /PLAN REVIEW is ON[\s\S]*forge:forge-plan-critic/);
   assert.match(x.pre('ExitPlanMode', { plan: PLAN }).hookSpecificOutput.permissionDecisionReason, /run forge-plan-critic once/);
   assert.match(ctx(x.agent('forge-plan-critic', '- PC-001 [CRITICAL] Approach — no rollback for refunds — add rollback\n- PC-002 [LOW] wording')), /forge-plan-critic reported/);
   const missing = x.pre('ExitPlanMode', { plan: PLAN });
@@ -243,6 +252,7 @@ test('trace + coverage report reflect a real run', () => {
   x.pre('ExitPlanMode', { plan: PLAN });
   x.post('ExitPlanMode', { plan: PLAN }, {});
   x.pre('Write', { file_path: join(x.cwd, 'a.ts'), content: 'x' });
+  x.done();
   x.run('Stop', { stop_hook_active: false, last_assistant_message: 'done' });
   x.agent('forge-code-reviewer');
   x.pre('Bash', { command: 'git commit -am x' });
@@ -268,6 +278,7 @@ test('background agent run (the bug seen live): no false "no report", handback a
   const x = env();
   toApproved(x, x.sid);
   x.pre('Write', { file_path: join(x.cwd, 'age.ts'), content: 'x' });
+  x.done();
   x.run('Stop', { stop_hook_active: false, last_assistant_message: 'done' });
   assert.equal(x.state().phase, 'QA');
   const input = { subagent_type: 'forge:forge-code-reviewer', description: 'Diff review', prompt: 'x', run_in_background: true };
@@ -280,7 +291,7 @@ test('background agent run (the bug seen live): no false "no report", handback a
   assert.deepEqual(x.pre('SendMessage', { to: 'bg-1', message: 'status?' }), {});
   x.run('SubagentStop', { ...sub, last_assistant_message: 'Handed back.', stop_hook_active: false });
   assert.deepEqual(x.state().gateAgents.QA, ['forge-code-reviewer']);
-  const next = x.run('UserPromptSubmit', { prompt: 'Agent "Diff review" finished' });
+  const next = x.run('UserPromptSubmit', { prompt: '<task-notification>Agent "Diff review" finished</task-notification>' });
   assert.match(ctx(next), /forge-code-reviewer reported\. Merge its findings/);
 });
 
@@ -358,7 +369,9 @@ test('MCP server: initialize, tools/list, tools/call', async () => {
   child.kill();
   const byId = Object.fromEntries(lines.map(l => JSON.parse(l)).map(m => [m.id, m]));
   assert.equal(byId[1].result.serverInfo.name, 'forge');
-  assert.deepEqual(byId[2].result.tools.map(t => t.name), ['forge_qa_scope', 'forge_qa_submit', 'forge_delivery_submit']);
+  assert.deepEqual(byId[2].result.tools.map(t => t.name), ['forge_execution_done', 'forge_qa_scope', 'forge_qa_submit', 'forge_delivery_submit']);
+  const qaTests = byId[2].result.tools.find(t => t.name === 'forge_qa_submit').inputSchema.properties.topicResults.items.properties.tests.items;
+  assert.deepEqual(qaTests.required, ['testId', 'actual', 'status', 'evidence', 'severity']);
   assert.match(byId[3].result.content[0].text, /Forge received forge_qa_scope/);
   assert.equal(byId[4].error.code, -32602);
   assert.equal(Object.keys(byId).length, 4); // notification got no reply
@@ -384,4 +397,96 @@ test('plugin layout: manifest, hooks, command, agents with Claude Code frontmatt
   }
   const market = JSON.parse(readFileSync(join(PLUGIN, '..', '..', '.claude-plugin', 'marketplace.json'), 'utf8'));
   assert.equal(market.plugins[0].source, './plugins/forge');
+});
+
+test('Stop in EXECUTE without forge_execution_done: bounded reminders, then a pause for the user', () => {
+  const x = env(); toApproved(x, x.sid);
+  assert.match(x.run('Stop', {}).reason, /turn ended without forge_execution_done/);
+  assert.equal(x.run('Stop', {}).decision, 'block');
+  const paused = x.run('Stop', {});
+  assert.equal(paused.decision, undefined);
+  assert.match(paused.systemMessage, /execution paused[\s\S]*note: <text>/);
+  assert.equal(x.state().phase, 'EXECUTE');
+});
+
+test('UserPromptSubmit during an approved run: plain text blocked, note: keeps approval, steer: re-plans', () => {
+  const x = env(); toApproved(x, x.sid);
+  const blocked = x.run('UserPromptSubmit', { prompt: 'also add CSV' });
+  assert.equal(blocked.decision, 'block'); assert.match(blocked.reason, /steer: <text>[\s\S]*note: <text>[\s\S]*\/forge off/);
+  assert.equal(x.state().approved, true);
+  assert.match(ctx(x.run('UserPromptSubmit', { prompt: 'note: use UTC' })), /clarification during EXECUTE/);
+  assert.equal(x.state().approved, true);
+  const steer = x.run('UserPromptSubmit', { prompt: 'steer: also export CSV' });
+  assert.match(fullCtx(steer), /FORGE STEERING[\s\S]*ExitPlanMode/);
+  assert.match(steer.systemMessage, /EXECUTE → PLAN/);
+  assert.equal(x.state().phase, 'PLAN'); assert.equal(x.state().approved, false);
+});
+
+test('Forge tools are recognized only from this plugin\'s own MCP server', async () => {
+  const { canonicalTool } = await import(pathToFileURL(HOOK).href);
+  assert.equal(canonicalTool(`${P}forge_qa_submit`), 'forge.qa_submit');
+  assert.equal(canonicalTool(`${P}forge_execution_done`), 'forge.execution_done');
+  assert.equal(canonicalTool('mcp__evil__forge_qa_submit'), 'other');
+  assert.equal(canonicalTool(`mcp__evil__${P}forge_qa_submit`), 'other');
+  const x = env(); toApproved(x, x.sid);
+  x.pre('mcp__evil__forge_execution_done', EXECUTION_DONE);
+  x.post('mcp__evil__forge_execution_done', EXECUTION_DONE, {});
+  assert.equal(x.state().executionDone, false);
+});
+
+test('QA through hooks: an approved plan command may run; format errors come back for correction', () => {
+  const plan = PLAN.replace('- node test: TC-001 and TC-002 pass', '- `make verify-booking` passes TC-001 and TC-002');
+  const x = env();
+  x.forge('Build a booking system'); x.pre('ExitPlanMode', { plan }); x.post('ExitPlanMode', { plan }, {});
+  x.done(); x.run('Stop', {});
+  assert.equal(x.state().phase, 'QA');
+  assert.deepEqual(x.pre('Bash', { command: 'make verify-booking' }), {});
+  assert.ok(denied(x.pre('Bash', { command: 'make deploy' })));
+  x.agent('forge-code-reviewer');
+  const partial = JSON.parse(JSON.stringify(MINIMAL_SUBMISSION)); partial.topicResults.pop();
+  const r = x.pre(`${P}forge_qa_submit`, partial);
+  assert.ok(denied(r)); assert.match(r.hookSpecificOutput.permissionDecisionReason, /NOT recorded[\s\S]*TC-002: missing/);
+  assert.equal(x.state().qaResubmits, 1); assert.equal(x.state().qaStatus, null);
+});
+
+test('corrupt state file: mutations denied naming the file, reads allowed, /forge off resets', () => {
+  const x = env(); x.forge('Build a booking system');
+  const f = join(x.data, 'sessions', `${x.sid}.json`);
+  writeFileSync(f, '{ not json');
+  const w = x.pre('Write', { file_path: 'a.ts' });
+  assert.ok(denied(w));
+  assert.ok(w.hookSpecificOutput.permissionDecisionReason.includes(f));
+  assert.match(w.hookSpecificOutput.permissionDecisionReason, /\/forge off/);
+  assert.deepEqual(x.pre('Read', { file_path: 'a.ts' }), {});
+  const stop = x.run('Stop', {});
+  assert.equal(stop.decision, undefined); assert.match(stop.systemMessage, /corrupt/);
+  x.forge('off');
+  assert.equal(x.state().active, false);
+  assert.deepEqual(x.pre('Write', { file_path: 'a.ts' }), {});
+});
+
+test('state lock: a stale lock of a live owner is never taken; a dead owner\'s is', async () => {
+  const x = env(); x.forge('Build a booking system');
+  const lock = join(x.data, 'locks', `${x.sid}.lock`);
+  const old = new Date(Date.now() - 60_000);
+  const plant = pid => { mkdirSync(lock, { recursive: true }); writeFileSync(join(lock, 'owner.json'), JSON.stringify({ pid, token: `t${pid}` })); utimesSync(lock, old, old); };
+  plant(process.pid); // this test process: alive
+  let finished = false;
+  const child = new Promise((resolve, reject) => {
+    const c = spawn('node', [HOOK, 'PreToolUse'], { env: { ...process.env, FORGE_DATA_DIR: x.data } });
+    let out = ''; c.stdout.on('data', d => { out += d; });
+    c.on('close', code => { finished = true; code === 0 ? resolve(out) : reject(new Error(`exit ${code}`)); });
+    c.stdin.end(JSON.stringify({ session_id: x.sid, cwd: x.cwd, hook_event_name: 'PreToolUse', permission_mode: 'plan', tool_name: 'Write', tool_input: { file_path: 'a.ts' } }));
+  });
+  await new Promise(r => setTimeout(r, 800));
+  assert.equal(finished, false);
+  assert.equal(JSON.parse(readFileSync(join(lock, 'owner.json'), 'utf8')).token, `t${process.pid}`);
+  rmSync(lock, { recursive: true });
+  assert.ok(denied(JSON.parse(await child))); // proceeded once the owner released
+  const deadPid = Number(spawnSync('node', ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8' }).stdout);
+  plant(deadPid);
+  const started = Date.now();
+  assert.match(ctx(x.forge('status')), /Forge: PLAN/);
+  assert.ok(Date.now() - started < 5000);
+  assert.equal(existsSync(lock), false);
 });

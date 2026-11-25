@@ -1,11 +1,16 @@
 ---
 name: forge-qa-gate
-description: Guides independent Forge QA, evidence-based gate decisions, rework, and delivery reporting.
+description: Forge QA gate checklist for evidence-based verification of an approved implementation.
 disable-model-invocation: true
+forge-audience: lead
 ---
 
-# QA gate
+# QA gate checklist
 
-You verify; the code reviewer agent reviews the diff independently and in parallel. Call forge_qa_scope first, then in one response start the reviewer (task text: plan reference, changed files, QG IDs) and run the plan's safe check commands. Compare every planned TC with observed evidence, preserving BIZ/REQ mappings and the original scenario and expected text. Report PASS, FAIL, BLOCKED or NOT_RUN per test and quality gate; inspection is not evidence that a runtime test ran. Merge the reviewer's severity-ranked findings into codeReview: every CRITICAL/HIGH CR-id stays at CRITICAL/HIGH, or its evidence starts with "Disputed:" and your counter-evidence. Submit once through forge_qa_submit; never infer PASS from missing results.
-
-For FAIL or BLOCKED, report the evidence and return to planning for rework and fresh approval. After recorded QA PASS only, write the delivery yourself: actual changed files, user-visible changes, limitations, migration and rollback notes, and one copy-ready Conventional Commit message, submitted via forge_delivery_submit. Changes after QA require repeat QA. Never stage, commit, push, tag, publish, or deploy.
+- Start with forge_qa_scope and give the reviewer exactly the changed files it lists.
+- Run the plan's Verification and QG commands in this turn, one check per command, exactly as written; Forge accepts them verbatim. Output from the implementation turn is not QA evidence.
+- Evidence is the command, its exit status and the decisive output line, or a file:line you read. Inspection never proves that a runtime test ran: report such a TC as NOT_RUN.
+- Per TC, submit only testId, status, actual, evidence and severity; Forge fills in BIZ, REQ, scenario and expected from the plan.
+- Carry every CRITICAL/HIGH reviewer finding under its CR-id, or start its evidence with "Disputed:" followed by your counter-evidence.
+- If forge_qa_submit returns format errors, fix exactly those and submit again.
+- On FAIL or BLOCKED, end the turn: the user decides what happens next. Never edit code during QA.

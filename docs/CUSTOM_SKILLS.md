@@ -1,6 +1,6 @@
 # Custom gate skills (OMP)
 
-Yes. OMP Forge supports custom Markdown skill packs and lets you attach them to a Forge gate. A skill is not a new agent or a permission grant: Forge adds its instructions to specialist task prompts for that gate, while Forge's approval, read-only, and no-Git rules still win.
+Yes. OMP Forge supports custom Markdown skill packs and lets you attach them to a Forge gate. A skill is not a new agent or a permission grant: Forge puts its text into the gate instruction for the main agent and into the task prompts of the gate's specialists, while Forge's approval, read-only, and no-Git rules still win.
 
 ![Custom skill lifecycle](images/custom-skill-flow.svg)
 
@@ -40,6 +40,18 @@ description: Describe when this instruction should be used.
 - Give concrete, gate-specific guidance.
 ```
 
+An optional `forge-audience` frontmatter field chooses who receives the skill: `lead` (only the main agent doing the gate work), `specialist` (only the gate's specialist subagents, such as `forge-code-reviewer` in QA), or `all` (both; the default). The bundled `forge-plan-gate`, `forge-execute-gate` and `forge-qa-gate` skills are `lead`: they describe the main agent's job, so reviewers never receive them.
+
+```markdown
+---
+name: go-review-rules
+description: Go review rules for the QA reviewer.
+forge-audience: specialist
+---
+
+- Flag any error returned without wrapping context (`file:line`).
+```
+
 Limits: skill names are 1–64 lowercase letters, digits, or hyphens and start with a letter; one `SKILL.md` is at most 24 KiB; descriptions are at most 1024 characters. Forge accepts simple single-line frontmatter fields, not nested YAML or folded values. Each gate can have at most six attached skills, and combined skill text for one gate cannot exceed 96 KiB.
 
 ## Find and attach an existing skill
@@ -70,11 +82,12 @@ Resetting one gate clears its bindings; it does not delete or edit any `SKILL.md
 
 ## Gate behavior and safety
 
-- Supported gate names: `requirement`, `planning`, `execution`, `qa`, `delivery`.
-- Bundled defaults attach requirement, planning, execution, and QA skills. Delivery has no bundled default, but custom delivery skills can be attached.
-- Skills are pinned by path and SHA-256 when a Forge workflow starts. Forge rejects a skill that changes or disappears mid-workflow.
+- Supported gate names: `planning`, `execution`, `qa`, `delivery`.
+- Bundled defaults attach planning, execution, and QA skills. Delivery has no bundled default, but custom delivery skills can be attached.
+- Skills are pinned by path and SHA-256 when a Forge workflow starts. Forge rejects a skill that changes or disappears mid-workflow; the main agent then gets a notice instead of the changed text.
 - Global skill settings cannot be changed while a Forge workflow is active. Finish or cancel the workflow, change bindings, then start a new workflow.
-- An attached skill is included in each named specialist task for its gate. Skills guide behavior but cannot override approved scope, approval checks, read-only restrictions, or the no-commit policy.
+- The verified text of every `lead`/`all` skill is inlined at the top of each gate instruction, so the main agent needs no extra read. Every `specialist`/`all` skill is appended to each required specialist task for its gate. Skills guide behavior but cannot override approved scope, approval checks, read-only restrictions, or the no-commit policy.
+- `install.sh` replaces a bundled gate skill that has no `forge-audience` line (an older bundled copy) and parks the old file in `forge-backups/`.
 - Claude Code does not currently provide the `/forge skill` management flow. This documentation covers OMP.
 
 For all Forge commands and phase behavior, see the [user guide](USER_GUIDE.md).

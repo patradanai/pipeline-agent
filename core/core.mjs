@@ -106,7 +106,7 @@ export function currentSkillGate(phase, qaStatus = null) {
 }
 /** Main-session model per gate: `@role` alias, `provider/model-id`, or null (keep the current model). */
 export const DEFAULT_GATE_MODELS = Object.freeze({ planning: '@plan', execution: '@default', qa: '@default', delivery: '@default' });
-export const GATE_MODEL_SELECTOR_PATTERN = /^[@A-Za-z0-9][A-Za-z0-9@._:\/+-]{0,127}$/;
+export const GATE_MODEL_SELECTOR_PATTERN = /^(?:@[A-Za-z0-9][\w.-]{0,63}|[A-Za-z0-9][A-Za-z0-9@._:\/+-]{0,127})$/;
 export function cloneGateModels(source) {
   const result = { ...DEFAULT_GATE_MODELS };
   if (!source || typeof source !== 'object' || Array.isArray(source)) return result;
@@ -277,6 +277,7 @@ export function initialState(requirement, slug = planSlug(), assignments = null,
     executionObserved: false,
     businessTopics: [],
     testCases: [],
+    approvedCommands: [],
     planValid: false,
     approvedPlanHash: null,
     requirements: [],
@@ -404,23 +405,30 @@ ${formatOpenItems(state.qaOpenItems)}` : '';
   return `[OMP FORGE — APPROVED EXECUTION]
 The operator approved the plan. Execute it yourself, step by step, with full tool access; MUST verify each step before the next. Before you start, initialize todo tracking with one item per ${rework ? 'remediation' : 'plan'} step; update it after each completed step. NEVER re-read the plan file while the inline plan is intact; read ${planRef} only if the inline plan is compressed or missing.${fixScope}
 Stay within the approved scope. If material scope drift is required, stop and report it; a revised plan needs new approval. You may delegate independent slices to subagents through the native task tool; you own integration and verification. NEVER run git add/commit/push, create PRs, tag or publish; Git commits stay a manual user action.
-When implementation is complete, end your turn with: changed files, checks actually run with their exact results, unfinished work, and deviations from the plan. Do not claim tests passed that you did not run. Forge starts QA automatically after this turn settles.
+When every step is done or blocked, call forge_execution_done once with the changed files, the checks actually run with their exact results, unfinished work and deviations from the plan; then end your turn. Forge starts QA only after forge_execution_done: ending a turn without it does not start QA, so never end the turn with a question or a progress note; ask the user with the native ask tool when you need a decision. Do not claim tests passed that you did not run.
 Plan reference: ${planRef}
 Business topics captured: ${formatTopics(state.businessTopics)}.`;
+}
+
+/** What the executor reported through forge_execution_done; QA treats it as a lead, not as evidence. */
+function formatExecutionReport(report) {
+  if (!report || typeof report !== 'object') return '';
+  const list = (label, items) => Array.isArray(items) && items.length ? `\n- ${label}: ${items.slice(0, 40).join('; ')}` : '';
+  return `\nExecutor report (unverified; verify it yourself):${report.summary ? `\n- Summary: ${report.summary}` : ''}${list('Changed files', report.changedFiles)}${list('Checks run', report.checksRun)}${list('Unfinished', report.unfinished)}${list('Deviations', report.deviations)}\n`;
 }
 
 function qaInstructionTemplate(state) {
   const planRef = state.planPath ?? `local://${state.slug}-plan.md`;
   return `[OMP FORGE — POST-EXECUTION QA REVIEW — READ-ONLY]
-The approved implementation turn has settled. Verify it against the approved plan yourself while one independent reviewer runs in parallel. Enforce the EXACT test IDs and mappings from the approved plan; never invent replacement TC IDs. Do NOT edit code, install dependencies, run migrations, commit, or auto-fix.
+The approved implementation turn has settled. Verify it against the approved plan yourself while one independent reviewer runs in parallel. Enforce the EXACT test IDs from the approved plan; never invent replacement TC IDs. Do NOT edit code, install dependencies, run migrations, commit, or auto-fix.
 
-1. Call forge_qa_scope for the read-only Git diff inventory.
-2. In ONE response, issue in parallel: (a) the native task call for \`forge-code-reviewer\`, whose task text contains the approved plan reference, the changed files from forge_qa_scope, the QG IDs, and "review only these changed files and their direct callers; report severity-ranked findings with file:line"; (b) the safe check commands named by the plan's Verification and Code Quality Gates (existing test/lint/typecheck/build commands, git status/diff).
+1. Call forge_qa_scope for the read-only Git diff inventory; use it instead of chaining git status/diff yourself.
+2. In ONE response, issue in parallel: (a) the native task call for \`forge-code-reviewer\`, whose task text contains the approved plan reference, the changed files from forge_qa_scope, the QG IDs, and "review only these changed files and their direct callers; report severity-ranked findings with file:line"; (b) the check commands written in the plan's Verification and Code Quality Gates. QA may run those commands verbatim, read-only inspection, and test/lint/typecheck runners with arguments; steps may be chained with && and piped into head/tail/grep. File redirects, installs, mutating flags (--fix, --write, -u) and multi-line scripts are refused. Run each check in this QA turn; results from the implementation turn are not QA evidence.
 3. While the reviewer works, check every approved TC yourself: read the changed code and match each acceptance criterion to observed evidence (command output, file:line). Code inspection is not evidence that a runtime test ran; unrun checks are NOT_RUN. If the diff is empty, verify the approved end state against the existing sources and run feasible checks; an empty diff alone is not proof.
-4. Call forge_qa_submit exactly once: for every approved TC the same BIZ and REQ mapping and the original scenario/expected text, the actual observed result, PASS/FAIL/BLOCKED/NOT_RUN, evidence and severity; one codeQualityChecks entry per QG; codeReview with the reviewer's findings (severity, file:line) plus your own. Every CRITICAL/HIGH reviewer finding must appear in codeReview.findings under its CR-id, either at CRITICAL/HIGH or with evidence starting "Disputed:" and your counter-evidence; Forge rejects a submission that drops one. Forge computes the gate; never declare PASS yourself. If the tool is unavailable, report that QA could not be completed.
+4. Call forge_qa_submit once: for every approved TC its testId, the actual observed result, PASS/FAIL/BLOCKED/NOT_RUN, evidence and severity (Forge fills in its BIZ, REQ, scenario and expected text from the plan); one codeQualityChecks entry per QG ID; codeReview with the reviewer's findings (severity, file:line) plus your own. Every CRITICAL/HIGH reviewer finding must appear in codeReview.findings under its CR-id, either at CRITICAL/HIGH or with evidence starting "Disputed:" and your counter-evidence; Forge rejects a submission that drops one. If Forge reports format errors (missing, unplanned or duplicate IDs, PASS without evidence), nothing is recorded: fix them and submit again. Forge computes the gate; never declare PASS yourself. If the tool is unavailable, report that QA could not be completed.
 
 Original requirement: ${state.requirement}
-Approved plan reference: ${planRef}
+Approved plan reference: ${planRef}${formatExecutionReport(state.executionReport)}
 Business topics from the plan review:
 ${formatTopics(state.businessTopics)}
 Approved test cases (every one is mandatory):
@@ -504,6 +512,33 @@ export const phaseInstruction = state => {
 };
 export const planDecisionReminder = state => `[FORGE PLAN — turn ended without a required tool call]
 Choose exactly one next action now: (1) call the native ask tool to gather a required decision, OR (2) write the complete plan to ${forgePlanPath(state)} if it is not written yet, then call forge_plan_propose. Do not end the turn with plain text.`;
+export const executionReminder = () => `[FORGE EXECUTE — turn ended without forge_execution_done]
+The approved plan is not marked complete, so QA has not started. Continue the remaining steps now. When every step is done or blocked, call forge_execution_done, then end your turn. If you need a decision from the user, use the native ask tool; never end the turn with a question or a progress note.`;
+
+const SKILL_DIRECTIVE = /^Load and follow the ([a-z0-9-]+(?:, [a-z0-9-]+)*) skills?\.\n\n/m;
+/** SKILL.md body without its YAML frontmatter. */
+export function stripFrontmatter(content) {
+  return String(content ?? '').replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, '');
+}
+/** Who a gate skill is written for (`forge-audience` frontmatter): the main agent doing the gate
+ * work (`lead`), the gate's specialist subagents (`specialist`), or both (`all`, the default). */
+export function skillAudience(content) {
+  const front = String(content ?? '').match(/^---\r?\n([\s\S]*?)\r?\n---/)?.[1] ?? '';
+  const value = front.match(/^forge-audience\s*:\s*["']?(lead|specialist|all)["']?\s*$/mi)?.[1]?.toLowerCase();
+  return value ?? 'all';
+}
+/** Replace the "Load and follow the … skill" line with the skills' text, so the agent needs no
+ * extra tool call and gets exactly the content the adapter verified. `load(names)` returns
+ * `[{ name, content }]`; an empty result keeps the instruction unchanged. */
+export function inlineGateSkills(text, load) {
+  const value = String(text ?? '');
+  const match = value.match(SKILL_DIRECTIVE);
+  if (!match) return value;
+  const skills = (load(match[1].split(', ')) ?? []).filter(s => s && stripFrontmatter(s.content).trim());
+  if (!skills.length) return value;
+  const block = `[FORGE GATE SKILLS — apply to the current gate; Forge policies and the gate instruction take precedence]\n${skills.map(s => `### Skill: ${s.name}\n${stripFrontmatter(s.content).trim()}`).join('\n\n')}\n[END FORGE GATE SKILLS]\n\n`;
+  return value.slice(0, match.index) + block + value.slice(match.index + match[0].length);
+}
 export const executionInstruction = state => `${skillDirective(state)}${routeAgentNames(executionInstructionTemplate(state), state)}`;
 export const qaInstruction = state => `${skillDirective(state)}${routeAgentNames(qaInstructionTemplate(state), state)}`;
 export const reworkInstruction = state => `${skillDirective(state)}${routeAgentNames(reworkInstructionTemplate(state), state)}`;
@@ -524,13 +559,14 @@ ${phaseInstruction(state)}`;
 export function isProhibitedGitCommand(command) {
   const text = String(command ?? '').replace(/\\\s*\n/g, ' ');
   // Detect git, absolute git paths and common shell wrappers. Conservative by design.
-  const git = /(?:^|[^\w-])(?:git|\/(?:usr\/)?(?:local\/)?bin\/git)(?:\s+(?:-C\s+\S+|--git-dir(?:=|\s+)\S+|--work-tree(?:=|\s+)\S+|-c\s+\S+))*\s+(?:add|commit|push|tag|merge|rebase|reset|checkout|switch|cherry-pick|am|apply|stash|pull|fetch\s+--update-head-ok)\b/i;
+  // `hub` wraps every git subcommand. clean/restore/rm/mv destroy or stage working-tree state.
+  const git = /(?:^|[^\w-])(?:git|hub|\/(?:usr\/)?(?:local\/)?bin\/git)(?:\s+(?:-C\s+\S+|--git-dir(?:=|\s+)\S+|--work-tree(?:=|\s+)\S+|-c\s+\S+))*\s+(?:add|commit|push|tag|merge|rebase|reset|checkout|switch|cherry-pick|am|apply|stash|pull|clean|restore|rm|mv|fetch\s+--update-head-ok)\b/i;
   const cli = /(?:^|[^\w-])(?:gh|hub|glab)\s+(?:pr\s+(?:create|merge)|mr\s+(?:create|merge)|release\s+create|repo\s+(?:sync|fork))\b/i;
   const plumbing = /(?:^|[^\w-])git\s+(?:update-ref|write-tree|commit-tree|update-index|push|send-pack)\b/i;
   const releaseScripts = /(?:^|[^\w-])(?:npm|pnpm|yarn|bun)\s+(?:(?:run|run-script)\s+)?(?:release|publish|deploy|commit|push|version|tag)(?:\s|$)/i;
   const releaseTools = /(?:^|[^\w-])(?:semantic-release|standard-version|changeset\s+publish|lerna\s+publish|npm\s+publish|make\s+(?:release|publish)|npx\s+semantic-release)\b/i;
   // Catch basic subprocess array calls such as subprocess.run(['git','commit',...]).
-  const arrayCall = /[\[,(]\s*['"]git['"]\s*,\s*['"](?:add|commit|push|tag|merge|rebase|reset|checkout|switch|cherry-pick|commit-tree|update-ref)['"]/i;
+  const arrayCall = /[\[,(]\s*['"]git['"]\s*,\s*['"](?:add|commit|push|tag|merge|rebase|reset|checkout|switch|cherry-pick|clean|restore|rm|mv|commit-tree|update-ref)['"]/i;
   return git.test(text) || cli.test(text) || plumbing.test(text) || releaseScripts.test(text) || releaseTools.test(text) || arrayCall.test(text);
 }
 
@@ -541,6 +577,7 @@ export function buildCommitMessage(subject, body = '') {
     throw new Error('Commit subject must follow Conventional Commits, e.g. feat(booking): add room approvals.');
   }
   if (line.length > 72) throw new Error('Commit subject must be at most 72 characters.');
+  if (/[\x00-\x1f\x7f]/.test(line)) throw new Error('Invalid control characters in commit subject.');
   const rawBody = String(body ?? '').replace(/\r/g, '').trim();
   if (rawBody.length > 4000) throw new Error('Commit body is too long.');
   if (/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(rawBody)) throw new Error('Invalid control characters in commit message.');
@@ -585,58 +622,68 @@ function formatTopics(topics) {
     : '- NONE CAPTURED: the QA gate must BLOCK until the plan has traceable BIZ IDs.';
 }
 
+/** Lines of the first `## <heading>` section (until the next #/## heading), or null when absent.
+ * Fenced code blocks never open or close a section; their lines come back with `fenced: true`. */
+function sectionEntries(planContent, heading) {
+  let fence = null;
+  let inSection = false;
+  const entries = [];
+  for (const line of String(planContent ?? '').split(/\r?\n/)) {
+    const trimmed = line.trim();
+    const marker = trimmed.match(/^(`{3,}|~{3,})/);
+    if (marker) {
+      if (!fence) fence = marker[1][0];
+      else if (marker[1][0] === fence) fence = null;
+      continue;
+    }
+    if (fence) { if (inSection) entries.push({ line, fenced: true }); continue; }
+    if (!inSection) { if (heading.test(trimmed)) inSection = true; continue; }
+    if (/^#{1,2}\s+/.test(trimmed)) break;
+    entries.push({ line, fenced: false });
+  }
+  return inSection ? entries : null;
+}
+/** Contract rows (regex matches) of a section, ignoring fenced examples. */
+function contractRows(planContent, heading, row) {
+  return (sectionEntries(planContent, heading) ?? []).filter(e => !e.fenced).map(e => e.line.match(row)).filter(Boolean);
+}
+function firstById(matches, build) {
+  const seen = new Set();
+  return matches.flatMap(m => { const id = m[1].toUpperCase(); if (seen.has(id)) return []; seen.add(id); return [build(id, m)]; });
+}
+function duplicateIds(matches) {
+  const seen = new Set(), dup = new Set();
+  for (const m of matches) { const id = m[1].toUpperCase(); if (seen.has(id)) dup.add(id); seen.add(id); }
+  return [...dup];
+}
+const CONTRACT = Object.freeze({
+  topics: [/^##\s+Business Topics\s*$/i, /^\s*(?:[-*]\s+|#{3,6}\s+)(BIZ-\d{3,})\s*[:\-–—]\s*(.+?)\s*$/i],
+  requirements: [/^##\s+Requirement Traceability\s*$/i, /^\s*[-*]\s*(REQ-\d{3,})\s*(?:\|\s*(BIZ-\d{3,})\s*\|\s*(.+?)\s*\|\s*(.+?)|->\s*(BIZ-\d{3,}))\s*$/i],
+  testCases: [/^##\s+Business Test Cases\s*$/i, /^\s*[-*]\s*(TC-\d{3,})\s*\|\s*(BIZ-\d{3,})\s*\|\s*([A-Za-z0-9,\s-]+)\s*\|\s*([^|]+)\|\s*([^|]+)\|\s*(.+?)\s*$/i],
+  qualityGates: [/^##\s+Code Quality Gates\s*$/i, /^\s*[-*]\s*(QG-\d{3,})\s*[:\-–—]\s*(.+?)\s*$/i],
+});
+
 /** Extract topics only from the explicit contract section; avoid incidental BIZ references. */
 export function extractBusinessTopics(planContent) {
-  const lines = String(planContent ?? '').split(/\r?\n/);
-  let inSection = false;
-  const result = [];
-  const seen = new Set();
-  for (const line of lines) {
-    if (/^##\s+Business Topics\s*$/i.test(line.trim())) { inSection = true; continue; }
-    if (inSection && /^#{1,2}\s+/.test(line.trim())) break;
-    if (!inSection) continue;
-    const match = line.match(/^\s*(?:[-*]\s+|#{3,6}\s+)(BIZ-\d{3,})\s*[:\-–—]\s*(.+?)\s*$/i);
-    if (!match) continue;
-    const id = match[1].toUpperCase();
-    if (seen.has(id)) continue;
-    seen.add(id);
-    result.push({ id, name: match[2].trim() });
-  }
-  return result;
+  return firstById(contractRows(planContent, ...CONTRACT.topics), (id, m) => ({ id, name: m[2].trim() }));
 }
 
 /** Exact approved test cases are the post-execution QA contract (no replacing TC IDs). */
 export function extractBusinessTestCases(planContent) {
-  const lines = String(planContent ?? '').split(/\r?\n/);
-  let active = false;
-  const tests = [];
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (/^##\s+Business Test Cases\s*$/i.test(trimmed)) { active = true; continue; }
-    if (active && /^#{1,2}\s+/.test(trimmed)) break;
-    if (!active) continue;
-    const match = line.match(/^\s*[-*]\s*(TC-\d{3,})\s*\|\s*(BIZ-\d{3,})\s*\|\s*([A-Za-z0-9,\s-]+)\s*\|\s*([^|]+)\|\s*([^|]+)\|\s*(.+?)\s*$/i);
-    if (!match) continue;
-    const reqIds = match[3].split(',').map(x => x.trim().toUpperCase()).filter(Boolean);
-    tests.push({ id: match[1].toUpperCase(), topicId: match[2].toUpperCase(), requirementIds: reqIds, scenario: match[4].trim(), expected: match[5].trim(), method: match[6].trim() });
-  }
-  return tests;
+  return contractRows(planContent, ...CONTRACT.testCases).map(m => ({
+    id: m[1].toUpperCase(), topicId: m[2].toUpperCase(),
+    requirementIds: m[3].split(',').map(x => x.trim().toUpperCase()).filter(Boolean),
+    scenario: m[4].trim(), expected: m[5].trim(), method: m[6].trim(),
+  }));
 }
 
 /** Plan sections Forge enforces besides the four QA-contract sections. `&` also matches "and". */
 const PLAN_SECTIONS = Object.freeze(['Context', 'Approach', 'Verification', 'Assumptions & contingencies']);
-/** Body lines of a `## <name>` section (until the next #/## heading), or null when absent. */
+/** Body lines of a `## <name>` section outside fenced code, or null when absent. */
 function planSectionLines(planContent, name) {
   const heading = new RegExp(`^##\\s+${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace('&', '(?:&|and)')}\\s*$`, 'i');
-  const lines = String(planContent ?? '').split(/\r?\n/);
-  const start = lines.findIndex(line => heading.test(line.trim()));
-  if (start < 0) return null;
-  const body = [];
-  for (const line of lines.slice(start + 1)) {
-    if (/^#{1,2}\s+/.test(line.trim())) break;
-    body.push(line);
-  }
-  return body;
+  const entries = sectionEntries(planContent, heading);
+  return entries ? entries.filter(e => !e.fenced).map(e => e.line) : null;
 }
 /** Items of a `Label: value` line plus its sub-bullets, or null when the line is absent. */
 function labeledItems(lines, label) {
@@ -703,48 +750,50 @@ export function validatePlanContract(planContent) {
     }
     if (!t.scenario || !t.expected || !t.method) issues.push(`${t.id} is missing scenario, expected outcome, or method.`);
   }
+  for (const key of ['topics', 'requirements', 'qualityGates']) {
+    for (const id of duplicateIds(contractRows(planContent, ...CONTRACT[key]))) issues.push(`${id} is duplicated.`);
+  }
   issues.push(...decisionIssues(planContent));
   return { valid: issues.length===0, issues, topics, requirements, qualityGates, testCases,
+    commands: extractApprovedCommands(planContent),
     hash: createHash('sha256').update(String(planContent ?? '')).digest('hex') };
 }
 
 /** Requirement IDs and their business ownership are part of the approved QA contract. */
 export function extractRequirementTraceability(planContent) {
-  const lines = String(planContent ?? '').split(/\r?\n/);
-  let inSection = false;
-  const requirements = [];
-  const seen = new Set();
-  for (const line of lines) {
-    if (/^##\s+Requirement Traceability\s*$/i.test(line.trim())) { inSection = true; continue; }
-    if (inSection && /^#{1,2}\s+/.test(line.trim())) break;
-    if (!inSection) continue;
-    const match = line.match(/^\s*[-*]\s*(REQ-\d{3,})\s*(?:\|\s*(BIZ-\d{3,})\s*\|\s*(.+?)\s*\|\s*(.+?)|->\s*(BIZ-\d{3,}))\s*$/i);
-    if (!match) continue;
-    const id = match[1].toUpperCase();
-    if (seen.has(id)) continue;
-    seen.add(id);
-    requirements.push({ id, topicId: (match[2] ?? match[5]).toUpperCase(), expected: (match[3] ?? '').trim(), acceptance: (match[4] ?? '').trim() });
-  }
-  return requirements;
+  return firstById(contractRows(planContent, ...CONTRACT.requirements), (id, m) => ({
+    id, topicId: (m[2] ?? m[5]).toUpperCase(), expected: (m[3] ?? '').trim(), acceptance: (m[4] ?? '').trim(),
+  }));
 }
 
 export function extractCodeQualityGates(planContent) {
-  const lines = String(planContent ?? '').split(/\r?\n/);
-  let inSection = false;
-  const gates = [];
-  const seen = new Set();
-  for (const line of lines) {
-    if (/^##\s+Code Quality Gates\s*$/i.test(line.trim())) { inSection = true; continue; }
-    if (inSection && /^#{1,2}\s+/.test(line.trim())) break;
-    if (!inSection) continue;
-    const match = line.match(/^\s*[-*]\s*(QG-\d{3,})\s*[:\-–—]\s*(.+?)\s*$/i);
-    if (!match) continue;
-    const id = match[1].toUpperCase();
-    if (seen.has(id)) continue;
-    seen.add(id);
-    gates.push({ id, name: match[2].trim() });
+  return firstById(contractRows(planContent, ...CONTRACT.qualityGates), (id, m) => ({ id, name: m[2].trim() }));
+}
+
+const normalizeCommand = command => String(command ?? '').trim().replace(/\s+/g, ' ');
+// Commands a plan may mention without authorizing QA to run them.
+const UNSAFE_PLAN_COMMAND = /(?:^|[\s;&|(])(?:rm|rmdir|mv|dd|mkfs|chmod|chown|sudo|su|kill|pkill|killall|shutdown|reboot|truncate|shred)(?=\s|$)|(?:^|[\s;&|])(?:npm|pnpm|yarn|bun)\s+(?:install|i|add|remove|uninstall|ci|update|link)\b|(?:^|[\s;&|])(?:pip3?|brew|apt|apt-get|gem|cargo)\s+(?:install|uninstall|remove)\b/i;
+const SINGLE_WORD_RUNNERS = /^(?:pytest|jest|vitest|mocha|tsc|eslint|make|ctest|rspec|phpunit|mypy|flake8|ruff)$/;
+/** Shell commands written in the approved plan's Verification, Business Test Cases and Code
+ * Quality Gates (inline `code` spans and fenced blocks). The human approved them, so QA may
+ * run them verbatim; destructive commands and Git writes are never collected. */
+export function extractApprovedCommands(planContent) {
+  const out = new Set();
+  const add = raw => {
+    const cmd = normalizeCommand(String(raw).replace(/^\s*\$\s+/, ''));
+    if (!cmd || cmd.length > 300) return;
+    if (!/^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:\.{0,2}\/)?[A-Za-z0-9_][\w.\/-]*(?:\s|$)/.test(cmd)) return;
+    if (!/\s/.test(cmd) && !SINGLE_WORD_RUNNERS.test(cmd)) return;
+    if (isProhibitedGitCommand(cmd) || UNSAFE_PLAN_COMMAND.test(cmd)) return;
+    out.add(cmd);
+  };
+  for (const heading of [/^##\s+Verification\s*$/i, CONTRACT.testCases[0], CONTRACT.qualityGates[0]]) {
+    for (const { line, fenced } of sectionEntries(planContent, heading) ?? []) {
+      if (fenced) { if (!/^\s*#/.test(line)) add(line); continue; }
+      for (const m of line.matchAll(/`([^`\n]+)`/g)) add(m[1]);
+    }
   }
-  return gates;
+  return [...out].slice(0, 80);
 }
 
 const QA_STATUSES = new Set(['PASS', 'FAIL', 'BLOCKED', 'NOT_RUN']);
@@ -779,114 +828,103 @@ function formatOpenItems(items) {
     : '- Not captured: take the non-PASS items from the QA report.';
 }
 
-/** Calculate a fail-closed result. The tool cannot prove the model's evidence is genuine. */
+const countStatuses = statuses => ({
+  pass: statuses.filter(s => s === 'PASS').length,
+  fail: statuses.filter(s => s === 'FAIL').length,
+  blocked: statuses.filter(s => s === 'BLOCKED').length,
+  notRun: statuses.filter(s => s === 'NOT_RUN').length,
+});
+
+/** Calculate a fail-closed result. The tool cannot prove the model's evidence is genuine.
+ * The approved plan owns each TC's BIZ, REQ, scenario and expected text: Forge fills them in,
+ * so the submission only reports status, actual result and evidence per TC ID.
+ * `formatErrors` lists submission mistakes the agent can fix and resubmit (unplanned, duplicate
+ * or missing IDs, PASS without evidence, missing actual results or review evidence). */
 export function evaluateQaReport(submission, expectedTopics, expectedRequirements = [], expectedQualityGates = [], expectedTestCases = []) {
   const expected = Array.isArray(expectedTopics) ? expectedTopics : [];
+  const plannedTests = Array.isArray(expectedTestCases) ? expectedTestCases : [];
   const raw = submission ?? {};
   const problems = [];
-  const topics = [];
-  const byId = new Map((raw.topicResults ?? []).map(t => [norm(t.topicId).toUpperCase(), t]));
+  const formatErrors = [];
   if (!expected.length) problems.push('Approved plan has no parseable Business Topics; traceability cannot be verified.');
   if (!expectedRequirements.length) problems.push('Approved plan has no parseable Requirement Traceability; requirement compliance cannot be verified.');
   if (!expectedQualityGates.length) problems.push('Approved plan has no parseable Code Quality Gates; code quality cannot be verified.');
-  if (!expectedTestCases.length) problems.push('Approved plan has no parseable Business Test Cases; exact TC coverage cannot be verified.');
+  if (!plannedTests.length) problems.push('Approved plan has no parseable Business Test Cases; exact TC coverage cannot be verified.');
 
-  for (const planned of expected) {
-    const supplied = byId.get(planned.id);
-    const tests = (supplied?.tests ?? []).map((t, i) => {
+  // Submitted tests are matched by TC ID, whatever topic group they were filed under.
+  const plannedIds = new Set(plannedTests.map(t => t.id));
+  const submitted = new Map();
+  for (const group of Array.isArray(raw.topicResults) ? raw.topicResults : []) {
+    for (const t of Array.isArray(group?.tests) ? group.tests : []) {
+      const id = norm(t?.testId).toUpperCase();
+      if (!plannedIds.has(id)) formatErrors.push(`${id || '(empty TC)'}: not an approved test case; report only the approved TC IDs.`);
+      else if (submitted.has(id)) formatErrors.push(`${id}: submitted more than once.`);
+      else submitted.set(id, t);
+    }
+  }
+  const topics = expected.map(planned => {
+    const tests = plannedTests.filter(tc => tc.topicId === planned.id).map(tc => {
+      const base = { testId: tc.id, requirementIds: [...tc.requirementIds], scenario: tc.scenario, expected: tc.expected };
+      const t = submitted.get(tc.id);
+      if (!t) {
+        formatErrors.push(`${tc.id}: missing; report it as PASS, FAIL, BLOCKED or NOT_RUN.`);
+        return { ...base, actual: 'Not reported', status: 'BLOCKED', evidence: '', severity: 'HIGH', fileRefs: [] };
+      }
       let status = normalizeStatus(t.status);
       const evidence = norm(t.evidence);
-      if (status === 'PASS' && !evidence) {
-        status = 'BLOCKED';
-        problems.push(`${planned.id}/${norm(t.testId, `TC-${i + 1}`)}: PASS has no evidence.`);
-      }
-      if (!norm(t.scenario) || !norm(t.expected) || !norm(t.actual)) {
-        status = 'BLOCKED';
-        problems.push(`${planned.id}/${norm(t.testId, `TC-${i + 1}`)}: missing scenario, expected or actual.`);
-      }
-      if (!Array.isArray(t.requirementIds) || !t.requirementIds.length) {
-        status = 'BLOCKED';
-        problems.push(`${planned.id}/${norm(t.testId, `TC-${i + 1}`)}: no requirement IDs.`);
-      }
-      return {
-        testId: norm(t.testId, `TC-${i + 1}`),
-        requirementIds: Array.isArray(t.requirementIds) ? t.requirementIds.map(String) : [],
-        scenario: norm(t.scenario), expected: norm(t.expected), actual: norm(t.actual),
-        status, evidence, severity: normalizeSeverity(t.severity),
-        fileRefs: Array.isArray(t.fileRefs) ? t.fileRefs.map(String) : [],
-      };
+      const actual = norm(t.actual);
+      if (status === 'PASS' && !evidence) { status = 'BLOCKED'; formatErrors.push(`${tc.id}: PASS needs evidence.`); }
+      if (!actual) { status = 'BLOCKED'; formatErrors.push(`${tc.id}: missing actual result.`); }
+      return { ...base, actual, status, evidence, severity: normalizeSeverity(t.severity),
+        fileRefs: Array.isArray(t.fileRefs) ? t.fileRefs.map(String) : [] };
     });
     if (!tests.length) {
-      problems.push(`${planned.id}: no business test cases submitted.`);
-      tests.push({ testId: 'TC-MISSING', requirementIds: [], scenario: 'Business topic coverage missing', expected: 'Mapped acceptance tests', actual: 'No test cases supplied', status: 'BLOCKED', evidence: '', severity: 'HIGH', fileRefs: [] });
+      problems.push(`${planned.id}: the approved plan has no test case for this topic.`);
+      tests.push({ testId: 'TC-MISSING', requirementIds: [], scenario: 'Business topic coverage missing', expected: 'Mapped acceptance tests', actual: 'No planned test cases', status: 'BLOCKED', evidence: '', severity: 'HIGH', fileRefs: [] });
     }
-    topics.push({ id: planned.id, name: planned.name, tests });
-  }
-  // Fail closed on missing, replaced, duplicated or mis-mapped planned tests.
-  const plannedTestIds = new Set(expectedTestCases.map(t=>t.id));
-  const submittedOccurrences = new Map();
-  for (const group of raw.topicResults ?? []) for (const t of group.tests ?? []) {
-    const id = norm(t.testId).toUpperCase();
-    submittedOccurrences.set(id, (submittedOccurrences.get(id) ?? 0)+1);
-    if (!plannedTestIds.has(id)) problems.push(`${id || '(empty TC)'}: unplanned test; does not satisfy approved plan.`);
-    if (submittedOccurrences.get(id)>1) problems.push(`${id}: duplicate submitted test case.`);
-  }
-  for (const planned of expectedTestCases) {
-    const matchingGroup = topics.find(t=>t.id===planned.topicId);
-    const actual = matchingGroup?.tests.find(t=>t.testId.toUpperCase()===planned.id);
-    if (!actual) { problems.push(`${planned.id}: required planned test case is missing from ${planned.topicId}.`); continue; }
-    if (!Array.isArray(actual.requirementIds) ||
-      [...actual.requirementIds].map(x=>x.toUpperCase()).sort().join(',') !== [...planned.requirementIds].sort().join(',')) {
-      problems.push(`${planned.id}: requirement mapping differs from approved plan.`);
-    }
-    if (actual.scenario !== planned.scenario || actual.expected !== planned.expected) {
-      problems.push(`${planned.id}: scenario/expected differs from approved plan.`);
-    }
-  }
+    return { id: planned.id, name: planned.name, tests };
+  });
   for (const requirement of expectedRequirements) {
-    const matchingTopic = topics.find(t => t.id === requirement.topicId);
-    if (!matchingTopic) {
-      problems.push(`${requirement.id}: expected business topic ${requirement.topicId} is missing.`);
-      continue;
-    }
-    if (!matchingTopic.tests.some(t => t.requirementIds.includes(requirement.id))) {
+    if (!plannedTests.some(t => t.topicId === requirement.topicId && t.requirementIds.includes(requirement.id))) {
       problems.push(`${requirement.id}: no test case mapped under ${requirement.topicId}.`);
     }
   }
-  for (const extra of byId.keys()) {
-    if (!expected.some(t => t.id === extra)) problems.push(`${extra}: not in approved plan; ignored for coverage.`);
-  }
 
-  const qualityChecks = (raw.codeQualityChecks ?? []).map(c => ({
-    gateId: norm(c.gateId).toUpperCase(), name: norm(c.name), status: normalizeStatus(c.status), evidence: norm(c.evidence),
-  }));
-  if (!qualityChecks.length) problems.push('No code-quality checks submitted.');
-  for (const gate of expectedQualityGates) {
-    if (!qualityChecks.some(c => c.gateId === gate.id)) problems.push(`${gate.id}: planned code-quality check missing (${gate.name}).`);
+  // Quality gates are matched by QG ID; the plan owns their names.
+  const plannedGates = new Map((expectedQualityGates ?? []).map(g => [g.id, g]));
+  const seenGates = new Set();
+  const qualityChecks = [];
+  for (const c of Array.isArray(raw.codeQualityChecks) ? raw.codeQualityChecks : []) {
+    const gateId = norm(c?.gateId).toUpperCase();
+    if (!plannedGates.has(gateId)) { formatErrors.push(`${gateId || '(empty QG)'}: not an approved quality gate.`); continue; }
+    if (seenGates.has(gateId)) { formatErrors.push(`${gateId}: submitted more than once.`); continue; }
+    seenGates.add(gateId);
+    const check = { gateId, name: norm(c.name) || plannedGates.get(gateId).name, status: normalizeStatus(c.status), evidence: norm(c.evidence) };
+    if (check.status === 'PASS' && !check.evidence) { check.status = 'BLOCKED'; formatErrors.push(`${gateId}: PASS needs evidence.`); }
+    qualityChecks.push(check);
   }
-  for (const c of qualityChecks) {
-    if (!c.name || (c.status === 'PASS' && !c.evidence)) {
-      c.status = 'BLOCKED';
-      problems.push(`Code quality '${c.name || 'unnamed'}' has insufficient evidence.`);
+  for (const gate of plannedGates.values()) {
+    if (!seenGates.has(gate.id)) {
+      formatErrors.push(`${gate.id}: missing quality gate (${gate.name}).`);
+      qualityChecks.push({ gateId: gate.id, name: gate.name, status: 'BLOCKED', evidence: '' });
     }
   }
 
   const codeReview = raw.codeReview ?? {};
   const codeReviewStatus = normalizeStatus(codeReview.status);
   const reviewEvidence = norm(codeReview.evidence);
-  const findings = (codeReview.findings ?? []).map((f, i) => ({
-    id: norm(f.id, `CR-${i + 1}`), title: norm(f.title),
-    severity: normalizeSeverity(f.severity), evidence: norm(f.evidence),
-    fileRefs: Array.isArray(f.fileRefs) ? f.fileRefs.map(String) : [],
+  const findings = (Array.isArray(codeReview.findings) ? codeReview.findings : []).map((f, i) => ({
+    id: norm(f?.id, `CR-${i + 1}`), title: norm(f?.title),
+    severity: normalizeSeverity(f?.severity), evidence: norm(f?.evidence),
+    fileRefs: Array.isArray(f?.fileRefs) ? f.fileRefs.map(String) : [],
   }));
-  if (!reviewEvidence) problems.push('Code review has no observed evidence.');
-  if (findings.some(f => !f.title || !f.evidence)) problems.push('Some code review findings lack title/evidence.');
+  if (!reviewEvidence) formatErrors.push('Code review has no observed evidence.');
+  if (findings.some(f => !f.title || !f.evidence)) formatErrors.push('Some code review findings lack title/evidence.');
 
-  const allStatuses = [
-    ...topics.flatMap(t => t.tests.map(x => x.status)),
-    ...qualityChecks.map(x => x.status),
-    codeReviewStatus,
-  ];
+  problems.push(...formatErrors);
+  const testStatuses = topics.flatMap(t => t.tests.map(x => x.status));
+  const gateStatuses = qualityChecks.map(x => x.status);
+  const allStatuses = [...testStatuses, ...gateStatuses, codeReviewStatus];
   let status = 'PASS';
   if (allStatuses.includes('FAIL') || findings.some(f => ['CRITICAL', 'HIGH'].includes(f.severity))) status = 'FAIL';
   else if (problems.length || allStatuses.some(x => x !== 'PASS')) status = 'BLOCKED';
@@ -897,17 +935,23 @@ export function evaluateQaReport(submission, expectedTopics, expectedRequirement
     reviewedChanges: Array.isArray(raw.reviewedChanges) ? raw.reviewedChanges.map(String) : [],
     limitations: Array.isArray(raw.limitations) ? raw.limitations.map(String) : [],
     problems,
+    formatErrors,
     counts: {
-      pass: allStatuses.filter(s => s === 'PASS').length,
-      fail: allStatuses.filter(s => s === 'FAIL').length,
-      blocked: allStatuses.filter(s => s === 'BLOCKED').length,
-      notRun: allStatuses.filter(s => s === 'NOT_RUN').length,
+      tests: countStatuses(testStatuses),
+      gates: countStatuses(gateStatuses),
+      codeReview: codeReviewStatus,
       businessTopics: expected.length,
       requirements: expectedRequirements.length,
       qualityGates: expectedQualityGates.length,
-      plannedTestCases: expectedTestCases.length,
+      plannedTestCases: plannedTests.length,
     },
   };
+}
+
+/** One line, each kind counted separately: test cases, quality gates, code review. */
+export function formatQaCounts(counts) {
+  const part = c => `${c.pass} PASS / ${c.fail} FAIL / ${c.blocked} BLOCKED / ${c.notRun} NOT_RUN`;
+  return `Test cases (${counts.plannedTestCases}): ${part(counts.tests)} · Quality gates (${counts.qualityGates}): ${part(counts.gates)} · Code review: ${counts.codeReview}`;
 }
 
 export function renderQaReport(report, meta = {}) {
@@ -921,7 +965,7 @@ export function renderQaReport(report, meta = {}) {
     `- **Requirements traced:** ${report.counts.requirements}`,
     `- **Quality gates:** ${report.counts.qualityGates}`,
     `- **Planned test cases:** ${report.counts.plannedTestCases ?? 0}`, 
-    `- **Checks:** ${report.counts.pass} PASS / ${report.counts.fail} FAIL / ${report.counts.blocked} BLOCKED / ${report.counts.notRun} NOT_RUN`, '',
+    `- **Results:** ${formatQaCounts(report.counts)}`, '',
     '## Business Test Cases', '',
   ];
   for (const topic of report.topics) {
@@ -957,10 +1001,11 @@ const summaryCell = (value, max = 60) => {
 /** Compact, human-first QA result: one status table per approved TC, quality gates and
  * review findings. Shown to the user after every QA submission; the full report stays on disk. */
 export function renderQaSummary(report, { reportPath = null } = {}) {
-  const c = report.counts;
+  const c = report.counts.tests;
+  const g = report.counts.gates;
   const lines = [
     `### Forge QA ${QA_ICON[report.status] ?? ''} ${report.status}`, '',
-    `✅ ${c.pass} PASS · ❌ ${c.fail} FAIL · ⚠️ ${c.blocked} BLOCKED · ⏸️ ${c.notRun} NOT RUN${reportPath ? ` · Full report: ${reportPath}` : ''}`, '',
+    `Test cases: ✅ ${c.pass} PASS · ❌ ${c.fail} FAIL · ⚠️ ${c.blocked} BLOCKED · ⏸️ ${c.notRun} NOT RUN — Quality gates: ${g.pass}/${report.counts.qualityGates} PASS${reportPath ? ` · Full report: ${reportPath}` : ''}`, '',
     '| | Test case | Business topic | Scenario | Actual | Evidence |', '|:-:|---|---|---|---|---|',
   ];
   for (const topic of report.topics) for (const t of topic.tests) {
@@ -999,15 +1044,76 @@ export function isAllowedDiscoveryCommand(command) {
   ].some(re => re.test(cmd));
 }
 
-/** Conservative command filter; NOT an OS sandbox. npm scripts themselves can mutate. */
-export function isAllowedQaCommand(command) {
-  const cmd = String(command ?? '').trim();
-  if (!cmd || /[;&|`<>\n\r]/.test(cmd) || /\$\s*\(|\$\{|\\\n/.test(cmd)) return false;
-  return [
-    /^git\s+(?:status(?:\s+--short)?|diff(?:\s+--(?:check|stat|name-only))?|log\s+-1\s+--oneline)(?:\s+--\s+[\w./*-]+)?$/,
-    /^(?:go\s+(?:test|vet)\s+\.\/\.\.\.|cargo\s+(?:test|clippy)(?:\s+--all-targets)?|flutter\s+test(?:\s+--coverage)?|dart\s+analyze|pytest(?:\s+-q)?|python\s+-m\s+pytest(?:\s+-q)?|bun\s+test(?:\s+--coverage)?|dotnet\s+test)$/,
-    /^(?:npm|pnpm|yarn|bun)\s+(?:test|run\s+(?:test|lint|typecheck|check|build))$/,
-  ].some(re => re.test(cmd));
+/** Split a one-line shell command into `&&`/`||`/`;` steps and `|` stages, honoring quotes.
+ * Returns null for syntax Forge does not vet: substitutions, file redirects, background jobs. */
+function splitShellCommand(command) {
+  if (/[`]|\$\s*\(|\$\{|[<>]\(/.test(command)) return null;
+  // Harmless redirections: merge stderr, discard output.
+  const cmd = command.replace(/\s*(?:[12]?>\s*\/dev\/null|2>&1)(?=\s|$|[;&|])/g, '');
+  const segments = [];
+  let current = '', quote = null, piped = false;
+  const push = nextPiped => {
+    const text = current.trim();
+    if (!text) return false;
+    segments.push({ text, piped });
+    current = ''; piped = nextPiped;
+    return true;
+  };
+  for (let i = 0; i < cmd.length; i++) {
+    const ch = cmd[i];
+    if (quote) { if (ch === quote) quote = null; current += ch; continue; }
+    if (ch === "'" || ch === '"') { quote = ch; current += ch; continue; }
+    if (ch === '<' || ch === '>') return null;
+    if ((ch === '&' || ch === '|') && cmd[i + 1] === ch) { if (!push(false)) return null; i++; continue; }
+    if (ch === ';') { if (!push(false)) return null; continue; }
+    if (ch === '|') { if (!push(true)) return null; continue; }
+    if (ch === '&') return null;
+    current += ch;
+  }
+  return quote || !push(false) ? null : segments;
+}
+
+const ENV_PREFIX = /^(?:[A-Za-z_][A-Za-z0-9_]*=[^\s'"]*\s+)+/;
+// Read-only inspection, including `git -C <dir>` reads for monorepos.
+const QA_READ_ONLY = [
+  /^(?:cd|pwd|ls|cat|head|tail|wc|stat|file|cmp|diff|jq|rg|grep|egrep|tree|which|echo|printf|true|basename|dirname|realpath)(?:\s|$)/,
+  /^find(?:\s|$)(?!.*\s-(?:delete|exec|execdir|ok|okdir|fprint0?|fprintf|fls)\b)/,
+  /^git(?:\s+-C\s+\S+)*\s+(?:status|diff|log|show|ls-files|rev-parse|blame|grep)(?:\s|$)(?!.*--output)/,
+];
+// Test, lint and typecheck runners with any arguments except mutating flags.
+const QA_RUNNERS = [
+  /^go\s+(?:test|vet)(?:\s|$)/, /^gofmt(?:\s+-[lds]+)+(?:\s|$)/,
+  /^cargo\s+(?:test|clippy|check|fmt\s+--check)(?:\s|$)/,
+  /^(?:python3?\s+-m\s+)?(?:pytest|unittest|mypy|ruff\s+check|ruff\s+format\s+--check|black\s+--check|flake8|pylint)(?:\s|$)/,
+  /^(?:npm|pnpm|yarn|bun)\s+(?:test|t|run\s+(?:test|lint|typecheck|type-check|check)[\w:-]*)(?:\s|$)/,
+  /^(?:(?:npx|bunx|pnpm\s+(?:exec|dlx)|yarn\s+(?:exec|dlx))\s+)?(?:vitest(?:\s+run)?|jest|mocha|ava|playwright\s+test|tsc|eslint|prettier\s+--check|biome\s+(?:check|lint|ci)|stylelint)(?:\s|$)/,
+  /^node(?:\s+--[\w-]+(?:=\S+)?)*\s+--test(?:\s|$)/,
+  /^(?:bun\s+test|deno\s+(?:test|lint|check|fmt\s+--check)|flutter\s+(?:test|analyze)|dart\s+(?:test|analyze|format\s+--output=none))(?:\s|$)/,
+  /^(?:swift\s+test|dotnet\s+test|ctest|rspec|bundle\s+exec\s+rspec|(?:vendor\/bin\/)?phpunit|mvn(?:\s+-\S+)*\s+(?:test|verify)|(?:\.\/)?gradlew?\s+(?:test|check)|make\s+(?:test|check|lint))(?:\s|$)/,
+];
+const MUTATING_FLAGS = /\s(?:--fix|--write|-w|--update-?snapshots?|--updateSnapshot|-u|-o|--output(?!=none(?:\s|$))(?:-file)?|--outfile)(?=[\s=]|$)/;
+const QA_PIPE_FILTERS = /^(?:head|tail|grep|egrep|rg|wc|sort|uniq|cut|tr|jq|cat|column|sed\s+-n)(?:\s|$)/;
+function isQaStep(text) {
+  const step = text.replace(ENV_PREFIX, '');
+  if (QA_READ_ONLY.some(re => re.test(step))) return true;
+  if (!QA_RUNNERS.some(re => re.test(step)) || MUTATING_FLAGS.test(step)) return false;
+  return !/(?:^|\s)tsc(?:\s|$)/.test(step) || /\s--noEmit\b/.test(step);
+}
+
+/** QA and delivery shell policy; NOT an OS sandbox (test scripts themselves can mutate).
+ * Allows the commands written in the approved plan verbatim, read-only inspection, and common
+ * test/lint/typecheck runners with arguments. Steps may be chained with && || ; and piped into
+ * read-only filters (head, tail, grep…). Rejects substitutions, file redirects, mutating flags,
+ * multi-line scripts and Git writes. */
+export function isAllowedQaCommand(command, approvedCommands = []) {
+  const raw = String(command ?? '').trim();
+  if (!raw || /[\r\n]/.test(raw) || isProhibitedGitCommand(raw)) return false;
+  const cmd = normalizeCommand(raw);
+  const approved = new Set((Array.isArray(approvedCommands) ? approvedCommands : []).map(normalizeCommand));
+  if (approved.has(cmd)) return true;
+  const segments = splitShellCommand(cmd);
+  return segments !== null && segments.every(({ text, piped }) => approved.has(normalizeCommand(text)) ||
+    (piped ? QA_PIPE_FILTERS.test(text) && !/\s-o\b/.test(text) : isQaStep(text)));
 }
 
 export function isAutoEligible(text, source, active, hasImages = false) {

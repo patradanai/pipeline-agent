@@ -97,6 +97,42 @@ checks that made the old gate rigorous.
 - Claude Code: fix hook output over ~8 KB arriving as invalid JSON on macOS.
   The hook exited before stdout to a pipe was flushed; it now waits for the
   write to finish.
+- Workflow review fixes (both adapters unless noted):
+  - QA command policy: QA runs the commands written in the approved plan's
+    Verification, TC and QG lines verbatim, read-only inspection (including
+    `git -C <dir>`), and test/lint/typecheck runners with arguments; steps may
+    be chained and piped into read-only filters. `npm run build` is no longer
+    allowed unless the plan names it. Redirects, installs, substitutions,
+    multi-line scripts and mutating flags stay refused.
+  - QA submissions report each TC by ID; Forge fills BIZ, REQ, scenario and
+    expected from the plan. Format errors (missing, unplanned or duplicate IDs,
+    PASS without evidence) are returned for correction up to twice per round
+    instead of being recorded as BLOCKED. Summaries count test cases, quality
+    gates and the code review separately.
+  - Execution ends with the new `forge_execution_done` tool. A turn that ends
+    without it gets two reminders, then pauses for the user; QA never starts on
+    a question or a progress note. OMP: the steering dialog adds **Reply**
+    (approval kept) and `/forge resume current` continues an interrupted
+    execution. Claude Code: `steer:` / `note:` prompts while an approved plan
+    runs; other prompts are blocked with a hint.
+  - Gate skills: verified skill text is inlined into gate instructions (Claude
+    Code could not load `disable-model-invocation` skills by name). New
+    `forge-audience: lead|specialist|all` frontmatter; the bundled gate skills
+    are `lead` and no longer reach `forge-code-reviewer` or
+    `forge-plan-critic`. Bundled skills rewritten as short checklists;
+    `install.sh` upgrades older bundled copies (backup kept).
+  - Git guard also blocks `git clean`, `git restore`, `git rm`, `git mv` and
+    `hub` git commands.
+  - Plan contract ignores headings and rows inside code fences and rejects
+    duplicate BIZ/REQ/QG IDs.
+  - OMP: a gate-model switch that outlives its gate (cancel, steering) no
+    longer dispatches the old gate's turn; orphaned-workflow recovery pauses
+    subagent writes and Git commands too.
+  - Claude Code: the state lock is never taken from a live owner; corrupt
+    session state fails closed; only Forge's own MCP server tools are
+    recognized.
+  - `@` alone is rejected as a gate model; commit subjects reject control
+    characters.
 
 ## Removed
 

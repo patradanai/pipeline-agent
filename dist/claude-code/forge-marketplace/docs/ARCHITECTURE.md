@@ -75,8 +75,13 @@ from, so an outdated confirmation cannot overwrite newer state.
   plugin agents report `agent_type` as `forge:<name>`; the subagent tool is
   `Agent` (older builds: `Task`, also handled); a successful `ExitPlanMode`
   means the user approved.
-* Not ported: gate skills (`/forge skill`), `/forge resume` session picker,
+* Bundled gate skills are inlined into each gate instruction (Claude cannot invoke
+  them by name). Not ported: custom gate-skill management (`/forge skill`), `/forge resume` session picker,
   OMP branch recovery. Claude Code keeps one state file per session.
+* While an approved plan runs, typed prompts must start with `steer:` or `note:`;
+  prompts that start with a host tag (`<task-notification>…`) pass through. Check
+  that Claude Code's background-agent notifications take that form (or do not fire
+  `UserPromptSubmit`); otherwise they are blocked like any untagged prompt.
 * "Approve and clear context": a new session inherits `EXECUTING` only if
   `SessionStart(source=clear)` arrives within 2 minutes in the same `cwd`;
   if approval was not observed, Forge asks for `/forge approve`.

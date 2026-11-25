@@ -26,11 +26,15 @@ Inspect the plan, scope, tests, risks, and rollback notes. Approve only when you
 | Phase | Forge behavior | Your role |
 |---|---|---|
 | Plan | The main agent explores the repository read-only and writes an implementation and verification plan. | Answer preference questions; review the complete plan and approve or refine it. |
-| Execute | The main agent implements the approved plan. | Inspect changes; add a prompt in OMP to open the steering choice if scope changes. |
+| Execute | The main agent implements the approved plan and calls `forge_execution_done` with the changed files, checks run, unfinished work and deviations. Only that call starts QA: a turn that ends without it gets two reminders, then Forge pauses and tells you. | Inspect changes; in OMP, type a prompt to reply (approval kept) or steer (re-plan). After an interrupted or failed turn, `/forge resume current` continues execution. |
 | QA | The main agent runs the planned checks and verifies every test case while `forge-code-reviewer` independently reviews the diff and reports `CR-001 [HIGH] file:line — evidence — fix` lines. Every CRITICAL/HIGH CR-id must appear in the QA submission, either still CRITICAL/HIGH (the gate FAILs) or with evidence starting `Disputed:` plus counter-evidence (it stays visible in the QA report); otherwise the submission is rejected. QA cannot edit code. | Read the QA summary; on FAIL/BLOCKED decide whether to plan a fix, rerun QA, or wait. |
 | Delivery | After QA PASS, Forge prepares delivery and a copy-ready commit message. | Review the diff and commit manually. |
 
-After every QA submission, Forge shows a QA summary: a header `Forge QA ✅ PASS / ❌ FAIL / ⚠️ BLOCKED` with counts and the full report path; one row per approved test case (status ✅ ❌ ⚠️ ⏸️, test case, business topic, scenario, actual, evidence); a quality-gate table; code-review findings with severity icons (🔴 CRITICAL 🟠 HIGH 🟡 MEDIUM ⚪ LOW); and gate blockers. OMP displays it in the TUI (it is not sent to the model); in Claude Code the agent is told to print it verbatim.
+**QA commands.** QA may run the commands written in the approved plan's Verification, test case and quality-gate lines verbatim (you approved them), read-only inspection (`ls`, `cat`, `rg`, `git status/diff/log/show`, including `git -C <dir>`), and test, lint and typecheck runners with arguments (`go test ./pkg -run X`, `node --test`, `npx vitest run`, `npx tsc --noEmit`, `pytest tests/x.py`, `flutter test <file>`, `make test`, …). Steps may be chained with `&&`, `||` or `;`, and piped into `head`, `tail`, `grep`, `wc` and similar filters. File redirects, installs, command substitution, multi-line scripts, mutating flags (`--fix`, `--write`, `-u`, `-o`) and Git writes are refused. A build that writes files (for example `npm run build`) runs only when the approved plan names it.
+
+**QA submissions.** The agent reports each approved TC by ID with its status, actual result and evidence; Forge fills in the BIZ, REQ, scenario and expected text from the plan. Missing, unplanned or duplicate IDs, PASS without evidence and similar format errors are returned for correction without recording anything, up to two times per QA round; after that Forge records the submission as it is.
+
+After every QA submission, Forge shows a QA summary: a header `Forge QA ✅ PASS / ❌ FAIL / ⚠️ BLOCKED` with separate counts for test cases and quality gates and the full report path; one row per approved test case (status ✅ ❌ ⚠️ ⏸️, test case, business topic, scenario, actual, evidence); a quality-gate table; code-review findings with severity icons (🔴 CRITICAL 🟠 HIGH 🟡 MEDIUM ⚪ LOW); and gate blockers. OMP displays it in the TUI (it is not sent to the model); in Claude Code the agent is told to print it verbatim.
 
 A QA `FAIL` or `BLOCKED` does not start a fix on its own. Forge waits for your decision, and the footer shows `QA failed · your decision` or `QA blocked · your decision`. While it waits, Forge blocks plan writes, plan proposals and QA resubmission. A `BLOCKED` or `NOT_RUN` result is an evidence gap, not proof of a code defect.
 
@@ -46,6 +50,7 @@ After QA PASS, if the working tree changes before delivery, use `/forge qa` to s
 While an OMP Forge workflow is active, a normal interactive prompt (not a slash command) opens a confirmation dialog:
 
 - **Steer** records the prompt as a requirement amendment and re-enters the gate that must absorb it.
+- **Reply** (only while an approved plan runs, in `EXECUTE` or `QA`) sends the prompt to the agent as a clarification. Approval and scope stay unchanged; use it to answer a question or to say "continue" after Forge paused execution.
 - **Cancel** leaves workflow state unchanged, keeps the current work running, and returns the prompt to the editor.
 
 | Current phase | Steer result |
@@ -55,7 +60,7 @@ While an OMP Forge workflow is active, a normal interactive prompt (not a slash 
 
 Forge reports the transition as `Forge steering #N · <from> → <to> · prompt "…" from user`; every steer re-enters `PLAN`. All steering directives remain in workflow state and in later Planning and Rework instructions; older requirements are not discarded after 20 prompts. Longer histories use more context. `/forge status` shows the steering count.
 
-The dialog is OMP-specific. The Claude Code adapter does not currently provide this prompt-steering flow. If the OMP dialog is cancelled, the prompt returns to the editor. Pasted images are not retained on cancellation; attach them again if you resend the prompt.
+The dialog is OMP-specific. In Claude Code, while an approved plan runs, start the prompt with `steer:` to re-plan (approval revoked) or `note:` to send a clarification (approval kept); other prompts are blocked with this hint. If the OMP dialog is cancelled, the prompt returns to the editor. Pasted images are not retained on cancellation; attach them again if you resend the prompt.
 
 If the session, branch, gate, or approval changes while the steering dialog is open, Forge rejects the stale choice without applying the prompt. Submit the prompt again in the intended workflow. Late task reports and delayed compaction callbacks cannot authorize work for a replacement workflow or a new QA round.
 
@@ -74,6 +79,7 @@ Run these in the main OMP session:
 | `/forge report` | Show the latest QA report path. |
 | `/forge delivery` | Show or prepare the delivery artifact after QA PASS. |
 | `/forge resume` | Choose a saved Forge session to resume. |
+| `/forge resume current` | Continue the current workflow; in `EXECUTE` it resends the execution instruction after an interrupted, failed or paused turn (approval kept). |
 | `/forge recover` | Review a detected checkpoint inconsistency. |
 | `/forge agents` | Show the fixed Forge agent mapping. |
 | `/forge planreview on\|off` | Turn the optional plan critic on or off (default OFF, saved in Forge config, applies to new workflows). When ON, the main agent must run `forge-plan-critic` once on the written plan and cite every CRITICAL/HIGH PC-id in the plan before Forge accepts the proposal. |

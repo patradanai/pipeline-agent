@@ -48,9 +48,15 @@ Flow:
    written plan, and ExitPlanMode is denied until it reported and every CRITICAL/HIGH PC-id is cited in the plan.
 2. You approve in Claude Code's native plan prompt. Forge moves to EXECUTE. (If context was cleared and Forge
    did not see the approval, type `/forge approve`.)
-3. Claude implements the approved plan itself. When Claude tries to stop, Forge starts QA: Claude runs the plan's
-   checks and verifies every TC while `forge:forge-code-reviewer` reviews the diff (`CR-001 [HIGH] file:line — evidence — fix`),
-   then calls `forge_qa_submit`. Every CRITICAL/HIGH CR-id must be in `codeReview.findings`, still CRITICAL/HIGH (gate
+3. Claude implements the approved plan itself, then calls **`forge_execution_done`** (summary, changed files, checks
+   actually run, unfinished work, deviations). QA starts only when the turn ends after that call. If Claude ends a turn
+   without it, Forge reminds it to finish (twice), then pauses and tells you: reply `note: <text>` to let it continue,
+   or run `/forge-qa` to start QA now. In QA Claude runs the plan's checks (commands written in the approved plan's
+   Verification / Test Cases / Quality Gates may run verbatim) and verifies every TC while `forge:forge-code-reviewer`
+   reviews the diff (`CR-001 [HIGH] file:line — evidence — fix`), then calls `forge_qa_submit` with, per TC, only
+   `testId`, `status`, `actual`, `evidence`, `severity` (Forge fills BIZ/REQ/scenario/expected from the plan). A
+   submission with format errors (missing, unplanned or duplicate IDs, PASS without evidence) is not recorded and comes
+   back for correction, at most twice per QA round. Every CRITICAL/HIGH CR-id must be in `codeReview.findings`, still CRITICAL/HIGH (gate
    FAILs) or with evidence starting `Disputed:` plus counter-evidence; otherwise the submission is rejected. After each
    submission Claude is told to print Forge's QA summary verbatim: `Forge QA ✅ PASS / ❌ FAIL / ⚠️ BLOCKED` with counts
    and the report path, one row per TC (✅ ❌ ⚠️ ⏸️), quality gates, review findings (🔴 🟠 🟡 ⚪) and gate blockers.
@@ -60,6 +66,15 @@ Flow:
    BLOCKED, or `/forge-off`.
 4. QA PASS → Claude calls `forge_delivery_submit` → copy-ready commit message. You commit manually.
 
+Prompts while an approved plan runs (EXECUTE or QA): start the prompt with
+* `steer: <text>` to change the requirement — Forge re-plans and revokes the approval (the revised plan needs your
+  approval again);
+* `note: <text>` (or `reply: <text>`) to send a clarification or answer — the approval and approved scope stay;
+* anything else is blocked with this explanation. Slash commands (`/forge-off`, `/forge-qa`, …) always work.
+
+Gate skills (`forge-plan-gate`, `forge-execute-gate`, `forge-qa-gate`) are inlined into each gate instruction; Claude
+cannot invoke them by name.
+
 Guards (whenever a workflow exists): no agent git writes / repo publishing / `.git` writes; read-only before approval
 and during QA/delivery; `forge-code-reviewer` read-only and allowed only in QA; `forge-plan-critic` read-only.
 
@@ -67,7 +82,9 @@ and during QA/delivery; `forge-code-reviewer` read-only and allowed only in QA; 
 
 `${CLAUDE_PLUGIN_DATA}` (Claude Code's persistent plugin data dir):
 `sessions/<session_id>.json` (state), `reports/<session>/<slug>/` (plan, QA report, delivery, commit message),
-`config.json` (`trace`, `planReview`). Nothing is written into your project by Forge.
+`config.json` (`trace`, `planReview`). Nothing is written into your project by Forge. If the session state file is
+not valid JSON, Forge fails closed: every non-read-only tool is denied with the file path until you run `/forge-off`
+(or fix/delete the file).
 
 ## Models
 

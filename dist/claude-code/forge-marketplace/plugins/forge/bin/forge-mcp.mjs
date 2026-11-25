@@ -14,6 +14,14 @@ const strList = { type: 'array', items: str };
 
 export const TOOLS = [
   {
+    name: 'forge_execution_done',
+    description: 'Call once when every step of the approved Forge plan is done or blocked: changed files, checks actually run with their exact results, unfinished work and deviations. Forge starts QA when your turn ends; ending a turn without this call does not start QA. Only valid during approved Forge execution.',
+    inputSchema: {
+      type: 'object', additionalProperties: false, required: ['summary', 'changedFiles', 'checksRun'],
+      properties: { summary: str, changedFiles: strList, checksRun: strList, unfinished: strList, deviations: strList },
+    },
+  },
+  {
     name: 'forge_qa_scope',
     description: 'Read-only Git HEAD/status/diff file inventory for approved QA. Does not edit, stage or commit files. A clean diff is not an automatic PASS.',
     inputSchema: { type: 'object', additionalProperties: false, properties: {} },
@@ -26,7 +34,7 @@ export const TOOLS = [
       properties: {
         topicResults: { type: 'array', items: { type: 'object', required: ['topicId', 'tests'], properties: {
           topicId: str,
-          tests: { type: 'array', items: { type: 'object', required: ['testId', 'requirementIds', 'scenario', 'expected', 'actual', 'status', 'evidence', 'severity'], properties: {
+          tests: { type: 'array', items: { type: 'object', required: ['testId', 'actual', 'status', 'evidence', 'severity'], properties: {
             testId: str, requirementIds: strList, scenario: str, expected: str, actual: str, status: qaStatus, evidence: str, severity, fileRefs: strList,
           } } },
         } } },

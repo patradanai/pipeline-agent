@@ -138,7 +138,7 @@ OMP commands use `/forge <subcommand>`; Claude Code also exposes dedicated `/for
 | Retry QA | `/forge qa` | `/forge-qa` |
 | Plan a fix after QA FAIL/BLOCKED | `/forge rework` | `/forge-rework` |
 | Delivery/report | `/forge delivery`, `/forge report` | `/forge-delivery`, `/forge-report` |
-| Resume/recover | `/forge resume`, `/forge recover` | `/forge-resume` |
+| Resume/recover | `/forge resume`, `/forge resume current` (continue execution), `/forge recover` | `/forge-resume` |
 | Cancel workflow | `/forge off` | `/forge-off` |
 | Optional plan critic (new workflows) | `/forge planreview on\|off` | `/forge-planreview on\|off` |
 | Main-session model per gate | `/forge model`, `/forge model <gate> <@role\|provider/id\|keep>` | Not available |

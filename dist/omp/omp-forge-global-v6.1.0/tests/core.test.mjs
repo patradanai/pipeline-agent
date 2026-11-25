@@ -113,34 +113,41 @@ test('QA gate blocks missing business topic and unsupported PASS claims', () => 
   assert.equal(result.status,'BLOCKED');
   assert.equal(result.topics[0].tests[0].status,'BLOCKED');
   assert.equal(result.topics[1].tests[0].status,'BLOCKED');
-  assert.ok(result.problems.some(p=>p.includes('no business test cases')));
+  assert.ok(result.problems.some(p=>p.includes('TC-002: missing')));
+  assert.ok(result.formatErrors.some(p=>p.includes('TC-001: PASS needs evidence')));
 });
 
 test('QA gate fails on failing business case or high code review finding', () => {
   const topics = extractBusinessTopics(plan);
   const fail = structuredClone(goodSubmission);
   fail.topicResults[1].tests[0].status='FAIL';
-  assert.equal(evaluateQaReport(fail,topics,extractRequirementTraceability(plan),extractCodeQualityGates(plan)).status,'FAIL');
+  assert.equal(evaluateQaReport(fail,topics,extractRequirementTraceability(plan),extractCodeQualityGates(plan),extractBusinessTestCases(plan)).status,'FAIL');
   const high = structuredClone(goodSubmission);
   high.codeReview.findings.push({id:'CR-001',title:'SQL injection',severity:'HIGH',evidence:'unsafe interpolation'});
-  assert.equal(evaluateQaReport(high,topics,extractRequirementTraceability(plan),extractCodeQualityGates(plan)).status,'FAIL');
+  assert.equal(evaluateQaReport(high,topics,extractRequirementTraceability(plan),extractCodeQualityGates(plan),extractBusinessTestCases(plan)).status,'FAIL');
 });
 
 test('QA gate blocks when plan has no business topic IDs', () => {
   assert.equal(evaluateQaReport(goodSubmission, [], []).status,'BLOCKED');
 });
 
-test('QA command allowlist rejects mutating shell and allows tests', () => {
-  for (const cmd of ['go test ./...', 'go vet ./...', 'git diff --check','npm run lint','pnpm test','flutter test']) assert.equal(isAllowedQaCommand(cmd),true,cmd);
-  for (const cmd of ['rm -rf .','go test ./... && rm -rf .','git diff; echo x','npm run deploy','python -c "print(1)"','git diff > out.txt']) assert.equal(isAllowedQaCommand(cmd),false,cmd);
+test('QA command policy allows read-only chains and test runners with arguments, rejects mutation', () => {
+  for (const cmd of ['go test ./...', 'go vet ./...', 'git diff --check','npm run lint','pnpm test','flutter test',
+    'git diff; echo x', 'go test ./internal/x -run \'A|B\' -count=1', 'npm test 2>&1 | tail -20', 'git -C sub status --short',
+    'cd apps/api && go test ./...', 'npx tsc --noEmit', 'node --experimental-strip-types --test dist/a.test.mjs']) assert.equal(isAllowedQaCommand(cmd),true,cmd);
+  for (const cmd of ['rm -rf .','go test ./... && rm -rf .','npm run deploy','python -c "print(1)"','git diff > out.txt',
+    'npm run build', 'npx eslint --fix .', 'npx tsc', 'echo $(rm -rf x)', 'go test ./...\nrm -rf x', 'go test ./... | tee out.txt', 'git clean -fd']) assert.equal(isAllowedQaCommand(cmd),false,cmd);
+  assert.equal(isAllowedQaCommand('npm run build', ['npm run build']), true, 'a command written in the approved plan runs verbatim');
 });
 
-test('QA gate blocks untested mapped requirement even if other checks pass', () => {
+test('QA uses the plan mapping and text for each TC, whatever the submission claims', () => {
   const partial = structuredClone(goodSubmission);
   partial.topicResults[1].tests[0].requirementIds=['REQ-001'];
+  partial.topicResults[1].tests[0].scenario='Something else';
   const report=evaluateQaReport(partial,extractBusinessTopics(plan),extractRequirementTraceability(plan),extractCodeQualityGates(plan),extractBusinessTestCases(plan));
-  assert.equal(report.status,'BLOCKED');
-  assert.ok(report.problems.some(p=>p.includes('REQ-002: no test case mapped')));
+  assert.equal(report.status,'PASS');
+  assert.deepEqual(report.topics[1].tests[0].requirementIds,['REQ-002']);
+  assert.equal(report.topics[1].tests[0].scenario,'Refund once');
 });
 
 test('QA gate blocks a missing planned code quality gate', () => {
@@ -237,16 +244,16 @@ test('v5 blocks QA when TC-999 replaces planned TC-001', () => {
   input.topicResults[0].tests[0].testId='TC-999';
   const report=evaluateQaReport(input,extractBusinessTopics(plan),extractRequirementTraceability(plan),extractCodeQualityGates(plan),extractBusinessTestCases(plan));
   assert.equal(report.status,'BLOCKED');
-  assert.ok(report.problems.some(x=>x.includes('TC-001: required planned test case')));
-  assert.ok(report.problems.some(x=>x.includes('TC-999: unplanned test')));
+  assert.ok(report.formatErrors.some(x=>x.includes('TC-001: missing')));
+  assert.ok(report.formatErrors.some(x=>x.includes('TC-999: not an approved test case')));
 });
 
-test('v5 blocks QA if planned test mapping or expected scenario changes', () => {
+test('v5 accepts a submission that omits the plan-owned TC fields', () => {
   const input=structuredClone(goodSubmission);
-  input.topicResults[0].tests[0].scenario='Change something else';
+  for (const group of input.topicResults) for (const t of group.tests) { delete t.scenario; delete t.expected; delete t.requirementIds; }
   const report=evaluateQaReport(input,extractBusinessTopics(plan),extractRequirementTraceability(plan),extractCodeQualityGates(plan),extractBusinessTestCases(plan));
-  assert.equal(report.status,'BLOCKED');
-  assert.ok(report.problems.some(x=>x.includes('scenario/expected differs')));
+  assert.equal(report.status,'PASS');
+  assert.equal(report.topics[0].tests[0].expected,'Accepted');
 });
 
 test('v5 blocks duplicate submitted planned tests', () => {
@@ -254,7 +261,7 @@ test('v5 blocks duplicate submitted planned tests', () => {
   input.topicResults[1].tests.push(structuredClone(input.topicResults[1].tests[0]));
   const report=evaluateQaReport(input,extractBusinessTopics(plan),extractRequirementTraceability(plan),extractCodeQualityGates(plan),extractBusinessTestCases(plan));
   assert.equal(report.status,'BLOCKED');
-  assert.ok(report.problems.some(x=>x.includes('duplicate submitted')));
+  assert.ok(report.formatErrors.some(x=>x.includes('TC-002: submitted more than once')));
 });
 
 test('v5 plan contract detects test linked to another business topic', () => {
