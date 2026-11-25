@@ -8,7 +8,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -183,6 +183,12 @@ function translate(hookEvent, input) {
   if ((base.tool === 'write' || base.tool === 'edit') && actor.kind === 'main' && isHostPlanFile(base.input.file_path, input.cwd, input.permission_mode)) {
     base.tool = 'plan.write'; base.planFile = resolve(base.input.file_path);
   }
+  if (base.tool === 'plan.submit') {
+    // Claude Code injects the plan-mode file path; PostToolUse carries the text the user approved.
+    const file = base.input.planFilePath ?? input.tool_response?.filePath;
+    if (isHostPlanFile(file, input.cwd, 'plan')) base.planFile = resolve(file);
+    if (typeof input.tool_response?.plan === 'string') base.approvedPlan = input.tool_response.plan;
+  }
   if (base.tool === 'coord') base.inputText = allStrings(input.tool_input).join('\n');
   switch (hookEvent) {
     case 'PreToolUse': return { type: 'tool.pre', ...base };
@@ -313,7 +319,13 @@ export async function main(hookEvent, raw) {
       deps: {
         snapshotWorkingTree: workspace.snapshotWorkingTree,
         inspectWorkspaceScope: workspace.inspectWorkspaceScope,
-        savePlan: (s, content) => save(`plan-${createHash('sha256').update(content).digest('hex').slice(0, 12)}.md`, content),
+        // Forge's own plan file, named like OMP's (<slug>-plan.md, <slug>-rework-<n>-plan.md).
+        savePlan: (s, content) => {
+          const p = join(DATA, 'plans', basename(core.forgePlanPath(s)).replace(/[^A-Za-z0-9._-]/g, '_'));
+          mkdirSync(dirname(p), { recursive: true, mode: 0o700 });
+          writeFileSync(p, content, { mode: 0o600 });
+          return p;
+        },
         saveQaReport: (s, markdown, json) => { save('qa-report.json', JSON.stringify(json, null, 2) + '\n'); return save('qa-report.md', markdown); },
         saveDelivery: (s, markdown, commitMessage) => ({ deliveryPath: save('delivery.md', markdown), commitMessagePath: save('commit-message.txt', commitMessage) }),
         listWorkflows: () => listProjectWorkflows(input.cwd, sid),

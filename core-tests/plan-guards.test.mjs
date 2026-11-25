@@ -54,14 +54,15 @@ test('only CRITICAL/HIGH finding lines with a CR/PC id count as high findings', 
 function qaHarness() {
   const engine = createEngine({ platform: 'claude-code', profile: { agentRef: n => `forge:${n}` }, deps: {
     snapshotWorkingTree: () => ({ available: true, hash: 'h', root: '/r' }), savePlan: () => '/data/plan.md', saveQaReport: () => '/data/qa.md',
+    readPlanFile: p => (p === '/home/u/.claude/plans/p.md' ? PLAN : ''),
   } });
   let state = null;
   const h = ev => { const r = engine.handle(state, ev); state = r.state; return r.out; };
   const main = { kind: 'main' };
   const pre = (tool, input) => h({ type: 'tool.pre', tool, input, actor: main, permissionMode: 'plan' });
   h({ type: 'command', text: 'Build a booking system' });
-  pre('plan.submit', { plan: PLAN });
-  h({ type: 'tool.post', tool: 'plan.submit', input: { plan: PLAN }, actor: main });
+  h({ type: 'tool.pre', tool: 'plan.submit', input: {}, planFile: '/home/u/.claude/plans/p.md', actor: main, permissionMode: 'plan' });
+  h({ type: 'tool.post', tool: 'plan.submit', input: {}, planFile: '/home/u/.claude/plans/p.md', actor: main });
   pre('write', { file_path: 'src/a.ts' });
   h({ type: 'tool.post', tool: 'forge.execution_done', input: EXECUTION_DONE, actor: main });
   h({ type: 'turn.end' });

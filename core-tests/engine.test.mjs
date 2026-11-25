@@ -6,25 +6,34 @@ import { PLAN, SUBMISSION, FAIL_SUBMISSION, MINIMAL_SUBMISSION, EXECUTION_DONE }
 import { approvedExecutionState, assertDeliverySubmittable, qaReportTransition, reworkTransition, steerTransition, MAX_EXECUTION_REMINDERS, MAX_QA_RESUBMITS } from '../core/transitions.mjs';
 
 const REVIEWER = 'forge-code-reviewer';
+const HOST_PLAN = '/home/u/.claude/plans/forge-test.md';
 
 function harness(config = {}, initial = null, extraDeps = {}) {
   const saved = {};
+  const files = {};
   const engine = createEngine({ platform: 'claude-code', config, profile: { agentRef: n => `forge:${n}` }, deps: {
     snapshotWorkingTree: () => ({ available: true, hash: 'h', root: '/r' }),
     inspectWorkspaceScope: () => ({ available: true, files: ['a.ts'] }),
     savePlan: (_s, c) => { saved.plan = c; return '/data/plan.md'; },
     saveQaReport: (_s, md) => { saved.qa = md; return '/data/qa.md'; },
     saveDelivery: (_s, md, msg) => { saved.delivery = msg; return { deliveryPath: '/data/d.md', commitMessagePath: '/data/c.txt' }; },
+    readPlanFile: p => files[p] ?? '',
     ...extraDeps,
   } });
   let state = initial;
   const h = ev => { const r = engine.handle(state, ev); state = r.state; return r.out; };
   const main = { kind: 'main', agent: null };
+  // Like Claude Code: `{ plan }` means the plan-mode file holds that text; PostToolUse carries the approved text.
+  const planEvent = (tool, input, approved) => {
+    if (tool !== 'plan.submit' || typeof input.plan !== 'string') return {};
+    files[HOST_PLAN] = input.plan;
+    return { planFile: HOST_PLAN, ...(approved ? { approvedPlan: input.plan } : {}) };
+  };
   return {
-    saved, get state() { return state; },
+    saved, files, get state() { return state; },
     cmd: text => h({ type: 'command', text }),
-    pre: (tool, input = {}, extra = {}) => h({ type: 'tool.pre', tool, input, actor: main, permissionMode: 'plan', ...extra }),
-    post: (tool, input = {}, output = '', extra = {}) => h({ type: 'tool.post', tool, input, output, actor: main, ...extra }),
+    pre: (tool, input = {}, extra = {}) => h({ type: 'tool.pre', tool, input, actor: main, permissionMode: 'plan', ...planEvent(tool, input, false), ...extra }),
+    post: (tool, input = {}, output = '', extra = {}) => h({ type: 'tool.post', tool, input, output, actor: main, ...planEvent(tool, input, true), ...extra }),
     fail: (tool, input = {}) => h({ type: 'tool.fail', tool, input, actor: main }),
     stop: () => h({ type: 'turn.end' }),
     agent(name, report = 'Report: [LOW][fact] fine (file.ts:1)') {
@@ -421,6 +430,24 @@ test('legacy v6.0 requirement-gate state with requirementStep restores as PLAN w
   assert.equal(x.pre('write', { file_path: 'src/a.ts' }).decision, 'deny');
   assert.equal(x.pre('plan.submit', { plan: PLAN }).decision, undefined);
   assert.equal(x.state.planValid, true);
+});
+
+test('the plan is read only from the plan file: inline text is refused and drafts are mirrored to the Forge copy', () => {
+  const files = {};
+  const copies = [];
+  const engine = createEngine({ platform: 'claude-code', deps: { readPlanFile: p => files[p] ?? '', savePlan: (_s, c) => { copies.push(c); return '/data/plans/forge-x-plan.md'; } } });
+  let st = null; const h = ev => { const r = engine.handle(st, ev); st = r.state; return r.out; };
+  const main = { kind: 'main' };
+  h({ type: 'command', text: 'Build a booking system' });
+  const inline = h({ type: 'tool.pre', tool: 'plan.submit', input: { plan: PLAN }, actor: main, permissionMode: 'plan' });
+  assert.equal(inline.decision, 'deny');
+  assert.match(inline.reason, /only from the plan file/);
+  files[HOST_PLAN] = PLAN;
+  h({ type: 'tool.pre', tool: 'plan.write', input: { file_path: HOST_PLAN }, planFile: HOST_PLAN, actor: main });
+  h({ type: 'tool.post', tool: 'plan.write', input: { file_path: HOST_PLAN }, planFile: HOST_PLAN, actor: main });
+  assert.deepEqual(copies, [PLAN], 'every plan-file write refreshes the Forge copy');
+  assert.equal(h({ type: 'tool.pre', tool: 'plan.submit', input: { plan: '# ignored inline text' }, planFile: HOST_PLAN, actor: main, permissionMode: 'plan' }).decision, undefined, 'the file wins over inline text');
+  assert.equal(st.planPath, '/data/plans/forge-x-plan.md');
 });
 
 test('plan written to the host plan file (no inline plan) is validated and approved', () => {

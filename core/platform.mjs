@@ -7,7 +7,7 @@
  * gate and fails if any OMP-only concept leaks into another platform's text.
  */
 
-const CC_PLAN_SUBMIT = 'Claude Code submission: make sure the session is in plan mode (call EnterPlanMode, or ask the user to press Shift+Tab until plan mode is shown). Write the COMPLETE plan to the plan file Claude Code assigns in plan mode (or pass it as the `plan` argument), then call ExitPlanMode. Forge checks the plan contract before Claude Code shows the approval prompt; if Forge denies the call, fix the listed issues and call ExitPlanMode again. Do not implement or self-approve.';
+const CC_PLAN_SUBMIT = 'Claude Code submission: make sure the session is in plan mode (call EnterPlanMode, or ask the user to press Shift+Tab until plan mode is shown). Write the COMPLETE plan to the plan file Claude Code assigns in plan mode, then call ExitPlanMode. Forge reads the plan only from that file (text passed any other way is rejected), keeps its own copy in the Forge data folder, and checks the plan contract before Claude Code shows the approval prompt; if Forge denies the call, fix the plan file and call ExitPlanMode again. Do not implement or self-approve.';
 
 // Order matters: span rules run before the generic local:// and tool-name rules.
 const CLAUDE_CODE_RULES = [
@@ -16,19 +16,19 @@ const CLAUDE_CODE_RULES = [
     'Forge enforces a read-only safety boundary until the human approves the plan through Claude Code\'s native plan approval.'],
   [/\[OMP FORGE/g, '[FORGE'],
   [/Submit the plan for approval only after writing a real local:\/\/ plan file[^\n]*?only the human can approve\./g,
-    'Submit the plan for human approval only through Claude Code\'s native plan approval: call ExitPlanMode with the complete plan text while in plan mode. Forge validates the plan contract before the approval prompt opens.'],
+    'Submit the plan for human approval only through Claude Code\'s native plan approval: write the complete plan to the plan-mode plan file, then call ExitPlanMode. Forge reads the plan from that file and validates the plan contract before the approval prompt opens.'],
   [/The only writable file is Forge's plan file local:\/\/[A-Za-z0-9._-]+-plan\.md[^\n]*?NEVER defer all writing to the end\./g,
-    'The only writable file is the plan file Claude Code assigns in plan mode (call EnterPlanMode first, or ask the user to press Shift+Tab until plan mode is shown): write it early and update it as you learn; NEVER defer all writing to the end.'],
+    'The only writable file is the plan file Claude Code assigns in plan mode (call EnterPlanMode first, or ask the user to press Shift+Tab until plan mode is shown): create it early, update it as you learn, and keep the complete plan in it; NEVER defer all writing to the end.'],
   [/Approval: call forge_plan_propose after a successful plan write;[^\n]*?Forge opens its approval dialog\./g,
-    'Approval: call ExitPlanMode with the complete plan; Forge checks the plan contract before Claude Code shows the approval prompt. NEVER ask the user to approve in prose or with AskUserQuestion. If Forge denies the call, fix the listed issues and call ExitPlanMode again.'],
+    'Approval: call ExitPlanMode once the complete plan is in the plan file; Forge reads that file and checks the plan contract before Claude Code shows the approval prompt. NEVER ask the user to approve in prose or with AskUserQuestion. If Forge denies the call, fix the plan file and call ExitPlanMode again.'],
   [/\[GATE 1\/3: FORGE PLAN APPROVAL\][\s\S]*?Do not finish with just a textual 'ready' response\./g,
     `[GATE 1/3: NATIVE PLAN APPROVAL]\n${CC_PLAN_SUBMIT}`],
   [/Forge PLAN owns rework drafting\.[^\n]*?change modes\./g,
     'Forge planning owns rework drafting. Use Claude Code plan mode for the revision; the platform opens native approval only after the plan is ready. Do not ask the user to change modes.'],
   [/After a successful rework-plan write, call forge_plan_propose; Forge opens the human approval dialog when this turn ends\. Do not ask the user to submit or advance a gate\./g,
-    'After a successful revision, submit the complete revised plan once with ExitPlanMode to open human approval. Do not ask the user to advance the gate.'],
+    'After the complete revision is in the plan file, call ExitPlanMode once to open human approval. Do not ask the user to advance the gate.'],
   [/Save a revised plan to local:\/\/[A-Za-z0-9._-]+-plan\.md; never overwrite the previous approved plan\./g,
-    'Write the revised plan to the native plan file; preserve the previously approved plan as the rework baseline.'],
+    'Write the revised plan to the plan-mode plan file; Forge keeps the previously approved plan as the rework baseline.'],
   [/local:\/\/[A-Za-z0-9._-]+-plan\.md/g, 'the approved plan'],
   [/`scout` subagents/g, 'Explore subagents'],
   [/the native ask tool/g, 'AskUserQuestion'],

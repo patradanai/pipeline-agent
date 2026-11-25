@@ -315,8 +315,11 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
     if (ev.permissionMode && ev.permissionMode !== 'plan') {
       return deny(s, 'Native plan approval requires plan mode. Call EnterPlanMode (or ask the user to press Shift+Tab until plan mode is shown), then call ExitPlanMode again.');
     }
-    const content = planText(s, ev);
-    if (!content.trim()) return deny(s, 'Forge could not find the plan text. Write the complete plan to the plan file (or pass it as the `plan` argument), then call ExitPlanMode again.');
+    // Like OMP, the plan lives in a file: Forge reads the plan-mode plan file, never inline text.
+    const file = ev.planFile ?? s.planDraftPath ?? null;
+    if (!file) return deny(s, 'Forge reads the plan only from the plan file. In plan mode, write the complete plan to the plan file Claude Code assigns (create it early and keep updating it), then call ExitPlanMode again. A plan passed only as text is not accepted.');
+    const content = planFileText(file);
+    if (!content.trim()) return deny(s, `Forge found no plan text in ${file}. Write the complete plan to that file, then call ExitPlanMode again.`);
     const contract = validatePlanContract(content);
     if (s.reworkBaseHash && contract.hash === s.reworkBaseHash) {
       contract.valid = false;
@@ -331,7 +334,7 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
     const next = {
       ...s, phase: 'PLAN', planWritten: true, planValid: true, approvedPlanHash: contract.hash,
       businessTopics: contract.topics, requirements: contract.requirements, testCases: contract.testCases,
-      qualityGates: contract.qualityGates, approvedCommands: contract.commands, planPath, planIssues: [], approved: false,
+      qualityGates: contract.qualityGates, approvedCommands: contract.commands, planPath, planDraftPath: file, planIssues: [], approved: false,
     };
     return keep(next); // no decision: the host's native approval prompt decides
   }
@@ -347,6 +350,12 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
     const { tool, input = {} } = ev;
     if (tool === 'agent') return keep(state); // completion is counted on agent.stop (works for background agents)
     if (tool === 'plan.submit') return planApproved(state, ev);
+    if (tool === 'plan.write') {
+      // Keep Forge's own copy of the draft current, so the plan always exists as a Forge file.
+      const text = state.phase === 'PLAN' && ev.planFile ? planFileText(ev.planFile) : '';
+      if (text.trim() && deps.savePlan) deps.savePlan(state, text);
+      return keep(state);
+    }
     if (tool === 'forge.qa_scope') {
       const scope = deps.inspectWorkspaceScope ? deps.inspectWorkspaceScope(ev.cwd) : { available: false, files: [] };
       return keep(state, { context: `Forge QA scope (read-only git inventory):\n${JSON.stringify(scope, null, 2)}` });
@@ -405,18 +414,15 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
     return { state: s };
   }
 
-  /** Plan text from the ExitPlanMode argument, else from the host's plan file. */
-  function planText(s, ev) {
-    const inline = String(ev.input?.plan ?? '');
-    if (inline.trim()) return inline;
-    const path = ev.input?.planFilePath ?? ev.input?.plan_file_path ?? s.planDraftPath;
+  /** Text of the plan-mode plan file (bounded read by the adapter). */
+  function planFileText(path) {
     return path && deps.readPlanFile ? String(deps.readPlanFile(path) ?? '') : '';
   }
 
   function planApproved(state, ev) {
     if (state.phase !== 'PLAN' || !state.planWritten || state.approved || state.planValid !== true || !state.approvedPlanHash) return keep(state);
     // The approved text can differ from the submitted one if the user edited it in the approval dialog.
-    const content = planText(state, ev);
+    const content = typeof ev.approvedPlan === 'string' && ev.approvedPlan.trim() ? ev.approvedPlan : planFileText(ev.planFile ?? state.planDraftPath);
     const contract = content ? validatePlanContract(content) : null;
     if (contract && contract.hash !== state.approvedPlanHash) {
       if (!contract.valid) {

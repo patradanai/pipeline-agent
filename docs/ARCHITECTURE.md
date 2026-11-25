@@ -55,7 +55,7 @@ adapter).
 | command (human) | `/forge` command handler | `UserPromptExpansion` for `/forge` (fires only for user-typed commands; the command has `disable-model-invocation: true`) |
 | tool.pre | `tool_call`, `before_subagent_spawn` | `PreToolUse` (all tools, main + subagents via `agent_id`/`agent_type`) |
 | tool.post | `tool_result` | `PostToolUse` (`Agent` result = specialist report) |
-| plan submitted | write `local://…-plan.md` + `forge_plan_propose` (contract check) | `PreToolUse(ExitPlanMode)`: contract check; deny with issues if invalid |
+| plan submitted | write `local://…-plan.md` + `forge_plan_propose` (contract check) | write the plan-mode plan file (mirrored to `${CLAUDE_PLUGIN_DATA}/plans/<slug>-plan.md`) + `PreToolUse(ExitPlanMode)`: contract check on the file's text only; deny with issues if invalid or if no plan file exists |
 | plan approved | Forge approval dialog (`ui.select`) after the turn ends, or `/forge review`; Forge sends the execution turn | `PostToolUse(ExitPlanMode)` succeeded; `/forge approve` as human fallback |
 | plan rejected | dialog Refine (editor feedback) or Not now | `PostToolUseFailure(ExitPlanMode)` |
 | turn end → QA | `session_stop` | `Stop` → `decision: block` with the QA instruction |

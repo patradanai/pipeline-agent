@@ -133,6 +133,12 @@ checks that made the old gate rigorous.
     recognized.
   - `@` alone is rejected as a gate model; commit subjects reject control
     characters.
+- Claude Code: the plan always lives in a file, as in OMP. Forge reads the plan
+  only from the plan-mode plan file (a plan passed as text alone is denied) and
+  keeps its own copy at `<Forge data>/plans/<slug>-plan.md`
+  (`<slug>-rework-<n>-plan.md` for a QA rework), refreshed on every plan write.
+  The approved text comes from ExitPlanMode's result. Native approval is
+  unchanged.
 
 ## Removed
 

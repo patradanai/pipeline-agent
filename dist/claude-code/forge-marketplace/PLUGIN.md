@@ -38,7 +38,10 @@ Each subcommand also exists as its own command for autocomplete: type `/forge` a
 
 Flow:
 1. Plan: Claude enters plan mode, explores the code itself (read-only `Explore` subagents allowed), asks preferences
-   with AskUserQuestion, writes the plan file, then calls **ExitPlanMode** with the full plan.
+   with AskUserQuestion, and keeps the complete plan in the plan-mode plan file (created early, updated as it learns),
+   then calls **ExitPlanMode**. As in OMP, the plan always lives in a file: Forge reads it only from that file
+   (a plan passed as text alone is denied) and keeps its own copy at `<Forge data>/plans/<slug>-plan.md`
+   (`<slug>-rework-<n>-plan.md` for a QA rework), refreshed on every plan write; `/forge-plan` shows the path.
    Forge checks the plan contract first; an invalid plan is denied with the exact issues. The plan needs `## Context`,
    `## Approach`, `## Verification`, `## Assumptions & contingencies` and the BIZ/REQ/TC/QG sections; `## Approach`
    needs an `Open decisions:` line (`none`, or sub-bullets each with `default: …`; any `BLOCKER` item is denied — ask

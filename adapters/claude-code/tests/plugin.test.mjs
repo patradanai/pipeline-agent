@@ -24,8 +24,20 @@ function env() {
   TEMP_DIRS.push(data, cwd);
   let n = 0;
   const sid = `sess-${Math.random().toString(36).slice(2)}`;
+  // Like Claude Code: ExitPlanMode's `plan` comes from the plan-mode file on disk, whose path is injected too.
+  const hostPlan = join(data, 'home', '.claude', 'plans', `${sid}.md`);
+  const withPlanFile = (event, payload) => {
+    const tin = payload.tool_input;
+    if (payload.tool_name !== 'ExitPlanMode' || payload.noPlanFile || typeof tin?.plan !== 'string' || tin.planFilePath) return payload;
+    mkdirSync(dirname(hostPlan), { recursive: true });
+    writeFileSync(hostPlan, tin.plan);
+    const next = { ...payload, tool_input: { ...tin, planFilePath: hostPlan } };
+    if (event === 'PostToolUse') next.tool_response = { plan: tin.plan, filePath: hostPlan, ...(payload.tool_response ?? {}) };
+    return next;
+  };
   const run = (event, payload, session = sid) => {
-    const r = spawnSync('node', [HOOK, event], { input: JSON.stringify({ session_id: session, cwd, hook_event_name: event, permission_mode: 'plan', ...payload }), env: { ...process.env, FORGE_DATA_DIR: data }, encoding: 'utf8' });
+    const { noPlanFile, ...body } = withPlanFile(event, payload);
+    const r = spawnSync('node', [HOOK, event], { input: JSON.stringify({ session_id: session, cwd, hook_event_name: event, permission_mode: 'plan', ...body }), env: { ...process.env, FORGE_DATA_DIR: data }, encoding: 'utf8' });
     assert.equal(r.status, 0, r.stderr);
     return r.stdout ? JSON.parse(r.stdout) : {};
   };
@@ -489,4 +501,16 @@ test('state lock: a stale lock of a live owner is never taken; a dead owner\'s i
   assert.match(ctx(x.forge('status')), /Forge: PLAN/);
   assert.ok(Date.now() - started < 5000);
   assert.equal(existsSync(lock), false);
+});
+
+test('ExitPlanMode needs the plan-mode plan file; Forge keeps its own copy in the data folder', () => {
+  const x = env();
+  x.forge('Build a booking system');
+  const inline = x.run('PreToolUse', { tool_name: 'ExitPlanMode', tool_input: { plan: PLAN }, noPlanFile: true });
+  assert.ok(denied(inline));
+  assert.match(inline.hookSpecificOutput.permissionDecisionReason, /only from the plan file/);
+  assert.deepEqual(x.pre('ExitPlanMode', { plan: PLAN }), {});
+  const copy = join(x.data, 'plans', `${x.state().slug}-plan.md`);
+  assert.equal(x.state().planPath, copy);
+  assert.equal(readFileSync(copy, 'utf8'), PLAN);
 });
