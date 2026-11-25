@@ -41,7 +41,7 @@ export const TOOLS = [
   },
   {
     name: 'forge_delivery_submit',
-    description: 'After QA PASS: submit the Conventional Commit subject/body and delivery highlights. Forge saves delivery.md and commit-message.txt outside the project. No git command is run.',
+    description: "After QA PASS: submit the Conventional Commit subject/body and delivery highlights. subject: '<type>(<scope>): <summary>', at most 72 characters; the delivery instruction lists the allowed types. Forge saves delivery.md and commit-message.txt outside the project. No git command is run.",
     inputSchema: {
       type: 'object', additionalProperties: false, required: ['subject'],
       properties: { subject: str, body: str, highlights: strList, changedFiles: strList },
