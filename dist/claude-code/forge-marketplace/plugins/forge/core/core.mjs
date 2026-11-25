@@ -497,11 +497,13 @@ Business topics: ${formatTopics(state.businessTopics)}
 Do not stage, commit, push, tag, merge, rebase, publish, or change project files. Base the Conventional Commits message ONLY on actual changes and verified QA evidence. If there are no changes, or git metadata is unavailable, say so; do not invent changed files. Do not claim deploy/release completed.
 
 Submit once using forge_delivery_submit with:
-- subject: e.g. feat(scope): add user booking approvals, max 72 chars
+- subject: Conventional Commits '<type>(<scope>): <summary>', at most ${COMMIT_SUBJECT_MAX} characters in total. Pick the type that matches the actual change (the dominant one when mixed):
+${Object.entries(COMMIT_TYPES).map(([type, use]) => `  - ${type}: ${use}`).join('\n')}
+  Scope is optional: one lowercase word for the area (e.g. auth, booking). Add ! after the type or scope for a breaking change. Summary: imperative mood, lowercase start, no trailing period. Count the characters before submitting, e.g. feat(booking): add room approvals.
 - body: concise newline-separated bullet points about real changes, avoid unproven claims
 - highlights: user-facing delivery summary
 - changedFiles: actual filenames from inspection where available
-Then PRINT the exact commit message in a fenced text block for the human to COPY and PASTE. The final message shows QA result, report path, and manual-only git guidance.`;
+Forge answers with a delivery summary table and the copy-ready commit message; finish as that result tells you.`;
 }
 
 // Prompt routing uses the same immutable per-workflow roster as task gates and QA validation.
@@ -570,13 +572,40 @@ export function isProhibitedGitCommand(command) {
   return git.test(text) || cli.test(text) || plumbing.test(text) || releaseScripts.test(text) || releaseTools.test(text) || arrayCall.test(text);
 }
 
+/** Conventional Commits types Forge accepts, with when each one fits. */
+export const COMMIT_TYPES = Object.freeze({
+  feat: 'a new user-facing capability',
+  fix: 'a bug fix',
+  docs: 'documentation only',
+  style: 'formatting only, no behavior change',
+  refactor: 'restructured code, no behavior change',
+  perf: 'a performance improvement',
+  test: 'tests only',
+  build: 'build system or dependencies',
+  ci: 'CI configuration',
+  chore: 'maintenance with no product behavior change',
+  revert: 'reverts an earlier commit',
+});
+export const COMMIT_SUBJECT_MAX = 72;
+const COMMIT_SUBJECT = new RegExp(`^(${Object.keys(COMMIT_TYPES).join('|')})(?:\\(([a-z0-9][a-z0-9._/-]*)\\))?(!)?: ([^\\r\\n]{4,})$`, 'i');
+
+/** Split a Conventional Commits subject into its parts; null when it does not follow the format. */
+export function parseCommitSubject(subject) {
+  const line = String(subject ?? '').replace(/[\r\n]+/g, ' ').trim();
+  const m = COMMIT_SUBJECT.exec(line);
+  return m ? { line, type: m[1].toLowerCase(), scope: m[2] ?? null, breaking: Boolean(m[3]), summary: m[4] } : null;
+}
+
 /** A suggestion only: it is never used as a shell command by Forge. */
 export function buildCommitMessage(subject, body = '') {
-  const line = String(subject ?? '').replace(/[\r\n]+/g, ' ').trim();
-  if (!/^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9][a-z0-9._/-]*\))?!?: [^\r\n]{4,}$/i.test(line)) {
-    throw new Error('Commit subject must follow Conventional Commits, e.g. feat(booking): add room approvals.');
+  const parsed = parseCommitSubject(subject);
+  if (!parsed) {
+    throw new Error(`Commit subject must follow Conventional Commits '<type>(<scope>): <summary>' with type one of ${Object.keys(COMMIT_TYPES).join(', ')}; e.g. feat(booking): add room approvals.`);
   }
-  if (line.length > 72) throw new Error('Commit subject must be at most 72 characters.');
+  const { line, summary } = parsed;
+  if (line.length > COMMIT_SUBJECT_MAX) {
+    throw new Error(`Commit subject is ${line.length} characters; the limit is ${COMMIT_SUBJECT_MAX} characters including '${line.slice(0, line.length - summary.length)}'. Shorten the summary by at least ${line.length - COMMIT_SUBJECT_MAX} characters.`);
+  }
   if (/[\x00-\x1f\x7f]/.test(line)) throw new Error('Invalid control characters in commit subject.');
   const rawBody = String(body ?? '').replace(/\r/g, '').trim();
   if (rawBody.length > 4000) throw new Error('Commit body is too long.');
@@ -1024,6 +1053,35 @@ export function renderQaSummary(report, { reportPath = null } = {}) {
     lines.push('', '**Gate blockers**', ...report.problems.slice(0, 8).map(p => `- ${p}`));
     if (report.problems.length > 8) lines.push(`- … ${report.problems.length - 8} more in the full report`);
   }
+  return lines.join('\n');
+}
+
+const DELIVERY_FILES_SHOWN = 15;
+/** Human-first delivery result: commit anatomy, highlights and changed files as tables, then the
+ * copy-ready commit message. The full delivery report stays on disk. */
+export function renderDeliverySummary(payload, { deliveryPath = null, commitMessagePath = null } = {}) {
+  const message = String(payload.commitMessage ?? '').trimEnd();
+  const commit = parseCommitSubject(message.split('\n', 1)[0]);
+  const highlights = Array.isArray(payload.highlights) ? payload.highlights : [];
+  const files = Array.isArray(payload.changedFiles) ? payload.changedFiles : [];
+  const lines = [
+    '### Forge Delivery ✅ QA PASS — ready for manual commit', '',
+    '| Field | Value |', '|---|---|',
+    `| Type | \`${commit?.type ?? '?'}\` — ${COMMIT_TYPES[commit?.type] ?? 'unknown'}${commit?.breaking ? ' · ⚠️ BREAKING CHANGE' : ''} |`,
+    `| Scope | ${commit?.scope ? `\`${commit.scope}\`` : '—'} |`,
+    `| Subject | ${summaryCell(commit?.line, 100)} (${commit?.line.length ?? 0}/${COMMIT_SUBJECT_MAX}) |`,
+    `| Changed files | ${files.length} |`,
+    `| Post-QA audit | ${summaryCell(payload.diffAudit)} |`,
+    ...(deliveryPath ? [`| Delivery report | ${summaryCell(deliveryPath, 300)} |`] : []),
+    ...(commitMessagePath ? [`| Commit message file | ${summaryCell(commitMessagePath, 300)} |`] : []),
+  ];
+  if (highlights.length) lines.push('', '| # | Highlight |', '|:-:|---|', ...highlights.map((h, i) => `| ${i + 1} | ${summaryCell(h, 120)} |`));
+  if (files.length) {
+    lines.push('', '| Changed file |', '|---|', ...files.slice(0, DELIVERY_FILES_SHOWN).map(f => `| ${summaryCell(f, 120)} |`));
+    if (files.length > DELIVERY_FILES_SHOWN) lines.push(`| … ${files.length - DELIVERY_FILES_SHOWN} more in the delivery report |`);
+  }
+  lines.push('', 'COPY THIS COMMIT MESSAGE:', '', '```text', message, '```', '',
+    'Forge ran no git add, commit, push, tag or release. Review the diff and commit manually.');
   return lines.join('\n');
 }
 

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createEngine, normalizeAgentName } from '../core/engine.mjs';
-import { PHASES, requiredAgentsFor, phaseInstruction } from '../core/core.mjs';
+import { PHASES, requiredAgentsFor, phaseInstruction, buildCommitMessage, renderDeliverySummary } from '../core/core.mjs';
 import { PLAN, SUBMISSION, FAIL_SUBMISSION, MINIMAL_SUBMISSION, EXECUTION_DONE } from './fixtures.mjs';
 import { approvedExecutionState, assertDeliverySubmittable, qaReportTransition, reworkTransition, steerTransition, MAX_EXECUTION_REMINDERS, MAX_QA_RESUBMITS } from '../core/transitions.mjs';
 
@@ -327,6 +327,23 @@ test('QA FAIL rework prompt lists only the non-PASS items and revises the previo
   const firstRun = phaseInstruction({ ...base, phase: 'EXECUTE' });
   assert.match(firstRun, /one item per plan step/);
   assert.doesNotMatch(firstRun, /QA REWORK/);
+});
+
+test('delivery: commit subject errors say how to fix, summary shows the commit anatomy as tables', () => {
+  const long = 'docs(prd): resolve review feedback in 2.54.0 DLA register-15-year PRD runbooks';
+  assert.throws(() => buildCommitMessage(long), new RegExp(`^Error: Commit subject is ${long.length} characters; the limit is 72 characters including 'docs\\(prd\\): '\\. Shorten the summary by at least ${long.length - 72} characters\\.$`));
+  assert.throws(() => buildCommitMessage('update runbooks'), /type one of feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert/);
+
+  const commitMessage = buildCommitMessage('feat(booking)!: add room approvals', '- Add approval flow');
+  const summary = renderDeliverySummary(
+    { commitMessage, highlights: ['Rooms need approval | before use'], changedFiles: Array.from({ length: 17 }, (_, i) => `src/f${i}.ts`), diffAudit: 'MATCHED QA SNAPSHOT' },
+    { deliveryPath: '/r/delivery.md', commitMessagePath: '/r/commit-message.txt' });
+  assert.match(summary, /\| Type \| `feat` — a new user-facing capability · ⚠️ BREAKING CHANGE \|/);
+  assert.match(summary, /\| Scope \| `booking` \|/);
+  assert.match(summary, /\| Subject \| feat\(booking\)!: add room approvals \(34\/72\) \|/);
+  assert.match(summary, /\| 1 \| Rooms need approval \\\| before use \|/);
+  assert.match(summary, /\| src\/f14\.ts \|\n\| … 2 more in the delivery report \|/);
+  assert.ok(summary.endsWith('```text\nfeat(booking)!: add room approvals\n\n- Add approval flow\n```\n\nForge ran no git add, commit, push, tag or release. Review the diff and commit manually.'));
 });
 
 

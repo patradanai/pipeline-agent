@@ -44,6 +44,9 @@ import {
   qaInstruction as coreQaInstruction,
   steeringInstruction as coreSteeringInstruction,
   renderDeliveryReport,
+  renderDeliverySummary,
+  COMMIT_TYPES,
+  COMMIT_SUBJECT_MAX,
   renderQaReport,
   renderForgeWidget,
   getForgeArgumentCompletions,
@@ -690,7 +693,10 @@ export default function forgeExtension(pi: ExtensionAPI) {
     saveState();
     updateDashboard(ctx);
     notify(ctx, `Forge DELIVERY ready. QA PASS; commit message at ${commitMessagePath}. You must commit manually.`);
-    return { deliveryPath, commitMessagePath, commitMessage };
+    // The human-first delivery table: shown to the user directly, like the QA summary.
+    const summary = renderDeliverySummary(payload, { deliveryPath, commitMessagePath });
+    pi.sendMessage({ customType: 'forge-delivery-summary', content: summary, display: true, excludeFromContext: true });
+    return { deliveryPath, commitMessagePath, commitMessage, summary };
   }
 
   const REVIEW_KEEP = 'Approve and keep context';
@@ -1318,7 +1324,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: 'forge_delivery_submit',
     label: 'Prepare Forge Delivery & Commit Message',
-    description: 'Only available after a PASS QA gate. Saves a copy-ready Conventional Commit message and delivery report outside the repository. Does NOT stage, commit or push.',
+    description: `Only available after a PASS QA gate. Saves a copy-ready Conventional Commit message and delivery report outside the repository. Does NOT stage, commit or push. subject: '<type>(<scope>): <summary>', at most ${COMMIT_SUBJECT_MAX} characters; type one of ${Object.keys(COMMIT_TYPES).join(', ')}.`,
     loadMode: 'essential',
     approval: 'read',
     parameters: z.object({
@@ -1329,7 +1335,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
       try {
         const result = persistDelivery(ctx, params);
         return {
-          content: [{ type: 'text', text: `Forge DELIVERY ready — QA PASS.\nDelivery: ${result.deliveryPath}\nCommit message file: ${result.commitMessagePath}\n\nCOPY THIS COMMIT MESSAGE:\n\n\`\`\`text\n${result.commitMessage.trimEnd()}\n\`\`\`\n\nNo git add, git commit, git push, tag or release was executed. Commit manually after inspecting the diff.` }],
+          content: [{ type: 'text', text: `${result.summary}\n\nForge has already shown this delivery summary to the user. End your turn with one short line pointing to it; do not repeat the tables or the commit message.` }],
           details: { status: 'DELIVERY', qaStatus: 'PASS', deliveryPath: result.deliveryPath, commitMessagePath: result.commitMessagePath },
         };
       } catch (error) {

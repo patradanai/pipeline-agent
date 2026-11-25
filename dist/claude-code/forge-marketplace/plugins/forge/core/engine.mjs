@@ -33,7 +33,7 @@
 import {
   parseCommand, initialState, phaseInstruction, executionInstruction, qaInstruction,
   reworkInstruction, deliveryInstruction, requiredAgentsFor, missingGateAgentsFor, validatePlanContract,
-  evaluateQaReport, renderQaReport, renderQaSummary, buildCommitMessage, renderDeliveryReport, isProhibitedGitCommand,
+  evaluateQaReport, renderQaReport, renderQaSummary, buildCommitMessage, renderDeliveryReport, renderDeliverySummary, isProhibitedGitCommand,
   isAllowedDiscoveryCommand, isAllowedQaCommand, extractHighFindings, GATE_AGENTS, executionReminder,
   inlineGateSkills, steeringInstruction,
 } from './core.mjs';
@@ -466,7 +466,8 @@ export function createEngine({ platform = 'claude-code', config = {}, deps = {},
     };
     const paths = deps.saveDelivery ? deps.saveDelivery(state, renderDeliveryReport(payload), commitMessage) : { deliveryPath: null, commitMessagePath: null };
     const next = deliveryTransition(state, { ...paths, commitMessage });
-    return keep(next, { context: `Forge DELIVERY ready — QA PASS.\nDelivery: ${paths.deliveryPath}\nCommit message file: ${paths.commitMessagePath}\n\nCOPY THIS COMMIT MESSAGE:\n\n\`\`\`text\n${commitMessage.trimEnd()}\n\`\`\`\n\nNo git add/commit/push was executed. The user commits manually after reviewing the diff.`, message: 'Forge DELIVERY ready.' });
+    const summary = renderDeliverySummary(payload, paths);
+    return keep(next, { context: `${summary}\n\nShow the user this delivery summary — the tables and the commit message block — exactly as given, then stop. No git add/commit/push was executed; the user commits manually after reviewing the diff.`, message: 'Forge DELIVERY ready.' });
   }
 
   // ------------------------------------------------------------------ turn.end
