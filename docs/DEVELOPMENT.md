@@ -42,8 +42,10 @@ Node 22+. No npm dependencies.
 
 **OMP**
 ```bash
-cd dist/omp/omp-forge-global-v6.1.0 && bash ./install.sh   # restart OMP
+omp plugin link ./dist/omp/forge          # dev: symlink the build output; restart OMP after each build
+omp plugin marketplace add "$PWD" && omp plugin install forge@omp-forge   # as users install it
 ```
+Legacy: `cd dist/omp/omp-forge-global-v6.1.0 && bash ./install.sh`. Commit `dist/` and `.omp-plugin/marketplace.json` after a release build: Git marketplace installs read them from the repository.
 
 **Claude Code** — see [adapters/claude-code/README.md](../adapters/claude-code/README.md)
 ```text

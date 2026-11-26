@@ -19,7 +19,10 @@
   host-specific recovery, installation.
 * `scripts/build.mjs` vendors `core/*.mjs` into each package, so each install
   is self-contained (Claude Code copies only the plugin directory; OMP loads
-  only `~/.omp/agent/extensions/forge`).
+  the `dist/omp/forge` plugin package from its plugin cache, or the legacy
+  `~/.omp/agent/extensions/forge` copy). OMP user state (config, reports,
+  checkpoints, created skills) lives under the agent directory, never in the
+  plugin package.
 
 ## Workflow state
 

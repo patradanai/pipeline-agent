@@ -1,0 +1,19 @@
+{
+  "name": "omp-forge",
+  "owner": {
+    "name": "Forge"
+  },
+  "metadata": {
+    "description": "Forge for OMP",
+    "version": "6.1.0"
+  },
+  "plugins": [
+    {
+      "name": "forge",
+      "source": "./dist/omp/forge",
+      "description": "Forge multi-agent SDLC workflow for OMP: plan approval, execution, independent QA and delivery gates.",
+      "version": "6.1.0",
+      "category": "development"
+    }
+  ]
+}

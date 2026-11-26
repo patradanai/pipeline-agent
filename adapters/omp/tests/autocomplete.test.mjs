@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { getForgeArgumentCompletions, parseCommand, cloneGateModels } from '../forge/core.mjs';
+import { getForgeArgumentCompletions, parseCommand, cloneGateModels, cloneGateEfforts } from '../forge/core.mjs';
 import forgeExtension from '../forge/index.ts';
 
 const cfg = {
@@ -71,12 +71,12 @@ test('free-form requirements are never hijacked by completion', () => {
 });
 
 test('gate model commands parse, validate and complete', () => {
-  assert.deepEqual(parseCommand('model'), {type:'models'});
+  assert.deepEqual(parseCommand('model'), {type:'modelPick',gate:null});
+  assert.deepEqual(parseCommand('models'), {type:'models'});
   assert.deepEqual(parseCommand('model qa @slow'), {type:'modelSet',gate:'qa',selector:'@slow'});
   assert.deepEqual(parseCommand('model Execution anthropic/claude-opus-5-5'), {type:'modelSet',gate:'execution',selector:'anthropic/claude-opus-5-5'});
   assert.deepEqual(parseCommand('model qa keep'), {type:'modelSet',gate:'qa',selector:null});
-  assert.deepEqual(parseCommand('model qa @plan:High'), {type:'modelSet',gate:'qa',selector:'@plan:high'});
-  assert.deepEqual(parseCommand('model execution anthropic/claude-opus-5-5:xhigh'), {type:'modelSet',gate:'execution',selector:'anthropic/claude-opus-5-5:xhigh'});
+  assert.equal(parseCommand('model qa @plan:High').type, 'modelInvalid');
   assert.equal(parseCommand('model qa @plan:nope').type, 'modelInvalid');
   assert.equal(parseCommand('model foo @x').type, 'modelInvalid');
   assert.equal(parseCommand('model qa a,b').type, 'modelInvalid');
@@ -89,6 +89,14 @@ test('gate model commands parse, validate and complete', () => {
   assert.equal(cloneGateModels({qa:null}).qa, null);
   assert.equal(cloneGateModels().planning, '@plan');
   assert.throws(() => cloneGateModels({qa:'a b'}), /Invalid model for qa/);
+  assert.deepEqual(parseCommand('effort qa High'), {type:'effortSet',gate:'qa',level:'high'});
+  assert.deepEqual(parseCommand('effort qa keep'), {type:'effortSet',gate:'qa',level:null});
+  assert.deepEqual(parseCommand('effort planning'), {type:'effortPick',gate:'planning'});
+  assert.deepEqual(parseCommand('effort reset'), {type:'effortReset'});
+  assert.equal(parseCommand('effort qa turbo').type, 'modelInvalid');
+  assert.equal(parseCommand('effort foo high').type, 'modelInvalid');
+  assert.ok(values('effort execution ').includes('effort execution xhigh'));
+  assert.throws(() => cloneGateEfforts({qa:'turbo'}), /Invalid effort for qa/);
 });
 
 test('registered /forge command exposes native OMP argument completion', () => {

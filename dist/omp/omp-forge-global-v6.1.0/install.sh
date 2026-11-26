@@ -96,7 +96,7 @@ done
 shopt -u nullglob
 printf 'Installed OMP Forge v6.1 (shared core) at %s\n' "$AGENT_ROOT"
 printf 'Backup directory: %s\n' "$BACKUP_DIR"
-printf 'Configuration preserved: %s/config.json\n' "$EXT"
+printf 'Configuration: %s/forge/config.json (copied once from %s/config.json if missing)\n' "$AGENT_ROOT" "$EXT"
 printf 'Agent definitions: %s installed, %s preserved, %s restored from uninstall (model/prompt changes kept)\n' "$installed" "$preserved" "$restored"
 printf 'Gate skills: %s installed, %s replaced (old agent-based text, backed up), %s preserved, %s retired\n' "$skills_installed" "$skills_replaced" "$skills_preserved" "$skills_retired"
 printf 'Retired agents (no longer used by Forge) moved to backup: %s\n' "$retired"

@@ -7,6 +7,18 @@ checks that made the old gate rigorous.
 
 ## Changed
 
+- OMP: Forge installs as an OMP plugin. The repository root is a marketplace
+  (`.omp-plugin/marketplace.json`): `omp plugin marketplace add <repo>` then
+  `omp plugin install forge@omp-forge`. The build emits the plugin package at
+  `dist/omp/forge/` with bundled agents and gate skills; `install.sh` remains
+  as the legacy path.
+- OMP: Forge config moved from `extensions/forge/config.json` to
+  `<agent dir>/forge/config.json`, so plugin upgrades keep it. An existing
+  config is copied over once. Reports default to `<agent dir>/forge-reports`
+  for both install kinds.
+- OMP: the plugin stays inactive and prints the command to park the old copy
+  while an `install.sh` copy is still loaded, so `/forge` is never registered
+  twice.
 - Workflow safety fixes: QA and delivery now allow only known read-only tools,
   conservative test commands, and their phase-specific control tools. Unknown
   tools, including eval, AST/LSP mutations, and MCP writes, are denied.
@@ -97,12 +109,19 @@ checks that made the old gate rigorous.
   e.g. `FORGE ▰▱▱▱ Requirement 1/4`, instead of stripping its glyphs.
 - OMP: per-gate main-session model. Forge switches the main session model when
   a gate starts (planning `@plan`, execution/QA/delivery `@default` by
-  default). `/forge model <gate>` picks a model, then an effort (`keep`, `off`,
-  `auto`, or a level the model advertises). A `:effort` suffix
-  (`provider/id:high`, `@plan:high`) is applied at the gate; otherwise the
-  thinking level is kept. `/forge model`, `/forge model reset`; saved as
-  `gateModels` in the Forge config. A manual `/model` pick inside a gate is
-  kept. See [Gate models (OMP)](../USER_GUIDE.md#gate-models-omp).
+  default) and keeps the thinking level. `/forge model`, `/forge model <gate>
+  <@role|provider/id|keep>`, `/forge model reset`; saved as `gateModels` in
+  the Forge config. A manual `/model` pick inside a gate is kept. See
+  [Gate models (OMP)](../USER_GUIDE.md#gate-models-omp).
+- OMP: per-gate effort (thinking level). `/forge model` walks gate → model →
+  effort in pickers; `/forge model <gate>` starts at the model step, and a
+  typed `/forge model <gate> <selector>` opens the effort picker for that
+  model. `/forge models` lists the mapping. `/forge effort <gate> [off|minimal|
+  low|medium|high|xhigh|max|auto|keep]` and `/forge effort reset` change the
+  effort alone. Saved as `gateEfforts`; the default `keep` keeps the session's
+  thinking level. The effort picker offers only the levels the gate's model
+  supports and opens with `auto` highlighted (Enter accepts it). A typed unsupported
+  level warns with the supported list.
 - Claude Code: fix hook output over ~8 KB arriving as invalid JSON on macOS.
   The hook exited before stdout to a pipe was flushed; it now waits for the
   write to finish.
