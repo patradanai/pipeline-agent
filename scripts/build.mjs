@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Assemble self-contained adapter packages from the shared core.
-//   dist/omp/omp-forge-global-v<ver>/      → bash install.sh into ~/.omp/agent
+//   dist/omp/forge/                         → omp plugin package (marketplace: .omp-plugin/marketplace.json)
+//   dist/omp/omp-forge-global-v<ver>/      → legacy: bash install.sh into ~/.omp/agent
 //   dist/claude-code/forge-marketplace/     → /plugin marketplace add <path>
 import { cpSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync, existsSync, chmodSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -41,6 +42,34 @@ cpSync(join(ROOT, 'skills'), join(omp, 'skills'), { recursive: true });
 for (const sh of ['install.sh', 'uninstall.sh', 'smoke-install.sh', 'install-example-skills.sh']) {
   if (existsSync(join(omp, sh))) chmodSync(join(omp, sh), 0o755);
 }
+
+// ---------- OMP plugin package ----------
+// Same runtime files as the install.sh package. User state stays under the agent directory,
+// so the bundled config.json is not shipped: upgrades replace this whole tree.
+const ompPlugin = join(DIST, 'omp', 'forge');
+mkdirSync(join(ompPlugin, 'forge'), { recursive: true });
+for (const f of readdirSync(join(omp, 'forge'))) {
+  if (f !== 'config.json') cpSync(join(omp, 'forge', f), join(ompPlugin, 'forge', f));
+}
+cpSync(join(omp, 'agents'), join(ompPlugin, 'agents'), { recursive: true });
+cpSync(join(omp, 'skills'), join(ompPlugin, 'skills'), { recursive: true });
+const ompPluginDescription = 'Forge multi-agent SDLC workflow for OMP: plan approval, execution, independent QA and delivery gates.';
+writeFileSync(join(ompPlugin, 'package.json'), JSON.stringify({
+  name: 'omp-forge', // forgePluginRoot() in forge/index.ts matches this name
+  version: VERSION,
+  description: ompPluginDescription,
+  private: true,
+  type: 'module',
+  omp: { extensions: ['./forge/index.ts'] },
+}, null, 2) + '\n');
+// The repository root is the marketplace: omp plugin marketplace add <git url or clone path>.
+mkdirSync(join(ROOT, '.omp-plugin'), { recursive: true });
+writeFileSync(join(ROOT, '.omp-plugin', 'marketplace.json'), JSON.stringify({
+  name: 'omp-forge',
+  owner: { name: 'Forge' },
+  metadata: { description: 'Forge for OMP', version: VERSION },
+  plugins: [{ name: 'forge', source: './dist/omp/forge', description: ompPluginDescription, version: VERSION, category: 'development' }],
+}, null, 2) + '\n');
 
 // ---------- Claude Code adapter ----------
 const market = join(DIST, 'claude-code', 'forge-marketplace');
@@ -104,4 +133,4 @@ cpSync(join(ROOT, 'docs', 'images'), join(market, 'docs', 'images'), { recursive
 for (const doc of ['E2E-TEST-PLAN_TH.md', 'ARCHITECTURE.md', 'DEVELOPMENT.md']) cpSync(join(ROOT, 'docs', doc), join(market, 'docs', doc));
 cpSync(join(ROOT, 'adapters', 'claude-code', 'README.md'), join(market, 'PLUGIN.md'));
 cpSync(join(ROOT, 'adapters', 'claude-code', 'QUICKSTART_TH.md'), join(market, 'QUICKSTART_TH.md'));
-console.log(`Built Forge ${VERSION} (models: ${MODEL_PROFILE})\n  ${omp}\n  ${market}`);
+console.log(`Built Forge ${VERSION} (models: ${MODEL_PROFILE})\n  ${ompPlugin}\n  ${omp}\n  ${market}`);

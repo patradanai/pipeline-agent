@@ -1,0 +1,12 @@
+{
+  "name": "omp-forge",
+  "version": "6.1.0",
+  "description": "Forge multi-agent SDLC workflow for OMP: plan approval, execution, independent QA and delivery gates.",
+  "private": true,
+  "type": "module",
+  "omp": {
+    "extensions": [
+      "./forge/index.ts"
+    ]
+  }
+}

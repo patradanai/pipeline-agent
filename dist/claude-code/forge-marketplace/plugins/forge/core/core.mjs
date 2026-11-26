@@ -119,9 +119,23 @@ export function cloneGateModels(source) {
   }
   return result;
 }
-export function formatGateModels(source) {
+/** Main-session thinking level (effort) per gate; null keeps the session's current level. */
+export const GATE_EFFORT_LEVELS = Object.freeze(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'auto']);
+export function cloneGateEfforts(source) {
+  const result = Object.fromEntries(SKILL_GATES.map(g => [g, null]));
+  if (!source || typeof source !== 'object' || Array.isArray(source)) return result;
+  for (const gate of SKILL_GATES) {
+    const value = source[gate];
+    if (value === undefined || value === null) continue;
+    if (typeof value === 'string' && GATE_EFFORT_LEVELS.includes(value)) result[gate] = value;
+    else throw new Error(`Invalid effort for ${gate}: ${String(value)}`);
+  }
+  return result;
+}
+export function formatGateModels(source, efforts) {
   const m = cloneGateModels(source);
-  return SKILL_GATES.map(g => `${g.toUpperCase().padEnd(12)} ${m[g] ?? '(keep current model)'}`).join('\n');
+  const e = cloneGateEfforts(efforts);
+  return SKILL_GATES.map(g => `${g.toUpperCase().padEnd(12)} ${(m[g] ?? '(keep current model)').padEnd(36)} effort: ${e[g] ?? 'keep'}`).join('\n');
 }
 /** Apply skill text to every named subagent task, not just the lead orchestrator prompt. */
 export function injectGateSkillsIntoTask(input, phase, skillBrief) {
@@ -1202,7 +1216,9 @@ export function parseCommand(args) {
     return { type:'skillReset', gate:parts[2] };
   }
   if (/^skill(?:\s|$)/i.test(trimmed)) return { type:'skillInvalid', message:'Use /forge skills or /forge skill [create|list|add|remove|reset].' };
-  if (/^models?$/i.test(trimmed)) return { type:'models' };
+  // Bare `model` opens the guided picker (gate → model → effort); `models` only lists.
+  if (/^model$/i.test(trimmed)) return { type:'modelPick', gate:null };
+  if (/^models$/i.test(trimmed)) return { type:'models' };
   if (/^model\s+reset$/i.test(trimmed)) return { type:'modelReset' };
   if (/^model\s+/i.test(trimmed)) {
     const parts = trimmed.split(/\s+/);
@@ -1216,6 +1232,21 @@ export function parseCommand(args) {
     }
   }
   if (/^model(?:\s|$)/i.test(trimmed)) return { type:'modelInvalid', message:'Usage: /forge model | /forge model <planning|execution|qa|delivery> [@role|provider/model-id|keep] | /forge model reset' };
+  if (/^efforts?$/i.test(trimmed)) return { type:'models' };
+  if (/^effort\s+reset$/i.test(trimmed)) return { type:'effortReset' };
+  if (/^effort\s+/i.test(trimmed)) {
+    const parts = trimmed.split(/\s+/);
+    if (parts.length === 2 || parts.length === 3) {
+      const gate = parts[1].toLowerCase();
+      if (!SKILL_GATES.includes(gate)) return { type:'modelInvalid', message:'Invalid effort Gate. Use planning, execution, qa or delivery.' };
+      if (parts.length === 2) return { type:'effortPick', gate };
+      const level = parts[2].toLowerCase();
+      if (level === 'keep') return { type:'effortSet', gate, level:null };
+      if (!GATE_EFFORT_LEVELS.includes(level)) return { type:'modelInvalid', message:`Invalid effort level. Use ${GATE_EFFORT_LEVELS.join(', ')} or keep.` };
+      return { type:'effortSet', gate, level };
+    }
+  }
+  if (/^effort(?:\s|$)/i.test(trimmed)) return { type:'modelInvalid', message:`Usage: /forge effort | /forge effort <planning|execution|qa|delivery> [${GATE_EFFORT_LEVELS.join('|')}|keep] | /forge effort reset` };
   if (/^agents$/i.test(trimmed)) return { type:'agents' };
   // Old v5.11 commands cannot change agent routing. Direct users to native OMP /agents.
   if (/^agent(?:\s|$)/i.test(trimmed)) return { type:'agentHelp' };
@@ -1274,7 +1305,9 @@ export function getForgeArgumentCompletions(argumentPrefix, options = {}) {
       {token:'agents', detail:'Show fixed Gate → OMP agents (manage models with /agents)'},
       {token:'skill', detail:'Manage skills per gate', more:true},
       {token:'skills', detail:'Show gate skill assignments'},
-      {token:'model', detail:'Main-session model per gate', more:true},
+      {token:'model', detail:'Pick model and effort per gate', more:true},
+      {token:'models', detail:'Show gate models and efforts'},
+      {token:'effort', detail:'Main-session thinking level per gate', more:true},
       {token:'status', detail:'Show workflow status'},
       {token:'recover', detail:'Review inconsistent state (human confirmation)'},
       {token:'resume', detail:'Choose Forge session to resume'},
@@ -1300,6 +1333,14 @@ export function getForgeArgumentCompletions(argumentPrefix, options = {}) {
     ];
     else if (fixed.length === 2 && gateNames.includes(fixed[1].toLowerCase())) {
       candidates = choices(['@plan','@default','@slow','@smol','keep']);
+    }
+  } else if (fixed[0].toLowerCase() === 'effort') {
+    if (fixed.length === 1) candidates = [
+      ...gateNames.map(g => ({token:g, detail:`Pick a thinking level for ${g}`, more:true})),
+      {token:'reset', detail:'Keep the session thinking level at every gate'},
+    ];
+    else if (fixed.length === 2 && gateNames.includes(fixed[1].toLowerCase())) {
+      candidates = choices([...GATE_EFFORT_LEVELS, 'keep']);
     }
   } else if (fixed[0].toLowerCase() === 'skill') {
     if (fixed.length === 1) candidates = [

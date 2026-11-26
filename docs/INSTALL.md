@@ -1,6 +1,6 @@
 # Install, update, and remove Forge
 
-Forge is distributed as source in this repository. Build the self-contained adapter packages locally. Requires Node.js 22+ and Bash for the OMP installer.
+Forge is distributed as source in this repository. The repository root is also an OMP plugin marketplace (`.omp-plugin/marketplace.json`) whose plugin package, `dist/omp/forge/`, is committed, so OMP users can install without building. Building requires Node.js 22+; the legacy OMP installer requires Bash.
 
 ## 1. Get the source and build
 
@@ -14,19 +14,45 @@ npm run build
 
 The build creates:
 
-- `dist/omp/omp-forge-global-v6.1.0/` — OMP extension package
+- `dist/omp/forge/` — OMP plugin package (`package.json` declares `omp.extensions`; bundled `agents/` and `skills/`), plus `.omp-plugin/marketplace.json` at the repository root
+- `dist/omp/omp-forge-global-v6.1.0/` — legacy OMP copy installer (`install.sh`)
 - `dist/claude-code/forge-marketplace/` — local Claude Code marketplace
 
 To build with a different model profile, set `FORGE_MODELS=rigor`, `balanced`, or `economy` before `npm run build`.
 
 ## 2A. Install on OMP
 
+Add the repository as a marketplace (Git URL, `owner/repo` on GitHub, or the absolute path of a built clone), then install the plugin:
+
+```bash
+omp plugin marketplace add <repository-url or /absolute/path/to/clone>
+omp plugin install forge@omp-forge            # add --scope project for one project only
+```
+
+Restart OMP, open a main interactive TUI session, and run `/forge status`. Start a task with `/forge <requirement>` or run `/forge` to prefill the prompt.
+
+For local development, link the build output instead; a rebuild takes effect on the next OMP start:
+
+```bash
+omp plugin link ./dist/omp/forge
+```
+
+Where things live:
+
+- Plugin code, bundled agents and gate skills: the OMP plugin cache. Upgrades replace it, so do not edit files there.
+- Your Forge config: `~/.omp/agent/forge/config.json` (`$PI_CODING_AGENT_DIR/forge/config.json` with a custom agent directory). Reports, checkpoints and attachments stay under the agent directory as before.
+- Your skill and agent customizations: `~/.omp/agent/skills/` and `~/.omp/agent/agents/`. Forge pins a user skill before the bundled skill of the same name, and `/forge skill create` writes there. For a same-named agent, OMP's agent precedence decides which copy runs; check `/agents`.
+
+### Moving from install.sh to the plugin
+
+If an `install.sh` copy is still at `~/.omp/agent/extensions/forge`, the plugin stays inactive (both would register `/forge`) and shows the exact command to park the old copy. Forge copies the old `config.json` to `~/.omp/agent/forge/config.json` first. Agents and gate skills that `install.sh` put under `~/.omp/agent` stay there; delete them if you want the plugin's bundled versions.
+
+### Legacy: install.sh
+
 ```bash
 cd dist/omp/omp-forge-global-v6.1.0
 bash ./install.sh
 ```
-
-Restart OMP, open a main interactive TUI session, and run `/forge status`. Start a task with `/forge <requirement>` or run `/forge` to prefill the prompt.
 
 By default the installer uses `~/.omp/agent`. To use a custom OMP agent directory:
 
@@ -57,7 +83,16 @@ Restart Claude Code and check `/hooks`, `/mcp`, and `/agents`. Start with `/forg
 
 ## Update
 
-Fetch the new source, rebuild, and rerun the OMP installer:
+OMP plugin:
+
+```bash
+omp plugin marketplace update omp-forge
+omp plugin upgrade forge@omp-forge
+```
+
+Naming the plugin always reinstalls the catalog's current version, so a same-version rebuild is picked up too. Restart OMP afterward.
+
+Legacy install.sh: fetch the new source, rebuild, and rerun the installer:
 
 ```bash
 git pull
@@ -70,7 +105,9 @@ Restart OMP after installation. Customized OMP agent prompts and existing config
 
 ## Remove or disable
 
-For OMP, run the bundled uninstaller:
+OMP plugin: `omp plugin uninstall forge@omp-forge`, or `omp plugin disable forge@omp-forge` to keep it installed. Your config, reports and checkpoints under the agent directory are kept.
+
+Legacy install.sh: run the bundled uninstaller:
 
 ```bash
 cd dist/omp/omp-forge-global-v6.1.0

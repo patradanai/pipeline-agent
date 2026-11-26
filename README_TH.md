@@ -101,7 +101,7 @@ modelRoles:
 
 ค่าเป็น `provider/model-id` (ต่อท้าย `:thinking` ได้) ต้องเป็นโมเดลที่ login ไว้ เปลี่ยน role ทีหลัง ทุก Gate ที่ใช้ role นั้นเปลี่ยนตามเอง
 
-**2. ตรวจ** ด้วย `/forge model` จะเห็น `PLANNING @plan`, `EXECUTION @default`, `QA @default`, `DELIVERY @default`
+**2. ตรวจ** ด้วย `/forge models` จะเห็น `PLANNING @plan`, `EXECUTION @default`, `QA @default`, `DELIVERY @default` พร้อม `effort: keep` ของแต่ละ Gate
 
 **3. เปลี่ยนราย Gate (ถ้าต้องการ)**
 
@@ -112,8 +112,17 @@ modelRoles:
 /forge model reset                                 # กลับค่าเริ่มต้น
 ```
 
+`/forge model` (ไม่ระบุอะไร) เปิดตัวช่วยเลือกทีละขั้น: เลือก Gate → เลือกโมเดล → เลือก effort (thinking level) ส่วน `/forge model planning` ข้ามขั้นเลือก Gate และการพิมพ์โมเดลเอง (เช่น `/forge model qa @plan`) ก็เปิดตัวเลือก effort ต่อให้ทันที กด Esc ที่ขั้น Gate หรือโมเดล = ไม่เปลี่ยนอะไร กด Esc ที่ขั้น effort = คง effort เดิม ตัวเลือก effort แสดงเฉพาะ level ที่โมเดลนั้นรองรับ (`off`, `auto` แล้วตาม level ของโมเดล) ตามข้อมูลจาก OMP
+
+```text
+/forge effort planning        # เลือก effort ของ planning
+/forge effort execution high  # off, minimal, low, medium, high, xhigh, max, auto
+/forge effort qa keep         # ใช้ thinking level ปัจจุบันของ session (ค่าเริ่มต้น)
+/forge effort reset           # ทุก Gate กลับเป็น keep
+```
+
 - สลับครั้งเดียวตอนเริ่ม Gate ก่อน turn แรก ถ้าเลือกเองด้วย `/model` ระหว่าง Gate, Forge ไม่ทับจนกว่าจะเข้า Gate ถัดไป
-- คง thinking level ปัจจุบันไว้ (`:high` ใน role ใช้เฉพาะตอน OMP เรียก role เอง)
+- effort เป็น `keep`: คง thinking level ปัจจุบันไว้ (`:high` ใน role ใช้เฉพาะตอน OMP เรียก role เอง) ถ้าตั้ง effort ไว้ Forge ตั้ง level นั้นตอนเริ่ม Gate; โมเดลไม่รองรับ level ไหน OMP จะปรับให้เป็น level ที่รองรับ
 - หาโมเดลไม่เจอหรือไม่มี credential: แจ้งเตือนแล้วใช้โมเดลเดิม และ `/forge model` จะไม่บันทึกโมเดลที่หาไม่เจอ
 - `/forge off` หรือจบงานแล้วไม่สลับกลับโมเดลเดิม
 - Claude Code ยังไม่รองรับ ใช้โมเดลของ session เสมอ
@@ -157,10 +166,13 @@ claude plugin install forge@forge-local
 
 ถ้าติดตั้งไว้แล้ว ให้สำรองโฟลเดอร์ marketplace เดิม แล้วย้ายออกก่อนคัดลอกชุดใหม่มาแทนที่ path เดิม อย่าคัดลอกทับ เพราะ agent และคำสั่งที่เลิกใช้อาจค้างอยู่ จากนั้นรัน `claude plugin update forge@forge-local --scope user` แล้วเริ่ม Claude Code ใหม่ ตรวจ `/agents` ต้องมี `forge:forge-code-reviewer` และ `forge:forge-plan-critic`
 
-**OMP**
+**OMP** (ติดตั้งเป็น plugin ผ่าน marketplace)
 ```bash
-cd dist/omp/omp-forge-global-v*/ && bash ./install.sh
+omp plugin marketplace add <repository-url หรือ /absolute/path/to/clone>
+omp plugin install forge@omp-forge
 ```
+
+อัปเกรด: `omp plugin marketplace update omp-forge && omp plugin upgrade forge@omp-forge` ตัวติดตั้งแบบเดิม `cd dist/omp/omp-forge-global-v*/ && bash ./install.sh` ยังใช้ได้ แต่ห้ามใช้คู่กับ plugin ถ้ามีทั้งสองแบบ plugin จะไม่ทำงานและแจ้งคำสั่งย้ายตัวเก่าออกให้
 
 แผน รายงาน QA และเอกสารส่งมอบถูกเก็บนอกโปรเจกต์ตาม data directory ของ host ส่วนโค้ดจะถูกแก้ในโปรเจกต์หลังอนุมัติแผนแล้ว ตรวจ diff ก่อนรวมงานเสมอ
 

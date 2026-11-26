@@ -230,6 +230,9 @@ test('each gate switches the main-session model before its turn and keeps thinki
   try {
     await x.commands.get('forge').handler('model qa @slow',x.ctx);
     assert.match(readFileSync(process.env.FORGE_CONFIG_PATH,'utf8'),/"qa": "@slow"/);
+    // Without the OMP picker, bare /forge model shows the mapping instead of the guided flow.
+    await x.commands.get('forge').handler('model',x.ctx);
+    assert.match(x.notifications.at(-1).message,/QA\s+@slow/);
     await advanceToReview(x);
     const first = x.log.findIndex(e=>e[0]==='setModel');
     assert.deepEqual(x.log[first],['setModel','anthropic/opus']);
@@ -262,15 +265,16 @@ test('each gate switches the main-session model before its turn and keeps thinki
   assert.match(readFileSync(process.env.FORGE_CONFIG_PATH,'utf8'),/"qa": "@default"/);
 });
 
-test('planning model picker saves an available model and leaves config untouched on cancel', async () => {
+test('planning model picker asks for an effort from the picked model levels, saves both and leaves config untouched on cancel', async () => {
   const x=setup();
-  const planModel={provider:'anthropic',id:'sonnet'};
-  const original={provider:'openai',id:'gpt'};
+  const planModel={provider:'anthropic',id:'sonnet',reasoning:true,thinking:{efforts:['xhigh','low','medium','high']}};
+  const original={provider:'openai',id:'gpt',reasoning:false};
   x.ctx.models={
     list:()=>[original,planModel],
     resolve:selector=>({'@plan':original,'anthropic/sonnet':planModel})[selector],
     current:()=>x.getModel(),
   };
+  x.setThinking('medium');
   await reachPlanning(x);
   const forge=x.commands.get('forge');
   const configPath=process.env.FORGE_CONFIG_PATH;
@@ -279,17 +283,90 @@ test('planning model picker saves an available model and leaves config untouched
   await forge.handler('model planning',x.ctx);
   assert.equal(readFileSync(configPath,'utf8'),before);
   assert.deepEqual(x.getModel(),original);
-  x.ctx.ui.select=async(_title,options)=>{
-    assert.deepEqual(options,['anthropic/sonnet','openai/gpt']);
-    return 'anthropic/sonnet';
+  const answers=[];
+  x.ctx.ui.select=async(title,options)=>{
+    if (/^Forge · Model for planning/.test(title)) {
+      assert.deepEqual(options,['anthropic/sonnet','openai/gpt']);
+      return 'anthropic/sonnet';
+    }
+    assert.match(title,/^Forge · Effort for planning on anthropic\/sonnet/);
+    assert.deepEqual(options,['keep (session thinking level)','off','auto','low','medium','high','xhigh'],'only the levels the model supports, in OMP order');
+    return answers.shift();
   };
   try {
+    answers.push('xhigh');
+    const mark=x.log.length;
     await forge.handler('model planning',x.ctx);
-    assert.equal(JSON.parse(readFileSync(configPath,'utf8')).gateModels.planning,'anthropic/sonnet');
+    const cfg=JSON.parse(readFileSync(configPath,'utf8'));
+    assert.equal(cfg.gateModels.planning,'anthropic/sonnet');
+    assert.equal(cfg.gateEfforts.planning,'xhigh');
     assert.deepEqual(x.getModel(),planModel);
+    assert.equal(x.pi.getThinkingLevel(),'xhigh','the running gate applies the picked effort now');
+    assert.ok(!x.log.slice(mark).some(e=>e[0]==='thinking'&&e[1]==='medium'),'a gate effort replaces the kept session level');
+    // Esc on the effort step keeps the saved effort; the model choice still saves.
+    answers.push(undefined);
+    await forge.handler('model planning',x.ctx);
+    assert.equal(JSON.parse(readFileSync(configPath,'utf8')).gateEfforts.planning,'xhigh');
+    // A typed or autocompleted model also opens the effort step for that model.
+    answers.push('high');
+    await forge.handler('model planning anthropic/sonnet',x.ctx);
+    assert.equal(JSON.parse(readFileSync(configPath,'utf8')).gateEfforts.planning,'high');
+    assert.equal(x.pi.getThinkingLevel(),'high');
+    // Bare /forge model walks gate → model → effort; Esc on the gate step changes nothing.
+    const pickerSelect=x.ctx.ui.select;
+    const titles=[];
+    x.ctx.ui.select=async(title,options)=>{
+      titles.push(title);
+      if (/^Forge · Gate to configure/.test(title)) {
+        assert.deepEqual(options,[
+          'planning · model anthropic/sonnet · effort high',
+          'execution · model @default · effort keep',
+          'qa · model @default · effort keep',
+          'delivery · model @default · effort keep',
+        ]);
+        return answers.shift();
+      }
+      return pickerSelect(title,options);
+    };
+    answers.push(undefined);
+    const beforeGuided=readFileSync(configPath,'utf8');
+    await forge.handler('model',x.ctx);
+    assert.equal(readFileSync(configPath,'utf8'),beforeGuided);
+    answers.push('planning · model anthropic/sonnet · effort high','xhigh');
+    await forge.handler('model',x.ctx);
+    assert.equal(titles.length,4,'gate step only on cancel, then gate, model and effort');
+    assert.match(titles[2],/^Forge · Model for planning/);
+    assert.match(titles[3],/^Forge · Effort for planning on anthropic\/sonnet/);
+    assert.equal(JSON.parse(readFileSync(configPath,'utf8')).gateEfforts.planning,'xhigh');
+    x.ctx.ui.select=pickerSelect;
+    let mark2=x.notifications.length;
+    await forge.handler('effort planning low',x.ctx);
+    assert.equal(JSON.parse(readFileSync(configPath,'utf8')).gateEfforts.planning,'low');
+    assert.equal(x.pi.getThinkingLevel(),'low');
+    assert.ok(!x.notifications.slice(mark2).some(n=>n.level==='warning'),'a supported typed level saves quietly');
+    mark2=x.notifications.length;
+    await forge.handler('effort planning max',x.ctx);
+    assert.equal(JSON.parse(readFileSync(configPath,'utf8')).gateEfforts.planning,'max');
+    assert.ok(x.notifications.slice(mark2).some(n=>n.level==='warning'&&/anthropic\/sonnet supports off, auto, low, medium, high, xhigh/.test(n.message)));
+    // A gate that keeps the session model offers that model's levels: a non-reasoning model only has off.
+    await forge.handler('model planning keep',x.ctx);
+    x.setModel(original);
+    let offered;
+    x.ctx.ui.select=async(title,options)=>{ offered=options; return undefined; };
+    await forge.handler('effort planning',x.ctx);
+    assert.deepEqual(offered,['keep (session thinking level)','off']);
+    x.ctx.ui.select=async(title,options)=>{
+      assert.match(title,/^Forge · Effort for planning/);
+      return answers.shift();
+    };
+    answers.push('keep (session thinking level)');
+    await forge.handler('effort planning',x.ctx);
+    assert.equal(JSON.parse(readFileSync(configPath,'utf8')).gateEfforts.planning,null);
   } finally {
     await forge.handler('model reset',x.ctx);
+    await forge.handler('effort reset',x.ctx);
   }
+  assert.deepEqual(JSON.parse(readFileSync(configPath,'utf8')).gateEfforts,{planning:null,execution:null,qa:null,delivery:null});
 });
 
 test('an execution turn without forge_execution_done is reminded, then paused; Reply and resume current continue with approval kept', async () => {

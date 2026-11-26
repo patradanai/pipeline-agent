@@ -85,7 +85,7 @@ Run these in the main OMP session:
 | `/forge recover` | Review a detected checkpoint inconsistency. |
 | `/forge agents` | Show the fixed Forge agent mapping. |
 | `/forge planreview on\|off` | Turn the optional plan critic on or off (default OFF, saved in Forge config, applies to new workflows). When ON, the main agent must run `forge-plan-critic` once on the written plan and cite every CRITICAL/HIGH PC-id in the plan before Forge accepts the proposal. |
-| `/forge model` | Show or change the main-session model used by each gate (OMP only). See [Gate models (OMP)](#gate-models-omp). |
+| `/forge model` | Pick a gate, then its main-session model and effort (OMP only). `/forge models` lists the mapping. See [Gate models (OMP)](#gate-models-omp). |
 | `/forge skill` | Manage optional skills assigned to gates. |
 | `/forge off` | Cancel the current Forge workflow. |
 
@@ -135,19 +135,19 @@ Each value is `provider/model-id`, optionally with `:thinking-level`. Use models
 ### Step 2: check the mapping
 
 ```text
-/forge model
+/forge models
 ```
 
 ```text
-PLANNING     @plan
-EXECUTION    @default
-QA           @default
-DELIVERY     @default
+PLANNING     @plan                                effort: keep
+EXECUTION    @default                             effort: keep
+QA           @default                             effort: keep
+DELIVERY     @default                             effort: keep
 ```
 
 ### Step 3 (optional): change a gate
 
-Run `/forge model planning` to pick the planning model from OMP's available models. This saves a Forge-only override; it does not change the OMP role `@plan`. Press Esc to leave the setting unchanged, or run `/forge model planning @plan` to restore the role.
+Run `/forge model` to walk three pickers: the gate, then a model from OMP's available models, then its effort (thinking level). `/forge model planning` starts at the model step. A typed model (`/forge model qa @plan`) also opens the effort picker for that model. This saves a Forge-only override; it does not change the OMP role `@plan`. Press Esc on the gate or model step to leave both settings unchanged, or on the effort step to keep the saved effort. Run `/forge model planning @plan` to restore the role.
 
 ```text
 /forge model qa @plan                              # QA on the plan role model
@@ -158,12 +158,23 @@ Run `/forge model planning` to pick the planning model from OMP's available mode
 
 - A selector is `@<role>` (any role in `modelRoles`, e.g. `@slow`, `@smol` when you define them) or `provider/model-id`.
 - Forge rejects a model OMP cannot find and leaves the config unchanged.
-- Settings are saved in the Forge `config.json` (`gateModels`) and apply to the running workflow: changing the current gate switches now; other gates switch when they start.
+- Settings are saved in the Forge `config.json` (`gateModels`, `gateEfforts`) and apply to the running workflow: changing the current gate switches now; other gates switch when they start.
+
+### Effort (thinking level) per gate
+
+```text
+/forge effort planning            # pick a level for planning
+/forge effort execution high      # set directly: off, minimal, low, medium, high, xhigh, max, auto
+/forge effort qa keep             # keep the session's thinking level at this gate (default)
+/forge effort reset               # every gate keeps the session's thinking level
+```
+
+The effort picker lists only the levels the gate's model supports (as OMP reports them: `off`, `auto`, then the model's own levels). A gate that keeps the current model uses the current session model's levels. A model OMP has no thinking data for shows every level. A typed level the model does not support still saves, with a warning naming the supported levels; OMP clamps it to one the model supports, and the gate-start notice shows the level in force.
 
 ### Behavior
 
 - Forge switches once when a gate starts, before its first turn. If you pick another model with `/model` inside a gate, Forge keeps your choice until the next gate.
-- The current **thinking level is kept** across switches. A role's `:high` suffix applies only when OMP itself uses that role; Forge keeps the session's thinking level instead.
+- With effort `keep`, the current **thinking level is kept** across switches. A role's `:high` suffix applies only when OMP itself uses that role; to set a level per gate, use `/forge effort`. A manual effort change inside a gate is kept until the next gate.
 - If a model is missing or has no credentials, Forge shows a warning and keeps the current model.
 - `/forge off` and the end of delivery do not restore the earlier model.
 - Claude Code does not support gate models; it always uses the session model.
@@ -178,7 +189,7 @@ Prompts and requirements may appear in the host conversation and Forge's persist
 
 ### OMP does not show Forge
 
-Restart OMP after installing. Confirm `~/.omp/agent/extensions/forge/index.ts` exists, and use `/forge status` in a main TUI session. If using a custom data directory, inspect `$PI_CODING_AGENT_DIR/extensions/forge/index.ts` instead.
+Restart OMP after installing, then use `/forge status` in a main TUI session. Plugin install: `omp plugin list` must show `forge@omp-forge`, and it must not be disabled. If Forge says the plugin is inactive, an old `install.sh` copy is still at `~/.omp/agent/extensions/forge`; run the `mv` command it prints, then restart. Legacy install: confirm `~/.omp/agent/extensions/forge/index.ts` exists (`$PI_CODING_AGENT_DIR/extensions/forge/index.ts` with a custom data directory).
 
 ### Forge reports missing agents
 

@@ -5,7 +5,7 @@ import { snapshotWorkingTree as coreSnapshotWorkingTree, inspectWorkspaceScope }
 import { hasGateAgents, markGateAgent, approvedExecutionState, qaReportTransition, assertQaSubmittable, assertDeliverySubmittable, assertPlanProposable, deliveryTransition, approveReworkTransition, steeringRoute, steerTransition, executionDoneTransition, enterQaState, executionStopTransition, qaResubmission } from './transitions.mjs';
 import { sessionIdentity, recoveryIdentity, persistForgeCheckpoint, loadForgeCheckpointCandidates, loadForgeCheckpointRecord, pruneForgeCheckpoints, candidateFromSessionEntries, prepareHumanRecovery, isValidRestoreCandidate } from './checkpoint-recovery.mjs';
 import { normalizeForgeState } from './forge-state.mjs';
-import { mkdirSync, readFileSync, writeFileSync, lstatSync, renameSync, readdirSync, unlinkSync, realpathSync, statSync, rmdirSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, lstatSync, renameSync, readdirSync, unlinkSync, realpathSync, statSync, rmdirSync, existsSync, copyFileSync, constants as fsConstants } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
@@ -15,7 +15,7 @@ import {
   GATE_AGENTS, validateSkillMarkdown,
   SKILL_GATES, SKILL_NAME_PATTERN,
   cloneGateSkills, addGateSkill, removeGateSkill, resetGateSkills, formatGateSkills,
-  currentSkillGate, injectGateSkillsIntoTask, cloneGateModels, formatGateModels,
+  currentSkillGate, injectGateSkillsIntoTask, cloneGateModels, formatGateModels, cloneGateEfforts, GATE_EFFORT_LEVELS,
   inlineGateSkills, skillAudience, formatQaCounts, executionReminder,
   DEFAULT_AGENT_ASSIGNMENTS,
   cloneAgentAssignments,
@@ -55,6 +55,15 @@ import {
   forgePlanPath,
 } from './core.mjs';
 
+/** Package name of the `omp plugin` / marketplace build (dist/omp/forge/package.json). */
+const PLUGIN_PACKAGE_NAME = 'omp-forge';
+/** Root of the plugin package when this module runs from one; null for the install.sh copy. */
+function forgePluginRoot(extensionDir: string): string | null {
+  const root = resolve(extensionDir, '..');
+  try { return JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))?.name === PLUGIN_PACKAGE_NAME ? root : null; }
+  catch { return null; }
+}
+
 /**
  * Global OMP Forge Harness v6.1 — OMP adapter over the shared Forge core.
  *
@@ -62,7 +71,8 @@ import {
  * FAIL: rework planning -> renewed approval -> execute -> QA;
  * PASS: delivery summary + pasteable commit message; never auto-commit.
  *
- * Install globally in ~/.omp/agent/extensions/forge/index.ts.
+ * Install as an OMP plugin (`omp plugin install forge@omp-forge`), or with the
+ * legacy install.sh into ~/.omp/agent/extensions/forge/index.ts.
  * Never changes a project's files during the planning or QA stages.
  */
 export default function forgeExtension(pi: ExtensionAPI) {
@@ -70,17 +80,40 @@ export default function forgeExtension(pi: ExtensionAPI) {
 
   const stateEntry = 'dev.omp-forge.workflow.v1'; // keep existing state entry for upgrades
   const extensionDir = dirname(fileURLToPath(import.meta.url));
-  const configPath = process.env.FORGE_CONFIG_PATH || join(extensionDir, 'config.json');
   const agentRoot = process.env.PI_CODING_AGENT_DIR || join(homedir(), '.omp', 'agent');
+  // A plugin runs from a version-keyed cache that every upgrade replaces, so user
+  // state (config, reports, created skills) lives under the agent directory instead.
+  const pluginRoot = forgePluginRoot(extensionDir);
+  const legacyExtensionDir = join(agentRoot, 'extensions', 'forge');
+  const configPath = process.env.FORGE_CONFIG_PATH || join(agentRoot, 'forge', 'config.json');
+  // install.sh kept config.json beside the extension; adopt it once, never overwrite.
+  const legacyConfigPath = join(legacyExtensionDir, 'config.json');
+  if (!process.env.FORGE_CONFIG_PATH && existsSync(legacyConfigPath) && !existsSync(configPath)) {
+    try {
+      mkdirSync(dirname(configPath), { recursive: true });
+      copyFileSync(legacyConfigPath, configPath, fsConstants.COPYFILE_EXCL);
+    } catch { /* unreadable legacy config: Forge starts with defaults */ }
+  }
+  if (pluginRoot && existsSync(join(legacyExtensionDir, 'index.ts'))) {
+    // The install.sh copy registers the same /forge command and tools; running both
+    // would double every hook. Stay inactive until the user parks the old copy.
+    const parked = join(agentRoot, 'forge-disabled', 'forge.legacy-$(date +%Y%m%d-%H%M%S)');
+    pi.on('session_start', async (_event, ctx) => {
+      if (ctx.agent?.kind !== 'main') return;
+      ctx.ui?.notify?.(`Forge plugin is inactive: an install.sh copy of Forge is still loaded from ${legacyExtensionDir}.\nPark it, then restart OMP:\n  mkdir -p "${join(agentRoot, 'forge-disabled')}" && mv "${legacyExtensionDir}" "${parked}"\nYour Forge config is kept at ${configPath}. Agents and skills you customized under ${agentRoot} stay in place.`, 'warning');
+    });
+    return;
+  }
   const installedAgentsDir = join(agentRoot, 'agents');
   let workspaceDir = process.cwd();
   const configuredAgents = cloneAgentAssignments();
   let configuredSkills = cloneGateSkills();
   let configuredGateModels: Record<string, string | null> = cloneGateModels();
-  // `${slug}:${gate}` already handled; the gate model switches once per gate entry.
+  let configuredGateEfforts: Record<string, string | null> = cloneGateEfforts();
+  // `${slug}:${gate}` already handled; the gate model and effort apply once per gate entry.
   let appliedGateKey: string | null = null;
   let guardedAgentNames = new Set(listAssignedAgentNames(configuredAgents));
-  const reportRoot = process.env.FORGE_REPORT_DIR || resolve(extensionDir, '../..', 'forge-reports');
+  const reportRoot = process.env.FORGE_REPORT_DIR || join(agentRoot, 'forge-reports');
   let workflow: any = null;
   let pendingCheckpointRecovery: any = null;
   let currentSessionIdentity: any = null;
@@ -155,6 +188,8 @@ export default function forgeExtension(pi: ExtensionAPI) {
     catch { configuredSkills = cloneGateSkills(); }
     try { configuredGateModels = cloneGateModels(cfg.gateModels); }
     catch { configuredGateModels = cloneGateModels(); }
+    try { configuredGateEfforts = cloneGateEfforts(cfg.gateEfforts); }
+    catch { configuredGateEfforts = cloneGateEfforts(); }
     guardedAgentNames = new Set([
       ...listAssignedAgentNames(DEFAULT_AGENT_ASSIGNMENTS),
       ...(Array.isArray(cfg.guardedAgentNames) ? cfg.guardedAgentNames.filter((name: unknown) => typeof name === 'string') : []),
@@ -178,9 +213,10 @@ export default function forgeExtension(pi: ExtensionAPI) {
 
   function saveConfig(value: boolean) { persistConfig({ autoStart: value }); }
 
-  // Portable SKILL.md location: native global OMP first, then explicit Claude user skills.
+  // Portable SKILL.md location: native global OMP first, then explicit Claude user skills,
+  // then the gate skills bundled with the plugin package (user copies of the same name win).
   // No arbitrary file path is accepted through /forge skill commands.
-  const skillRoots = [join(agentRoot, 'skills'), join(homedir(), '.claude', 'skills')];
+  const skillRoots = [join(agentRoot, 'skills'), join(homedir(), '.claude', 'skills'), ...(pluginRoot ? [join(pluginRoot, 'skills')] : [])];
   const MAX_SKILL_BYTES = 24 * 1024;
   const MAX_GATE_BYTES = 96 * 1024;
   function findInstalledSkill(name: string): { path: string; sha256: string; content: string } | null {
@@ -350,6 +386,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
     for (const {root, source} of [
       {root:nearestProjectAgents,source:'project'},
       {root:installedAgentsDir,source:'global'},
+      ...(pluginRoot ? [{root:join(pluginRoot,'agents'),source:'plugin'}] : []),
     ]) {
       try {
         for (const entry of readdirSync(root, {withFileTypes:true})) {
@@ -755,9 +792,10 @@ export default function forgeExtension(pi: ExtensionAPI) {
     }
   }
 
-  /** Switch the main session to the configured model once per gate entry, keeping the thinking
-   * level; a manual /model pick inside a gate is kept. Returns false when the gate changed while
-   * the switch was awaited (cancel, steering, session switch): the caller must not dispatch. */
+  /** Switch the main session to the configured model and thinking level once per gate entry; a
+   * gate without an effort keeps the session's thinking level. A manual /model or effort pick
+   * inside a gate is kept. Returns false when the gate changed while the switch was awaited
+   * (cancel, steering, session switch): the caller must not dispatch. */
   async function syncGateModel(ctx: any): Promise<boolean> {
     const snapshot = gateSnapshot(ctx);
     await switchGateModel(ctx);
@@ -765,37 +803,91 @@ export default function forgeExtension(pi: ExtensionAPI) {
   }
   async function switchGateModel(ctx: any): Promise<void> {
     if (ctx?.agent?.kind !== 'main' || !workflow?.active) return;
-    if (typeof pi.setModel !== 'function' || typeof ctx.models?.resolve !== 'function') return;
     const gate = currentSkillGate(workflow.phase, workflow.qaStatus);
     if (!gate) return;
     const key = `${workflow.slug}:${gate}`;
     if (appliedGateKey === key) return;
+    const switched = await switchGateMainModel(ctx, gate);
+    // null: transient failure; the key stays unset so the next sync point retries.
+    if (switched === null) return;
+    appliedGateKey = key;
+    const effort = configuredGateEfforts[gate];
+    const before = pi.getThinkingLevel?.();
+    if (effort != null && typeof pi.setThinkingLevel === 'function') pi.setThinkingLevel(effort);
+    const after = pi.getThinkingLevel?.();
+    const effortChanged = effort != null && after !== before;
+    if (!switched && !effortChanged) return;
+    const parts: string[] = [];
+    if (switched) parts.push(`model ${switched}`);
+    // OMP clamps a level to what the model supports, so report the level actually in force.
+    if (effort != null) parts.push(`effort ${after ?? effort}${after !== undefined && after !== effort ? ` (requested ${effort})` : ''}`);
+    notify(ctx, `Forge ${gate}: ${parts.join(' · ')}`);
+  }
+  /** OMP model shape: `reasoning` and `thinking.efforts` list the levels the model supports. */
+  type GateModelRef = { provider: string; id: string; reasoning?: boolean; thinking?: { efforts?: readonly string[] } };
+  type GateModelContext = { models?: { resolve?: (selector: string) => GateModelRef | undefined; current?: () => GateModelRef | undefined } };
+  /** Returns the `provider/id` switched to, '' when no switch was needed or possible, null to retry. */
+  async function switchGateMainModel(ctx: GateModelContext, gate: string): Promise<string | null> {
     const selector = configuredGateModels[gate];
-    if (selector == null) { appliedGateKey = key; return; }
+    if (selector == null) return '';
+    if (typeof pi.setModel !== 'function' || typeof ctx.models?.resolve !== 'function') return '';
     const model = ctx.models.resolve(selector);
     if (!model) {
-      appliedGateKey = key;
       notify(ctx, `Forge ${gate}: model "${selector}" is not available; keeping the current model. Change it with /forge model ${gate} <selector>.`, 'warning');
-      return;
+      return '';
     }
     const current = ctx.models.current?.();
-    if (current?.provider === model.provider && current?.id === model.id) { appliedGateKey = key; return; }
+    if (current?.provider === model.provider && current?.id === model.id) return '';
     const level = pi.getThinkingLevel?.();
     try {
       const ok = await pi.setModel(model);
       if (ok === false) {
-        appliedGateKey = key;
         notify(ctx, `Forge ${gate}: no credentials for ${model.provider}/${model.id}; keeping the current model.`, 'warning');
-        return;
+        return '';
       }
     } catch (err) {
-      // Key stays unset so the next sync point retries.
       notify(ctx, `Forge ${gate}: could not switch to ${model.provider}/${model.id}: ${String(err)}`, 'warning');
-      return;
+      return null;
     }
-    if (level !== undefined) pi.setThinkingLevel?.(level);
-    appliedGateKey = key;
-    notify(ctx, `Forge ${gate}: model ${model.provider}/${model.id}`);
+    // Keep the session's level across the switch unless this gate sets its own effort.
+    if (level !== undefined && configuredGateEfforts[gate] == null) pi.setThinkingLevel?.(level);
+    return `${model.provider}/${model.id}`;
+  }
+  const KEEP_EFFORT = 'keep (session thinking level)';
+  /** The model a gate runs on: its selector, or the current session model when the gate keeps it. */
+  function gateTargetModel(ctx: GateModelContext, selector: string | null): GateModelRef | undefined {
+    try { return selector != null ? ctx.models?.resolve?.(selector) : ctx.models?.current?.(); }
+    catch { return undefined; }
+  }
+  /** Levels OMP offers for a model, in its own picker order (off, auto, then the model's efforts);
+   * null when the model or its thinking metadata is unknown. */
+  function modelEffortLevels(model: GateModelRef | undefined): string[] | null {
+    if (!model || typeof model.reasoning !== 'boolean') return null;
+    if (!model.reasoning) return ['off'];
+    const efforts = Array.isArray(model.thinking?.efforts) ? model.thinking.efforts : [];
+    return ['off', 'auto', ...GATE_EFFORT_LEVELS.filter(level => efforts.includes(level))];
+  }
+  /** Picker step for a gate's thinking level: a level, null for keep, undefined when cancelled.
+   * Options come from the model the gate runs on; unknown models get every level (OMP clamps). */
+  async function pickGateEffort(ctx: GateModelContext & { ui?: { select?: (title: string, options: string[]) => Promise<string | undefined> } }, gate: string, selector: string | null): Promise<string | null | undefined> {
+    if (typeof ctx.ui?.select !== 'function') return undefined;
+    const model = gateTargetModel(ctx, selector);
+    const supported = modelEffortLevels(model);
+    const levels = supported ?? [...GATE_EFFORT_LEVELS];
+    const target = model && supported ? `${model.provider}/${model.id}` : null;
+    const title = target
+      ? `Forge · Effort for ${gate} on ${target} (current: ${configuredGateEfforts[gate] ?? 'keep'}; levels this model supports)`
+      : `Forge · Effort for ${gate} (current: ${configuredGateEfforts[gate] ?? 'keep'}; OMP clamps a level the model does not support)`;
+    const options = [KEEP_EFFORT, ...levels];
+    const choice = await ctx.ui.select(title, options);
+    if (choice === KEEP_EFFORT) return null;
+    return choice !== undefined && levels.includes(choice) ? choice : undefined;
+  }
+  /** Gate models and efforts are live config: a change to the running gate applies now. */
+  async function reapplyGateConfig(ctx: GateContext, gate: string): Promise<void> {
+    if (!workflow?.active || currentSkillGate(workflow.phase, workflow.qaStatus) !== gate) return;
+    appliedGateKey = null;
+    await syncGateModel(ctx);
   }
 
   /** The proposed plan can no longer be reviewed: return to an unproposed PLAN gate. */
@@ -1439,7 +1531,7 @@ export default function forgeExtension(pi: ExtensionAPI) {
   });
 
   pi.registerCommand('forge', {
-    description: 'Start Forge, manage Gate Skills and gate models (/forge model), and inspect workflow. Configure Forge subagent models using OMP /agents.',
+    description: 'Start Forge, manage Gate Skills, gate models and efforts (/forge model, /forge effort), and inspect workflow. Configure Forge subagent models using OMP /agents.',
     getArgumentCompletions: (prefix: string) => getForgeArgumentCompletions(prefix, {
       skills: listInstalledSkills(),
       gateSkills: configuredSkills,
@@ -1480,35 +1572,71 @@ export default function forgeExtension(pi: ExtensionAPI) {
         return;
       }
       if (command.type === 'modelInvalid') return notify(ctx, command.message, 'warning');
-      if (command.type === 'models') return notify(ctx, `Forge gate models (main session; applied when a gate starts; thinking level kept):\n${formatGateModels(configuredGateModels)}\nPick from available models: /forge model <gate>. Subagent models: OMP /agents.`);
+      const showGateModels = () => notify(ctx, `Forge gate models (main session; applied when a gate starts; effort keep = session thinking level):\n${formatGateModels(configuredGateModels, configuredGateEfforts)}\nPick a gate, model and effort: /forge model. One gate: /forge model <gate>. Effort only: /forge effort <gate>. Subagent models: OMP /agents.`);
+      if (command.type === 'models') return showGateModels();
       if (command.type === 'modelSet' || command.type === 'modelPick') {
+        let gate: string | null = command.gate;
+        if (gate === null) {
+          // Bare /forge model: pick the gate first; without the OMP picker, show the mapping.
+          if (typeof ctx.ui?.select !== 'function') return showGateModels();
+          const gateOptions = Object.keys(configuredGateModels).map(g => ({ g, label: `${g} · model ${configuredGateModels[g] ?? 'keep'} · effort ${configuredGateEfforts[g] ?? 'keep'}` }));
+          const pickedGate = await ctx.ui.select('Forge · Gate to configure (model, then effort)', gateOptions.map(o => o.label));
+          gate = gateOptions.find(o => o.label === pickedGate)?.g ?? null;
+          if (gate === null) return;
+        }
         let selector = command.type === 'modelSet' ? command.selector : null;
+        let effort = configuredGateEfforts[gate];
         if (command.type === 'modelPick') {
           if (typeof ctx.ui?.select !== 'function' || typeof ctx.models?.list !== 'function') {
             return notify(ctx, 'Model selection needs the OMP picker and model list. Use /forge model <gate> <@role|provider/model-id|keep> instead.', 'warning');
           }
           const options = [...new Set<string>(ctx.models.list().map((model: { provider: string; id: string }) => `${model.provider}/${model.id}`))].sort();
           if (!options.length) return notify(ctx, 'No models are available in OMP. Sign in to a provider with /login, then try again.', 'warning');
-          selector = await ctx.ui.select(`Forge · Model for ${command.gate} (current: ${configuredGateModels[command.gate] ?? 'keep'})`, options);
+          selector = await ctx.ui.select(`Forge · Model for ${gate} (current: ${configuredGateModels[gate] ?? 'keep'})`, options);
           if (!options.includes(selector)) return;
         }
         if (selector !== null && !(typeof ctx.models?.resolve === 'function' && ctx.models.resolve(selector))) {
           return notify(ctx, `Model "${selector}" not found among authenticated models; nothing changed.`, 'error');
         }
-        try { persistConfig({ gateModels: { ...configuredGateModels, [command.gate]: selector } }); }
+        // Every model change, picked or typed, asks for the effort when the OMP picker exists.
+        // Esc on the effort step keeps the saved effort; the model choice is still saved.
+        const picked = await pickGateEffort(ctx, gate, selector);
+        if (picked !== undefined) effort = picked;
+        try { persistConfig({ gateModels: { ...configuredGateModels, [gate]: selector }, gateEfforts: { ...configuredGateEfforts, [gate]: effort } }); }
         catch (err) { return notify(ctx, `Could not save config: ${String(err)}`, 'error'); }
-        notify(ctx, `Forge ${command.gate} model → ${selector ?? 'keep current model'}.`);
-        // Gate models are live config: a change to the running gate applies now.
-        if (workflow?.active && currentSkillGate(workflow.phase, workflow.qaStatus) === command.gate) {
-          appliedGateKey = null;
-          await syncGateModel(ctx);
-        }
+        notify(ctx, `Forge ${gate} model → ${selector ?? 'keep current model'} · effort → ${effort ?? 'keep session level'}.`);
+        await reapplyGateConfig(ctx, gate);
         return;
       }
       if (command.type === 'modelReset') {
         try { persistConfig({ gateModels: cloneGateModels() }); }
         catch (err) { return notify(ctx, `Could not save config: ${String(err)}`, 'error'); }
-        return notify(ctx, `Forge gate models reset:\n${formatGateModels(configuredGateModels)}`);
+        return notify(ctx, `Forge gate models reset:\n${formatGateModels(configuredGateModels, configuredGateEfforts)}`);
+      }
+      if (command.type === 'effortSet' || command.type === 'effortPick') {
+        let effort = command.type === 'effortSet' ? command.level : null;
+        if (command.type === 'effortPick') {
+          if (typeof ctx.ui?.select !== 'function') {
+            return notify(ctx, `Effort selection needs the OMP picker. Use /forge effort <gate> <${GATE_EFFORT_LEVELS.join('|')}|keep> instead.`, 'warning');
+          }
+          const picked = await pickGateEffort(ctx, command.gate, configuredGateModels[command.gate]);
+          if (picked === undefined) return;
+          effort = picked;
+        }
+        try { persistConfig({ gateEfforts: { ...configuredGateEfforts, [command.gate]: effort } }); }
+        catch (err) { return notify(ctx, `Could not save config: ${String(err)}`, 'error'); }
+        // A typed level the gate's model lacks still saves; say what the model offers instead.
+        const model = effort != null ? gateTargetModel(ctx, configuredGateModels[command.gate]) : undefined;
+        const supported = modelEffortLevels(model);
+        const hint = model && supported && !supported.includes(effort) ? ` ${model.provider}/${model.id} supports ${supported.join(', ')}; OMP clamps ${effort} to the nearest one.` : '';
+        notify(ctx, `Forge ${command.gate} effort → ${effort ?? 'keep session level'}.${hint}`, hint ? 'warning' : 'info');
+        await reapplyGateConfig(ctx, command.gate);
+        return;
+      }
+      if (command.type === 'effortReset') {
+        try { persistConfig({ gateEfforts: cloneGateEfforts() }); }
+        catch (err) { return notify(ctx, `Could not save config: ${String(err)}`, 'error'); }
+        return notify(ctx, `Forge gate efforts reset (every gate keeps the session thinking level):\n${formatGateModels(configuredGateModels, configuredGateEfforts)}`);
       }
       if (command.type === 'recover') {
         await showStateRecovery(ctx, true);
