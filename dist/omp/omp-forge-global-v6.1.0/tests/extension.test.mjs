@@ -292,6 +292,54 @@ test('planning model picker saves an available model and leaves config untouched
   }
 });
 
+test('model picker asks for effort, and a pinned effort replaces the kept thinking level', async () => {
+  const x=setup();
+  const planModel={provider:'anthropic',id:'opus',reasoning:true,thinking:{efforts:['low','medium','high','xhigh','max']}};
+  const current={provider:'openai',id:'gpt',reasoning:true,thinking:{efforts:['low','high']}};
+  const plain={provider:'local',id:'plain',reasoning:false};
+  x.ctx.models={
+    list:()=>[current,planModel,plain],
+    resolve:selector=>({
+      '@plan':current,'@default':current,
+      'openai/gpt':current,'anthropic/opus':planModel,'local/plain':plain,
+    })[selector],
+    current:()=>x.getModel(),
+  };
+  x.setModel(current); x.setThinking('low');
+  await reachPlanning(x);
+  const forge=x.commands.get('forge');
+  const configPath=process.env.FORGE_CONFIG_PATH;
+  const before=readFileSync(configPath,'utf8');
+  let calls=0;
+  x.ctx.ui.select=async(_title,options,dialog)=>{
+    calls++;
+    if (calls===1) return 'anthropic/opus';
+    assert.equal(options[0],'auto');
+    assert.equal(dialog?.initialIndex,0);
+    return undefined;
+  };
+  await forge.handler('model planning',x.ctx);
+  assert.equal(readFileSync(configPath,'utf8'),before,'Esc on effort leaves the model unchanged');
+  assert.deepEqual(x.getModel(),current);
+  calls=0;
+  x.ctx.ui.select=async(_title,options,dialog)=>++calls===1 ? 'anthropic/opus' : (assert.equal(dialog?.initialIndex,0), assert.ok(options.includes('xhigh')), 'xhigh');
+  try {
+    await forge.handler('model planning',x.ctx);
+    assert.equal(JSON.parse(readFileSync(configPath,'utf8')).gateModels.planning,'anthropic/opus:xhigh');
+    assert.deepEqual(x.getModel(),planModel);
+    assert.deepEqual(x.log.filter(e=>e[0]==='thinking').at(-1),['thinking','xhigh']);
+    const saved=readFileSync(configPath,'utf8');
+    await forge.handler('model planning anthropic/opus:minimal',x.ctx);
+    assert.equal(x.notifications.at(-1).level,'error');
+    assert.equal(readFileSync(configPath,'utf8'),saved);
+    await forge.handler('model planning local/plain:high',x.ctx);
+    assert.match(x.notifications.at(-1).message,/no adjustable effort/);
+    assert.equal(readFileSync(configPath,'utf8'),saved);
+  } finally {
+    await forge.handler('model reset',x.ctx);
+  }
+});
+
 test('an execution turn without forge_execution_done is reminded, then paused; Reply and resume current continue with approval kept', async () => {
   const x=setup(); await advanceToReview(x);
   await approvePlan(x);

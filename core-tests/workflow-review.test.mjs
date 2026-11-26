@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   isProhibitedGitCommand, validatePlanContract, extractApprovedCommands, GATE_MODEL_SELECTOR_PATTERN,
+  splitGateModelSelector, normalizeGateModelSelector,
   buildCommitMessage, inlineGateSkills, skillAudience, initialState, phaseInstruction,
 } from '../core/core.mjs';
 import { executionStopTransition, executionDoneTransition, approvedExecutionState, qaResubmission, MAX_QA_RESUBMITS } from '../core/transitions.mjs';
@@ -32,6 +33,11 @@ test('model selectors need a role name after @; commit subjects reject control c
   assert.equal(GATE_MODEL_SELECTOR_PATTERN.test('@'), false);
   assert.equal(GATE_MODEL_SELECTOR_PATTERN.test('@plan'), true);
   assert.equal(GATE_MODEL_SELECTOR_PATTERN.test('anthropic/claude-opus-5-5'), true);
+  assert.equal(GATE_MODEL_SELECTOR_PATTERN.test('@plan:high'), true);
+  assert.equal(GATE_MODEL_SELECTOR_PATTERN.test('@plan:nope'), false);
+  assert.deepEqual(splitGateModelSelector('anthropic/claude-opus-5-5:HIGH'), { spec:'anthropic/claude-opus-5-5', effort:'high' });
+  assert.deepEqual(splitGateModelSelector('@plan'), { spec:'@plan', effort:null });
+  assert.equal(normalizeGateModelSelector('@plan:Max'), '@plan:max');
   assert.throws(() => buildCommitMessage('feat: add \u0000 thing'), /control characters/);
 });
 

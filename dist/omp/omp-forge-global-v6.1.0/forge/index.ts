@@ -16,6 +16,7 @@ import {
   SKILL_GATES, SKILL_NAME_PATTERN,
   cloneGateSkills, addGateSkill, removeGateSkill, resetGateSkills, formatGateSkills,
   currentSkillGate, injectGateSkillsIntoTask, cloneGateModels, formatGateModels,
+  splitGateModelSelector, THINKING_LEVELS,
   inlineGateSkills, skillAudience, formatQaCounts, executionReminder,
   DEFAULT_AGENT_ASSIGNMENTS,
   cloneAgentAssignments,
@@ -784,13 +785,46 @@ export default function forgeExtension(pi: ExtensionAPI) {
     }
   }
 
-  /** Switch the main session to the configured model once per gate entry, keeping the thinking
-   * level; a manual /model pick inside a gate is kept. Returns false when the gate changed while
+  /** Switch the main session to the configured model once per gate entry.
+   * A `:effort` suffix pins that thinking level; otherwise the current level is kept.
+   * A manual /model pick inside a gate is kept. Returns false when the gate changed while
    * the switch was awaited (cancel, steering, session switch): the caller must not dispatch. */
   async function syncGateModel(ctx: any): Promise<boolean> {
     const snapshot = gateSnapshot(ctx);
     await switchGateModel(ctx);
     return snapshot === null || isCurrentGate(snapshot, ctx);
+  }
+  function effortChoices(model: unknown): string[] | null {
+    if (!model || typeof model !== 'object') return null;
+    const reasoning = 'reasoning' in model && typeof model.reasoning === 'boolean' ? model.reasoning : undefined;
+    const thinking = 'thinking' in model ? model.thinking : undefined;
+    const raw = Array.isArray(thinking) ? thinking : thinking && typeof thinking === 'object' && 'efforts' in thinking ? thinking.efforts : undefined;
+    const listed = Array.isArray(raw)
+      ? raw.filter((level): level is string => typeof level === 'string' && THINKING_LEVELS.some(item => item === level) && level !== 'off' && level !== 'auto')
+      : [];
+    if (reasoning !== true && !listed.length) return null;
+    return ['auto', ...listed, 'off', 'keep'];
+  }
+  function resolveGateSelector(resolve: (selector: string) => unknown, selector: string): { model: unknown; effort: string | null } {
+    const split = splitGateModelSelector(selector);
+    let model = resolve(split.spec);
+    let effort = split.effort;
+    if (!model && effort) {
+      model = resolve(selector);
+      effort = null;
+    }
+    return { model, effort };
+  }
+  function rejectEffort(model: unknown, effort: string | null): string | null {
+    if (!effort || !model || typeof model !== 'object') return null;
+    const provider = 'provider' in model && typeof model.provider === 'string' ? model.provider : '?';
+    const id = 'id' in model && typeof model.id === 'string' ? model.id : '?';
+    if ('reasoning' in model && model.reasoning === false) return `${provider}/${id} has no adjustable effort.`;
+    const choices = effortChoices(model);
+    if (choices && !choices.includes(effort)) {
+      return `Effort "${effort}" is not supported by ${provider}/${id}. Available: ${choices.filter(choice => choice !== 'keep').join(', ')}.`;
+    }
+    return null;
   }
   async function switchGateModel(ctx: any): Promise<void> {
     if (ctx?.agent?.kind !== 'main' || !workflow?.active) return;
@@ -801,30 +835,53 @@ export default function forgeExtension(pi: ExtensionAPI) {
     if (appliedGateKey === key) return;
     const selector = configuredGateModels[gate];
     if (selector == null) { appliedGateKey = key; return; }
-    const model = ctx.models.resolve(selector);
+    const { model, effort } = resolveGateSelector(ctx.models.resolve, selector);
     if (!model) {
       appliedGateKey = key;
       notify(ctx, `Forge ${gate}: model "${selector}" is not available; keeping the current model. Change it with /forge model ${gate} <selector>.`, 'warning');
       return;
     }
     const current = ctx.models.current?.();
-    if (current?.provider === model.provider && current?.id === model.id) { appliedGateKey = key; return; }
+    const same = current?.provider === model.provider && current?.id === model.id;
     const level = pi.getThinkingLevel?.();
-    try {
-      const ok = await pi.setModel(model);
-      if (ok === false) {
-        appliedGateKey = key;
-        notify(ctx, `Forge ${gate}: no credentials for ${model.provider}/${model.id}; keeping the current model.`, 'warning');
+    if (!same) {
+      try {
+        const ok = await pi.setModel(model);
+        if (ok === false) {
+          appliedGateKey = key;
+          notify(ctx, `Forge ${gate}: no credentials for ${model.provider}/${model.id}; keeping the current model.`, 'warning');
+          return;
+        }
+      } catch (err) {
+        // Key stays unset so the next sync point retries.
+        notify(ctx, `Forge ${gate}: could not switch to ${model.provider}/${model.id}: ${String(err)}`, 'warning');
         return;
       }
-    } catch (err) {
-      // Key stays unset so the next sync point retries.
-      notify(ctx, `Forge ${gate}: could not switch to ${model.provider}/${model.id}: ${String(err)}`, 'warning');
-      return;
     }
-    if (level !== undefined) pi.setThinkingLevel?.(level);
+    if (effort) {
+      if (typeof pi.setThinkingLevel !== 'function') {
+        if (!same && level !== undefined) pi.setThinkingLevel?.(level);
+        appliedGateKey = key;
+        notify(ctx, `Forge ${gate}: model ${model.provider}/${model.id} is set, but this host cannot set effort. Thinking level kept.`, 'warning');
+        return;
+      }
+      try {
+        const result = pi.setThinkingLevel(effort);
+        if (result && typeof result.then === 'function') await result;
+      } catch (err) {
+        if (level !== undefined) pi.setThinkingLevel(level);
+        appliedGateKey = key;
+        notify(ctx, `Forge ${gate}: model ${model.provider}/${model.id} is set, but effort "${effort}" was rejected (${String(err)}). Thinking level kept.`, 'warning');
+        return;
+      }
+    } else if (same) {
+      appliedGateKey = key;
+      return;
+    } else if (level !== undefined) {
+      pi.setThinkingLevel?.(level);
+    }
     appliedGateKey = key;
-    notify(ctx, `Forge ${gate}: model ${model.provider}/${model.id}`);
+    notify(ctx, `Forge ${gate}: model ${model.provider}/${model.id}${effort ? ` · effort ${effort}` : ''}`);
   }
 
   /** The proposed plan can no longer be reviewed: return to an unproposed PLAN gate. */
@@ -1511,24 +1568,46 @@ export default function forgeExtension(pi: ExtensionAPI) {
         return;
       }
       if (command.type === 'modelInvalid') return notify(ctx, command.message, 'warning');
-      if (command.type === 'models') return notify(ctx, `Forge gate models (main session; applied when a gate starts; thinking level kept):\n${formatGateModels(configuredGateModels)}\nPick from available models: /forge model <gate>. Subagent models: OMP /agents.`);
+      if (command.type === 'models') return notify(ctx, `Forge gate models (main session; applied when a gate starts; a :effort suffix is applied, otherwise the thinking level is kept):\n${formatGateModels(configuredGateModels)}\nPick a model, then an effort: /forge model <gate>. Subagent models: OMP /agents.`);
       if (command.type === 'modelSet' || command.type === 'modelPick') {
         let selector = command.type === 'modelSet' ? command.selector : null;
+        let keptEffort = false;
         if (command.type === 'modelPick') {
           if (typeof ctx.ui?.select !== 'function' || typeof ctx.models?.list !== 'function') {
-            return notify(ctx, 'Model selection needs the OMP picker and model list. Use /forge model <gate> <@role|provider/model-id|keep> instead.', 'warning');
+            return notify(ctx, 'Model selection needs the OMP picker and model list. Use /forge model <gate> <@role|provider/model-id[:effort]|keep> instead.', 'warning');
           }
           const options = [...new Set<string>(ctx.models.list().map((model: { provider: string; id: string }) => `${model.provider}/${model.id}`))].sort();
           if (!options.length) return notify(ctx, 'No models are available in OMP. Sign in to a provider with /login, then try again.', 'warning');
-          selector = await ctx.ui.select(`Forge · Model for ${command.gate} (current: ${configuredGateModels[command.gate] ?? 'keep'})`, options);
+          selector = await ctx.ui.select(`Forge · 1/2 Model for ${command.gate} (current: ${configuredGateModels[command.gate] ?? 'keep'})`, options);
           if (!options.includes(selector)) return;
+          const chosen = typeof ctx.models?.resolve === 'function' ? ctx.models.resolve(selector) : null;
+          const choices = effortChoices(chosen);
+          if (!choices) keptEffort = true;
+          else {
+            const effort = await ctx.ui.select(
+              `Forge · 2/2 Effort for ${command.gate} · ${selector} (default: auto; Enter accepts; Esc cancels)`,
+              choices,
+              { initialIndex: choices.indexOf('auto') },
+            );
+            if (!choices.includes(effort)) return;
+            if (effort === 'keep') keptEffort = true;
+            else selector = `${selector}:${effort}`;
+          }
         }
-        if (selector !== null && !(typeof ctx.models?.resolve === 'function' && ctx.models.resolve(selector))) {
-          return notify(ctx, `Model "${selector}" not found among authenticated models; nothing changed.`, 'error');
+        if (selector !== null) {
+          if (typeof ctx.models?.resolve !== 'function') {
+            return notify(ctx, `Model "${selector}" not found among authenticated models; nothing changed.`, 'error');
+          }
+          const resolved = resolveGateSelector(ctx.models.resolve, selector);
+          if (!resolved.model) return notify(ctx, `Model "${selector}" not found among authenticated models; nothing changed.`, 'error');
+          const rejected = rejectEffort(resolved.model, resolved.effort);
+          if (rejected) return notify(ctx, `${rejected} Nothing changed.`, 'error');
+          if (!resolved.effort) keptEffort = true;
         }
         try { persistConfig({ gateModels: { ...configuredGateModels, [command.gate]: selector } }); }
         catch (err) { return notify(ctx, `Could not save config: ${String(err)}`, 'error'); }
-        notify(ctx, `Forge ${command.gate} model → ${selector ?? 'keep current model'}.`);
+        const effortNote = selector != null && keptEffort ? ' (thinking level kept)' : '';
+        notify(ctx, `Forge ${command.gate} model → ${selector ?? 'keep current model'}${effortNote}.`);
         // Gate models are live config: a change to the running gate applies now.
         if (workflow?.active && currentSkillGate(workflow.phase, workflow.qaStatus) === command.gate) {
           appliedGateKey = null;

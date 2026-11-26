@@ -75,6 +75,9 @@ test('gate model commands parse, validate and complete', () => {
   assert.deepEqual(parseCommand('model qa @slow'), {type:'modelSet',gate:'qa',selector:'@slow'});
   assert.deepEqual(parseCommand('model Execution anthropic/claude-opus-5-5'), {type:'modelSet',gate:'execution',selector:'anthropic/claude-opus-5-5'});
   assert.deepEqual(parseCommand('model qa keep'), {type:'modelSet',gate:'qa',selector:null});
+  assert.deepEqual(parseCommand('model qa @plan:High'), {type:'modelSet',gate:'qa',selector:'@plan:high'});
+  assert.deepEqual(parseCommand('model execution anthropic/claude-opus-5-5:xhigh'), {type:'modelSet',gate:'execution',selector:'anthropic/claude-opus-5-5:xhigh'});
+  assert.equal(parseCommand('model qa @plan:nope').type, 'modelInvalid');
   assert.equal(parseCommand('model foo @x').type, 'modelInvalid');
   assert.equal(parseCommand('model qa a,b').type, 'modelInvalid');
   assert.deepEqual(parseCommand(values('model ').find(value=>value.trim()==='model planning')), {type:'modelPick',gate:'planning'});

@@ -147,23 +147,25 @@ DELIVERY     @default
 
 ### Step 3 (optional): change a gate
 
-Run `/forge model planning` to pick the planning model from OMP's available models. This saves a Forge-only override; it does not change the OMP role `@plan`. Press Esc to leave the setting unchanged, or run `/forge model planning @plan` to restore the role.
+Run `/forge model planning` to pick the planning model from OMP's available models, then an effort. This saves a Forge-only override; it does not change the OMP role `@plan`. Press Esc on either dialog to leave the setting unchanged, or run `/forge model planning @plan` to restore the role.
 
 ```text
 /forge model qa @plan                              # QA on the plan role model
-/forge model execution anthropic/claude-opus-5-5   # a specific model, no role
+/forge model execution anthropic/claude-opus-5-5   # a specific model; thinking level kept
+/forge model execution anthropic/claude-opus-5-5:high
+/forge model planning @plan:high                   # role model, effort pinned by Forge
 /forge model delivery keep                         # never switch at this gate
 /forge model reset                                 # restore the defaults above
 ```
 
-- A selector is `@<role>` (any role in `modelRoles`, e.g. `@slow`, `@smol` when you define them) or `provider/model-id`.
+- A selector is `@<role>` (any role in `modelRoles`, e.g. `@slow`, `@smol` when you define them) or `provider/model-id`. The picker is two steps: model, then effort. Effort opens on `auto` (Enter accepts it). Move to another level, `off`, or `keep` (no pin). Esc on either step leaves the setting unchanged. A model with no adjustable effort skips the effort step.
 - Forge rejects a model OMP cannot find and leaves the config unchanged.
 - Settings are saved in the Forge `config.json` (`gateModels`) and apply to the running workflow: changing the current gate switches now; other gates switch when they start.
 
 ### Behavior
 
 - Forge switches once when a gate starts, before its first turn. If you pick another model with `/model` inside a gate, Forge keeps your choice until the next gate.
-- The current **thinking level is kept** across switches. A role's `:high` suffix applies only when OMP itself uses that role; Forge keeps the session's thinking level instead.
+- Without a `:effort` suffix, the current **thinking level is kept** across switches. A role's `:high` suffix in OMP config applies only when OMP itself uses that role. Forge applies an effort only when the saved gate selector includes one.
 - If a model is missing or has no credentials, Forge shows a warning and keeps the current model.
 - `/forge off` and the end of delivery do not restore the earlier model.
 - Claude Code does not support gate models; it always uses the session model.

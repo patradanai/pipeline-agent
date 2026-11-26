@@ -107,13 +107,16 @@ modelRoles:
 
 ```text
 /forge model qa @plan                              # QA ใช้โมเดลของ role plan
-/forge model execution anthropic/claude-opus-5-5   # ระบุโมเดลตรง ๆ
+/forge model execution anthropic/claude-opus-5-5   # ระบุโมเดลตรง ๆ คง thinking level
+/forge model execution anthropic/claude-opus-5-5:high
+/forge model planning @plan:high                   # ใช้โมเดลของ role แล้วปัก effort
 /forge model delivery keep                         # Gate นี้ไม่สลับโมเดล
 /forge model reset                                 # กลับค่าเริ่มต้น
 ```
 
+- `/forge model <gate>` เป็น 2 ขั้น: เลือก model แล้วเลือก effort ทันที ค่าที่เลือกไว้คือ `auto` (Enter รับค่านี้) เลื่อนไประดับอื่น, `off`, หรือ `keep` ได้ Esc ที่ขั้นใดขั้นหนึ่งไม่บันทึก
 - สลับครั้งเดียวตอนเริ่ม Gate ก่อน turn แรก ถ้าเลือกเองด้วย `/model` ระหว่าง Gate, Forge ไม่ทับจนกว่าจะเข้า Gate ถัดไป
-- คง thinking level ปัจจุบันไว้ (`:high` ใน role ใช้เฉพาะตอน OMP เรียก role เอง)
+- ไม่ใส่ `:effort` จะคง thinking level ปัจจุบันไว้ (`:high` ใน role ของ OMP ใช้เฉพาะตอน OMP เรียก role เอง)
 - หาโมเดลไม่เจอหรือไม่มี credential: แจ้งเตือนแล้วใช้โมเดลเดิม และ `/forge model` จะไม่บันทึกโมเดลที่หาไม่เจอ
 - `/forge off` หรือจบงานแล้วไม่สลับกลับโมเดลเดิม
 - Claude Code ยังไม่รองรับ ใช้โมเดลของ session เสมอ
