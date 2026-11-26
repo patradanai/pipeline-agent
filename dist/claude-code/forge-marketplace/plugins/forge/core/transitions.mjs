@@ -17,7 +17,7 @@ export function markGateAgent(state, agentName) {
 
 /** Human approved the plan through the platform's approval dialog. */
 export function approvedExecutionState(state, auditReason, reviewedBy = 'native-plan-review') {
-  return { ...state, phase: 'EXECUTE', approved: true, reworkBaseHash: null, reworkBasePlanPath: null, executionObserved: false,
+  return { ...state, phase: 'EXECUTE', approved: true, reworkBaseHash: null, reworkBasePlanPath: null, reworkPlanSeededPath: null, executionObserved: false,
     executionDone: false, executionReminders: 0, executionReport: null,
     gateAgents: { ...(state.gateAgents ?? {}), EXECUTE: [] }, agentRetries: { ...(state.agentRetries ?? {}), EXECUTE: 0 },
     ...(auditReason ? { recoveryAudit: [ ...(state.recoveryAudit ?? []), {
@@ -92,7 +92,7 @@ export function qaReportTransition(state, report, { reportPath, workingTree = nu
     qaOpenItems: report.status === 'PASS' ? null : qaOpenItems(report),
     workingTreeAtQa: workingTree,
     reworkCycles: failed ? (state.reworkCycles ?? 0) + 1 : (state.reworkCycles ?? 0),
-    ...(failed ? { reworkReason: 'QA_FAIL', reworkNotes: null } : {}),
+    ...(failed ? { reworkReason: 'QA_FAIL', reworkNotes: null, reworkPlanSeededPath: null } : {}),
     reworkDecisionPending: failed || evidencePending,
     gateAgents: { ...(state.gateAgents ?? {}), ...(failed ? { PLAN: [], EXECUTE: [], QA: [] } : {}) },
     agentRetries: { ...(state.agentRetries ?? {}), ...(failed ? { PLAN: 0, EXECUTE: 0, QA: 0 } : {}) },
@@ -147,7 +147,7 @@ export function reworkTransition(state) {
   // A pending PLAN proposal is not approved; retain both it and the actual approved base.
   if (state.phase === 'PLAN') return state;
   return { ...state, active: true, approved: false, qaEvidencePending: false, phase: 'PLAN', planWritten: false, planValid: false, approvedPlanHash: null,
-    reworkBaseHash: state.approvedPlanHash ?? null, reworkBasePlanPath: state.planPath ?? null, planPath: null,
+    reworkBaseHash: state.approvedPlanHash ?? null, reworkBasePlanPath: state.planPath ?? null, planPath: null, reworkPlanSeededPath: null,
 
     reworkCycles: (state.reworkCycles ?? 0) + (state.qaStatus === 'BLOCKED' ? 1 : 0), reworkReason: state.qaStatus === 'FAIL' ? 'QA_FAIL' : 'QA_BLOCKED',
     gateAgents: { ...(state.gateAgents ?? {}), PLAN: [] }, agentRetries: { ...(state.agentRetries ?? {}), PLAN: 0 } };
@@ -189,7 +189,7 @@ export function steerTransition(state, text, { at = new Date().toISOString() } =
   // The approved plan becomes the read-only rework base; a revised plan needs new approval.
   return { ...next, ...draft, approved: false, executionObserved: false, executionDone: false, executionReminders: 0, executionReport: null,
     qaStatus: null, qaEvidencePending: false, qaRetries: 0, deliveryRetries: 0,
-    reworkReason: 'STEERING', reworkBaseHash: state.approvedPlanHash ?? null, reworkBasePlanPath: state.planPath ?? null, planPath: null,
+    reworkReason: 'STEERING', reworkBaseHash: state.approvedPlanHash ?? null, reworkBasePlanPath: state.planPath ?? null, planPath: null, reworkPlanSeededPath: null,
     reworkCycles: (state.reworkCycles ?? 0) + 1,
     gateAgents: { ...draft.gateAgents, EXECUTE: [], QA: [] }, agentRetries: { ...draft.agentRetries, EXECUTE: 0, QA: 0 } };
 }

@@ -292,6 +292,7 @@ export function initialState(requirement, slug = planSlug(), assignments = null,
     businessTopics: [],
     testCases: [],
     approvedCommands: [],
+    reworkPlanSeededPath: null,
     planValid: false,
     approvedPlanHash: null,
     requirements: [],
@@ -470,6 +471,7 @@ export function forgePlanPath(state) {
 
 function reworkInstructionTemplate(state) {
   const nextPlanPath = reworkPlanPath(state);
+  const seeded = state.reworkPlanSeededPath === nextPlanPath;
   const steered = state.reworkReason === 'STEERING';
   const trigger = steered
     ? `[OMP FORGE — USER STEERING: REWORK PLAN, NEW APPROVAL REQUIRED]
@@ -486,15 +488,22 @@ QA failure evidence (read this report): ${state.qaReportPath ?? 'not available'}
     : 'Read the QA report and the previous approved plan; trace each fix-scope item to its root cause.';
   const explore = steered
     ? 'explore with glob, grep, read or parallel \`scout\` subagents via the native task tool'
-    : 'targeted lookup only: the previous approved plan already holds the codebase findings, so read just the QA report, that plan and the files the fix-scope items name, with glob, grep and read; spawn \`scout\` subagents only when a root cause lies outside those files';
-  const revise = steered
-    ? 'The revised plan must include remediation tasks and a new test matrix. Do NOT erase unfinished or blocked tests.'
-    : 'Build the revision from the previous approved plan\'s full text, not from scratch: add remediation steps for the fix-scope items to ## Approach, change only their TCs and Verification lines, and keep every other section, passing BIZ/REQ/TC/QG and ID verbatim. Keep the full test matrix; do NOT erase unfinished or blocked tests.';
+    : `targeted lookup only: the previous approved plan already holds the codebase findings, so read just the QA report, ${seeded ? `${nextPlanPath} (Forge's copy of that plan)` : 'that plan'} and the files the fix-scope items name, with glob, grep and read; spawn \`scout\` subagents only when a root cause lies outside those files`;
+  const revise = seeded
+    ? (steered
+      ? `Forge already copied the previous approved plan to ${nextPlanPath}. Revise that copy in place with small edit calls for the steering, add remediation tasks and a new test matrix, and NEVER rewrite the whole file with write. Do NOT erase unfinished or blocked tests.`
+      : `Forge already copied the previous approved plan to ${nextPlanPath}. Revise that copy in place with small edit calls: add remediation steps for the fix-scope items to ## Approach, change only their TCs and Verification lines, add ## QA Rework Changes, and keep every other section, passing BIZ/REQ/TC/QG and ID verbatim. NEVER rewrite the whole file with write. Keep the full test matrix; do NOT erase unfinished or blocked tests.`)
+    : (steered
+      ? 'The revised plan must include remediation tasks and a new test matrix. Do NOT erase unfinished or blocked tests.'
+      : 'Build the revision from the previous approved plan\'s full text, not from scratch: add remediation steps for the fix-scope items to ## Approach, change only their TCs and Verification lines, and keep every other section, passing BIZ/REQ/TC/QG and ID verbatim. Keep the full test matrix; do NOT erase unfinished or blocked tests.');
+  const saveSentence = seeded
+    ? `Edit ${nextPlanPath}; never modify the previous approved plan.`
+    : `Save a revised plan to ${nextPlanPath}; never overwrite the previous approved plan.`;
   const scope = steered ? '' : `\n\nFix scope (non-PASS items from the QA report; fix only these):\n${formatOpenItems(state.qaOpenItems)}`;
   const notes = state.reworkNotes ? `\n\nOperator notes for this fix (given when the operator chose to plan it):\n${state.reworkNotes}` : '';
   return `${trigger}${steeringBlock(state)}${scope}${notes}
 
-Re-plan in Forge plan mode yourself; there is no planner agent. The PLAN gate rules apply: read-only working tree; ${explore}; use the native ask tool only for real preferences. Forge PLAN owns rework drafting. Keep the revision in Forge's own plan mode; do not enter OMP's native Plan Mode, and do not ask the user to change modes. Absolutely no implementation, code edits, test fixes, git add/commit/push or mutating commands. ${compare} Group repairs by Business Topic and Test Case (BIZ/REQ/TC/QG), identify root causes, and preserve stable IDs. Save a revised plan to ${nextPlanPath}; never overwrite the previous approved plan. ${revise} Explicitly explain what changes, why, and what will be reverified.
+Re-plan in Forge plan mode yourself; there is no planner agent. The PLAN gate rules apply: read-only working tree; ${explore}; use the native ask tool only for real preferences. Forge PLAN owns rework drafting. Keep the revision in Forge's own plan mode; do not enter OMP's native Plan Mode, and do not ask the user to change modes. Absolutely no implementation, code edits, test fixes, git add/commit/push or mutating commands. ${compare} Group repairs by Business Topic and Test Case (BIZ/REQ/TC/QG), identify root causes, and preserve stable IDs. ${saveSentence} ${revise} Explicitly explain what changes, why, and what will be reverified.
 
 Keep the sections ## Context, ## Approach, ## Critical files & anchors, ## Verification, ## Assumptions & contingencies, the Forge QA contract sections ## Business Topics, ## Requirement Traceability, ## Business Test Cases, ## Code Quality Gates, and add ## QA Rework Changes; Approach keeps its 'Open decisions:' and 'Migration & rollback:' lines. If the user selects Refine, keep editing the same rework revision at ${nextPlanPath}. After a successful rework-plan write, call forge_plan_propose; Forge opens the human approval dialog when this turn ends. Do not ask the user to submit or advance a gate. Do NOT auto-approve or implement.${planReviewNote(state)}`;
 }

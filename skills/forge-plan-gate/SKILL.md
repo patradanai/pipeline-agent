@@ -17,4 +17,4 @@ forge-audience: lead
   - `- TC-001 | BIZ-001 | REQ-001 | <scenario> | <expected> | <command or check>`
   - `- QG-001: <tests, lint, typecheck or build gate>`
 - IDs are unique; every REQ has a TC under the same BIZ; include negative and edge cases.
-- On a QA rework, change only the items Forge lists and keep every passing section and ID verbatim.
+- On a QA rework, edit the copy of the previous approved plan that Forge prepared, in place with small edits; never rewrite it whole. Change only the items Forge lists and keep every passing section and ID verbatim.
